@@ -30,11 +30,17 @@ enum IpcEndpointState {
     Retired,
 }
 
+/// Mailboxes exist only in the two self-test builds that account for them; every other build,
+/// the system kernel included, has console sinks alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IpcEndpointKind {
+    #[cfg(any(
+        feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        test
+    ))]
     Mailbox,
     ConsoleSink,
-    LifecycleControl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,7 +58,7 @@ impl IpcEndpoint {
         owner_pid: 0,
         generation: 0,
         state: IpcEndpointState::Vacant,
-        kind: IpcEndpointKind::Mailbox,
+        kind: IpcEndpointKind::ConsoleSink,
         last_message_len: 0,
         last_message: [0; IPC_MAX_MESSAGE_BYTES],
     };
@@ -114,16 +120,12 @@ impl EndpointCapabilityHandleParts {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IpcSendError {
+    /// The handle does not name a live console sink.
+    NotConsoleSink,
     InvalidCapability,
     Unauthorized,
     StaleCapability,
     InvalidMessageLength,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct IpcSendResult {
-    pub(crate) bytes_sent: usize,
-    pub(crate) endpoint_kind: IpcEndpointKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +155,11 @@ impl IpcEndpointTable {
         }
     }
 
+    #[cfg(any(
+        feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        test
+    ))]
     pub(super) fn create_endpoint(&mut self, owner_pid: u64) -> Result<usize, &'static str> {
         self.create_endpoint_with_kind(owner_pid, IpcEndpointKind::Mailbox)
     }
@@ -212,13 +219,6 @@ impl IpcEndpointTable {
                     None
                 }
             })
-    }
-
-    pub(super) fn create_lifecycle_control_endpoint(
-        &mut self,
-        owner_pid: u64,
-    ) -> Result<usize, &'static str> {
-        self.create_endpoint_with_kind(owner_pid, IpcEndpointKind::LifecycleControl)
     }
 
     fn create_endpoint_with_kind(
@@ -338,54 +338,90 @@ impl IpcEndpointTable {
         Ok(capability.endpoint_slot as usize)
     }
 
-    /// Delivers a message after the caller has authorized against the M6 `IpcEndpoint` resource.
-    pub(crate) fn send_message_to_endpoint(
+    fn is_live_console_sink(&self, endpoint_slot: usize, endpoint_generation: u16) -> bool {
+        self.endpoints.get(endpoint_slot).is_some_and(|endpoint| {
+            endpoint.state == IpcEndpointState::Active
+                && endpoint.generation == endpoint_generation
+                && endpoint.kind == IpcEndpointKind::ConsoleSink
+        })
+    }
+
+    fn deliver(&mut self, endpoint_slot: usize, message: &[u8]) -> Result<usize, IpcSendError> {
+        let endpoint = self
+            .endpoints
+            .get_mut(endpoint_slot)
+            .ok_or(IpcSendError::StaleCapability)?;
+        endpoint.last_message = [0; IPC_MAX_MESSAGE_BYTES];
+        endpoint.last_message[..message.len()].copy_from_slice(message);
+        endpoint.last_message_len = message.len() as u16;
+        Ok(message.len())
+    }
+
+    /// Delivers a Linux console write after the caller has authorized against the M6
+    /// `IpcEndpoint` resource.
+    pub(crate) fn send_console_message_to_endpoint(
         &mut self,
         endpoint_slot: usize,
         endpoint_generation: u16,
         message: &[u8],
-    ) -> Result<IpcSendResult, IpcSendError> {
+    ) -> Result<usize, IpcSendError> {
         if message.is_empty() || message.len() > IPC_MAX_MESSAGE_BYTES {
             return Err(IpcSendError::InvalidMessageLength);
         }
         let endpoint = self
             .endpoints
-            .get_mut(endpoint_slot)
+            .get(endpoint_slot)
             .ok_or(IpcSendError::StaleCapability)?;
         if endpoint.state != IpcEndpointState::Active || endpoint.generation != endpoint_generation
         {
             return Err(IpcSendError::StaleCapability);
         }
-        endpoint.last_message = [0; IPC_MAX_MESSAGE_BYTES];
-        endpoint.last_message[..message.len()].copy_from_slice(message);
-        endpoint.last_message_len = message.len() as u16;
-        Ok(IpcSendResult {
-            bytes_sent: message.len(),
-            endpoint_kind: endpoint.kind,
-        })
+        if endpoint.kind != IpcEndpointKind::ConsoleSink {
+            return Err(IpcSendError::NotConsoleSink);
+        }
+        self.deliver(endpoint_slot, message)
     }
 
+    /// Syscall 3. The endpoint the handle names must be a live console sink before the
+    /// sender's capability is looked at, so a handle of any other kind is `NotConsoleSink`
+    /// whoever holds it.
+    pub(super) fn send_console_message(
+        &mut self,
+        sender_pid: u64,
+        raw_handle: u64,
+        message: &[u8],
+    ) -> Result<usize, IpcSendError> {
+        if message.is_empty() || message.len() > IPC_MAX_MESSAGE_BYTES {
+            return Err(IpcSendError::InvalidMessageLength);
+        }
+        let handle = EndpointCapabilityHandleParts::decode(raw_handle);
+        if !self.is_live_console_sink(
+            usize::from(handle.endpoint_slot),
+            handle.endpoint_generation,
+        ) {
+            return Err(IpcSendError::NotConsoleSink);
+        }
+        let endpoint_slot = self.lookup_send_capability(sender_pid, raw_handle)?;
+        self.deliver(endpoint_slot, message)
+    }
+
+    /// Kernel-side delivery to an endpoint of any kind; no syscall reaches it.
+    #[cfg(any(
+        feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        test
+    ))]
     pub(super) fn send_message(
         &mut self,
         sender_pid: u64,
         raw_handle: u64,
         message: &[u8],
-    ) -> Result<IpcSendResult, IpcSendError> {
+    ) -> Result<usize, IpcSendError> {
         if message.is_empty() || message.len() > IPC_MAX_MESSAGE_BYTES {
             return Err(IpcSendError::InvalidMessageLength);
         }
         let endpoint_slot = self.lookup_send_capability(sender_pid, raw_handle)?;
-        let endpoint = self
-            .endpoints
-            .get_mut(endpoint_slot)
-            .ok_or(IpcSendError::StaleCapability)?;
-        endpoint.last_message = [0; IPC_MAX_MESSAGE_BYTES];
-        endpoint.last_message[..message.len()].copy_from_slice(message);
-        endpoint.last_message_len = message.len() as u16;
-        Ok(IpcSendResult {
-            bytes_sent: message.len(),
-            endpoint_kind: endpoint.kind,
-        })
+        self.deliver(endpoint_slot, message)
     }
 
     pub(crate) fn resources_for_pid(&self, pid: u64) -> IpcProcessResources {
@@ -472,7 +508,6 @@ impl IpcEndpointTable {
             None => IpcEndpointState::Retired,
         };
         endpoint.owner_pid = 0;
-        endpoint.kind = IpcEndpointKind::Mailbox;
         endpoint.last_message_len = 0;
         endpoint.last_message = [0; IPC_MAX_MESSAGE_BYTES];
         let endpoint_slot_u16 = u16::try_from(endpoint_slot)
@@ -525,13 +560,8 @@ mod tests {
             .expect("grant capability");
 
         assert_eq!(
-            table
-                .send_message(USERSPACE_IPC_TEST_PID, handle, b"hi")
-                .expect("authorized send"),
-            IpcSendResult {
-                bytes_sent: 2,
-                endpoint_kind: IpcEndpointKind::Mailbox,
-            }
+            table.send_message(USERSPACE_IPC_TEST_PID, handle, b"hi"),
+            Ok(2)
         );
         assert_eq!(table.endpoint_message(endpoint_slot), Some(&b"hi"[..]));
         assert_eq!(
@@ -551,17 +581,79 @@ mod tests {
             .expect("grant capability");
 
         assert_eq!(
-            table
-                .send_message(USERSPACE_IPC_TEST_PID, handle, b"hello from pid 1")
-                .expect("authorized console send"),
-            IpcSendResult {
-                bytes_sent: 16,
-                endpoint_kind: IpcEndpointKind::ConsoleSink,
-            }
+            table.send_console_message(USERSPACE_IPC_TEST_PID, handle, b"hello from pid 1"),
+            Ok(16)
         );
         assert_eq!(
             table.endpoint_message(endpoint_slot),
             Some(&b"hello from pid 1"[..])
+        );
+    }
+
+    #[test]
+    fn console_send_refuses_a_mailbox_handle_even_from_its_holder() {
+        let mut table = IpcEndpointTable::new();
+        let mailbox_slot = table
+            .create_endpoint(USERSPACE_IPC_TEST_PID)
+            .expect("create mailbox");
+        let handle = table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, mailbox_slot)
+            .expect("grant capability");
+
+        assert_eq!(
+            table.send_console_message(USERSPACE_IPC_TEST_PID, handle, b"hello"),
+            Err(IpcSendError::NotConsoleSink)
+        );
+        assert_eq!(
+            table.send_console_message_to_endpoint(mailbox_slot, 1, b"hello"),
+            Err(IpcSendError::NotConsoleSink)
+        );
+        assert_eq!(table.endpoint_message(mailbox_slot), Some(&b""[..]));
+        assert_eq!(
+            table.send_message(USERSPACE_IPC_TEST_PID, handle, b"x"),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn console_send_refuses_handles_that_name_no_console_sink() {
+        let mut table = IpcEndpointTable::new();
+        let endpoint_slot = table
+            .create_console_sink(KERNEL_PROCESS_ID)
+            .expect("create console sink");
+        let console_handle = table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
+            .expect("grant capability");
+        let lifecycle_style_handle = console_handle & 0xffff_ffff;
+        for handle in [0, u64::MAX, lifecycle_style_handle] {
+            assert_eq!(
+                table.send_console_message(USERSPACE_IPC_TEST_PID, handle, b"x"),
+                Err(IpcSendError::NotConsoleSink),
+                "handle {handle:#x}"
+            );
+        }
+        assert_eq!(
+            table.send_console_message(USERSPACE_IPC_TEST_PID, console_handle, b"x"),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn console_send_refuses_a_console_sink_after_teardown() {
+        let mut table = IpcEndpointTable::new();
+        let endpoint_slot = table
+            .create_console_sink(KERNEL_PROCESS_ID)
+            .expect("create console sink");
+        let handle = table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
+            .expect("grant capability");
+        table
+            .teardown_endpoint(endpoint_slot)
+            .expect("teardown console sink");
+
+        assert_eq!(
+            table.send_console_message(USERSPACE_IPC_TEST_PID, handle, b"x"),
+            Err(IpcSendError::NotConsoleSink)
         );
     }
 
@@ -576,7 +668,7 @@ mod tests {
             .expect("grant capability");
 
         assert_eq!(
-            table.send_message(USERSPACE_IPC_UNAUTHORIZED_TEST_PID, handle, b"hello"),
+            table.send_console_message(USERSPACE_IPC_UNAUTHORIZED_TEST_PID, handle, b"hello"),
             Err(IpcSendError::Unauthorized)
         );
         assert_eq!(table.endpoint_message(endpoint_slot), Some(&b""[..]));

@@ -64,6 +64,8 @@ In the default image the kernel launches userspace init instead of the two kerne
 [IPC ] console pid=1: [INIT] boot profile=base
 [IPC ] console pid=1: [INIT] started pid=1 services=3
 [IPC ] console pid=1: [INIT] SERVICE_READY from init refused: not a service
+[IPC ] console write refused pid=1 handle=0x10000: not the console sink
+[IPC ] console pid=1: [INIT] console write on the lifecycle handle refused: EBADF
 [IPC ] console pid=1: [INIT] starting service=20736
 [SVC ] authority service=20736 pid=2 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1
 [SVC ] launch service=20736 pid=2 gen=1

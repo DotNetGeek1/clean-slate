@@ -3,7 +3,6 @@
 use super::open_description::ConsoleSinkRef;
 use crate::capability::holder_has_resource_rights;
 use crate::diagnostics::log::kernel_log_fmt;
-use crate::ipc::IpcEndpointKind;
 use crate::ipc::IpcEndpointTable;
 use crate::ipc::IpcSendError;
 use crate::ipc::IPC_MAX_MESSAGE_BYTES;
@@ -31,7 +30,9 @@ pub(crate) const fn console_sink_render_style(
 /// Map an IPC send failure onto a Linux errno for the fd projection path.
 pub(crate) const fn map_ipc_send_error(error: IpcSendError) -> LinuxErrno {
     match error {
-        IpcSendError::InvalidCapability | IpcSendError::StaleCapability => EBADF,
+        IpcSendError::NotConsoleSink
+        | IpcSendError::InvalidCapability
+        | IpcSendError::StaleCapability => EBADF,
         IpcSendError::Unauthorized => EACCES,
         IpcSendError::InvalidMessageLength => EINVAL,
     }
@@ -84,16 +85,14 @@ pub(crate) fn write_console(
     if !holder_has_resource_rights(HolderId(pid), resource, Rights::WRITE) {
         return Err(EACCES);
     }
-    match ipc.send_message_to_endpoint(
+    match ipc.send_console_message_to_endpoint(
         usize::from(sink.endpoint_slot),
         sink.endpoint_generation,
         payload,
     ) {
-        Ok(result) => {
-            if result.endpoint_kind == IpcEndpointKind::ConsoleSink {
-                emit_console_sink_render(console_sink_render_style(personality), pid, payload);
-            }
-            Ok(result.bytes_sent)
+        Ok(bytes_sent) => {
+            emit_console_sink_render(console_sink_render_style(personality), pid, payload);
+            Ok(bytes_sent)
         }
         Err(error) => Err(map_ipc_send_error(error)),
     }

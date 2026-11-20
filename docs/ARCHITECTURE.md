@@ -418,6 +418,8 @@ The first IPC primitive should keep policy narrow and explicit:
 
 This initial implementation uses copying and intentionally defers shared-memory/zero-copy optimization to later milestones.
 
+Syscall 3 (`SYSCALL_NR_IPC_SEND`) is native console output and nothing else (#220): init, the services, the compositor, the desktop shell and native apps write their `[IPC ] console pid=N: …` lines through it, and messages between processes go through the service port (syscall 17). It accepts a handle only if the endpoint the handle names is a live console sink, and checks that before the sender's capability: any other handle is `EBADF`, and the kernel records `[IPC ] console write refused pid=N handle=…: not the console sink`. A console capability the caller does not hold is `EACCES` and a revoked one `ESTALE`. The Linux console write (`write(2)` on a console descriptor) applies the same rule. Mailbox endpoints, and kernel delivery to them, compile only into the `m3-resources-self-test` and `m4-crash-service-self-test` builds, which use them to account for per-process IPC resources; every other build, the system kernel included, has console sinks only. At boot, init calls syscall 3 with its lifecycle handle, and `test-system-boot` requires the kernel's refusal record for init's pid and fails if the probe text reaches serial.
+
 ## M4.1 service lifecycle protocol direction
 
 M4.1 defines the shared contract between the userspace supervisor, supervised services, and the kernel lifecycle-control path before implementation lanes fan out. The canonical types and wire encoding live in the workspace crate `clean-slate-service-lifecycle` (`service-lifecycle/`).
