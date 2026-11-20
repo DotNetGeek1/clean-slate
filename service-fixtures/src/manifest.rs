@@ -699,7 +699,10 @@ mod tests {
                 "{grant:?}"
             );
         }
-        assert!(grant_supported_by_image(Grant::Console, ServiceImage::Audit));
+        assert!(grant_supported_by_image(
+            Grant::Console,
+            ServiceImage::Audit
+        ));
         assert!(grant_supported_by_image(
             Grant::AuditReader,
             ServiceImage::Audit

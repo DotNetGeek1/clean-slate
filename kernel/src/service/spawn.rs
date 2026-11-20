@@ -135,9 +135,6 @@ include!(concat!(env!("OUT_DIR"), "/init_userspace_entry.rs"));
 #[cfg(clean_slate_system_init)]
 const INIT_USERSPACE_IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init_userspace.bin"));
 #[cfg(clean_slate_system_init)]
-const INIT_STACK_ADDRESS: u64 =
-    clean_slate_service_fixtures::init_bootstrap::INIT_BOOTSTRAP_ADDRESS + PAGE_SIZE;
-#[cfg(clean_slate_system_init)]
 const INIT_STACK_PAGES: u64 = 8;
 /// Fixed upper bound on init's PT_LOAD pages, like `STORAGE_SERVICE_MAX_CODE_PAGES`.
 #[cfg(clean_slate_system_init)]
@@ -149,6 +146,23 @@ const _: () = assert!(INIT_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDRESS
 #[cfg(clean_slate_system_init)]
 const _: () = assert!(
     INIT_USERSPACE_MAPPED_CODE_PAGES + (INIT_STACK_PAGES as usize)
+        < crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
+);
+
+#[cfg(clean_slate_system_init)]
+include!(concat!(env!("OUT_DIR"), "/audit_userspace_entry.rs"));
+#[cfg(clean_slate_system_init)]
+const AUDIT_USERSPACE_IMAGE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/audit_userspace.bin"));
+#[cfg(clean_slate_system_init)]
+const AUDIT_STACK_PAGES: u64 = 4;
+#[cfg(clean_slate_system_init)]
+const _: () = assert!(AUDIT_USERSPACE_MAPPED_CODE_PAGES <= INIT_MAX_CODE_PAGES);
+#[cfg(clean_slate_system_init)]
+const _: () = assert!(AUDIT_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDRESS);
+#[cfg(clean_slate_system_init)]
+const _: () = assert!(
+    AUDIT_USERSPACE_MAPPED_CODE_PAGES + (AUDIT_STACK_PAGES as usize)
         < crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
 );
 
@@ -349,6 +363,9 @@ pub(crate) enum BuiltinServiceImage {
     /// #218 S5 serial-console BusyBox shell launched by `service::system_shell`.
     #[cfg(clean_slate_system_init)]
     LinuxShell,
+    /// #219 capability audit log reader.
+    #[cfg(clean_slate_system_init)]
+    AuditUserspacePayload,
     /// #118 desktop images: the system build's desktop rows.
     #[cfg(clean_slate_desktop)]
     Desktop(super::desktop_image::DesktopRole),
@@ -406,6 +423,10 @@ impl BuiltinServiceImage {
             id if id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID.0 => Self::LinuxHello,
             #[cfg(clean_slate_system_init)]
             id if id == clean_slate_service_fixtures::SYSTEM_SHELL_SERVICE_ID.0 => Self::LinuxShell,
+            #[cfg(clean_slate_system_init)]
+            id if id == clean_slate_service_fixtures::AUDIT_SERVICE_ID.0 => {
+                Self::AuditUserspacePayload
+            }
             _ => Self::ImmediateExit,
         }
     }
@@ -541,6 +562,10 @@ pub(crate) fn launch_builtin_service(
         #[cfg(clean_slate_system_init)]
         BuiltinServiceImage::LinuxShell => {
             super::system_shell::launch(allocator, kernel_stack_top, scheduler_slot, context)
+        }
+        #[cfg(clean_slate_system_init)]
+        BuiltinServiceImage::AuditUserspacePayload => {
+            launch_audit_userspace_service(allocator, kernel_stack_top, scheduler_slot, context)
         }
         #[cfg(clean_slate_desktop)]
         BuiltinServiceImage::Desktop(role) => {
@@ -877,6 +902,10 @@ fn launch_single_page_service(
             BuiltinServiceImage::StorageUserspacePayload => {
                 return Err("storage userspace image must use the storage launch path");
             }
+            #[cfg(clean_slate_system_init)]
+            BuiltinServiceImage::AuditUserspacePayload => {
+                return Err("audit userspace image must use the audit launch path");
+            }
             #[cfg(any(
                 feature = "m6-object-self-test",
                 feature = "m6-process-control-self-test",
@@ -1009,6 +1038,16 @@ impl crate::service::grants::BootstrapGrantAuthority for KernelBootstrapGrants {
             .map(|role| role.encode())
             .map_err(|_| "object service role grant failed")
     }
+
+    fn grant_audit_reader(&mut self, pid: u64) -> Result<u64, &'static str> {
+        crate::capability::audit::grant_audit_reader(clean_slate_capability::HolderId(pid))
+            .map(|handle| handle.encode())
+            .map_err(|_| "audit reader grant failed")
+    }
+
+    fn grant_console(&mut self, pid: u64) -> Result<u64, &'static str> {
+        unsafe { crate::ipc::endpoint_table_mut() }.grant_console_capability_for_pid(pid)
+    }
 }
 
 /// Launches userspace init (`clean-slate-supervisor-init`, #218 S3b) directly on
@@ -1028,6 +1067,87 @@ pub(crate) fn launch_init_image(
         &'static str,
     >,
 ) -> Result<SpawnedServiceInstance, &'static str> {
+    use clean_slate_service_fixtures::init_bootstrap::INIT_BOOTSTRAP_ADDRESS;
+
+    launch_bootstrap_page_image(
+        allocator,
+        kernel_stack_top,
+        scheduler_slot,
+        &BootstrapPageImage {
+            bytes: INIT_USERSPACE_IMAGE,
+            segments: &INIT_USERSPACE_SEGMENTS,
+            entry_offset: INIT_USERSPACE_ENTRY_OFFSET,
+            stack_pages: INIT_STACK_PAGES,
+            bootstrap_address: INIT_BOOTSTRAP_ADDRESS,
+        },
+        bootstrap_for,
+    )
+}
+
+/// Launches the audit service (`clean-slate-audit-userspace`, #219). Its two handles come from
+/// its manifest row; a row without either cannot launch it.
+#[cfg(clean_slate_system_init)]
+#[inline(never)]
+fn launch_audit_userspace_service(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+    context: LaunchContext,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    use crate::service::grants::apply_bootstrap_grants;
+    use clean_slate_service_fixtures::audit_service::{
+        AuditServiceBootstrap, AUDIT_SERVICE_BOOTSTRAP_ADDRESS,
+    };
+
+    let spec = context.spec.ok_or("audit service has no manifest row")?;
+    launch_bootstrap_page_image(
+        allocator,
+        kernel_stack_top,
+        scheduler_slot,
+        &BootstrapPageImage {
+            bytes: AUDIT_USERSPACE_IMAGE,
+            segments: &AUDIT_USERSPACE_SEGMENTS,
+            entry_offset: AUDIT_USERSPACE_ENTRY_OFFSET,
+            stack_pages: AUDIT_STACK_PAGES,
+            bootstrap_address: AUDIT_SERVICE_BOOTSTRAP_ADDRESS,
+        },
+        |pid| {
+            let handles = apply_bootstrap_grants(spec.grants, pid, &mut KernelBootstrapGrants)?;
+            Ok(AuditServiceBootstrap {
+                self_pid: pid,
+                audit_capability: handles
+                    .audit_reader
+                    .ok_or("audit service row grants no AUDIT_READ")?,
+                console_capability: handles
+                    .console
+                    .ok_or("audit service row grants no console")?,
+            })
+        },
+    )
+}
+
+/// An embedded native image that reads a `repr(C)` bootstrap page, with its stack directly
+/// above that page.
+#[cfg(clean_slate_system_init)]
+struct BootstrapPageImage {
+    bytes: &'static [u8],
+    segments: &'static [crate::mm::image_loader::EmbeddedSegment],
+    entry_offset: u64,
+    stack_pages: u64,
+    bootstrap_address: u64,
+}
+
+/// Maps `image` at the service code address, its stack and its bootstrap page, then registers
+/// it Ready on `scheduler_slot`. `bootstrap_for` gets the pid before the process can run, so
+/// every handle it grants is in the page before the first instruction.
+#[cfg(clean_slate_system_init)]
+fn launch_bootstrap_page_image<B: Copy>(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+    image: &BootstrapPageImage,
+    bootstrap_for: impl FnOnce(u64) -> Result<B, &'static str>,
+) -> Result<SpawnedServiceInstance, &'static str> {
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::mm::address_space::map_process_page;
     use crate::mm::image_loader::map_embedded_segments;
@@ -1035,16 +1155,19 @@ pub(crate) fn launch_init_image(
     use crate::mm::paging::zero_page;
     use crate::mm::phys_to_virt;
     use crate::process::id_allocator::id_allocator_mut;
-    use clean_slate_service_fixtures::init_bootstrap::{InitBootstrap, INIT_BOOTSTRAP_ADDRESS};
     use core::ptr;
     use x86_64::structures::paging::PageTableFlags;
     use x86_64::VirtAddr;
 
+    const { assert!(core::mem::size_of::<B>() <= PAGE_SIZE as usize) };
+    let stack_address = image.bootstrap_address + PAGE_SIZE;
     with_process_address_space(
         allocator,
         VirtAddr::new(SERVICE_USER_CODE_ADDRESS),
         |allocator, slot| {
-            let address_space = slot.as_mut().ok_or("init address space missing")?;
+            let address_space = slot
+                .as_mut()
+                .ok_or("bootstrap image address space missing")?;
             let (pid, tid) = {
                 let ids = unsafe { id_allocator_mut() };
                 (ids.allocate_pid()?, ids.allocate_tid()?)
@@ -1053,26 +1176,21 @@ pub(crate) fn launch_init_image(
                 address_space,
                 allocator,
                 SERVICE_USER_CODE_ADDRESS,
-                INIT_USERSPACE_IMAGE,
-                &INIT_USERSPACE_SEGMENTS,
+                image.bytes,
+                image.segments,
             )?;
-            map_user_stack_pages(
-                address_space,
-                allocator,
-                INIT_STACK_ADDRESS,
-                INIT_STACK_PAGES,
-            )?;
+            map_user_stack_pages(address_space, allocator, stack_address, image.stack_pages)?;
             let data_frame = allocator
                 .allocate_page()
-                .ok_or("allocator could not provide the init bootstrap page")?;
+                .ok_or("allocator could not provide a bootstrap page")?;
             zero_page(data_frame);
             let bootstrap = bootstrap_for(pid)?;
             unsafe {
-                ptr::write(phys_to_virt(data_frame) as *mut InitBootstrap, bootstrap);
+                ptr::write(phys_to_virt(data_frame) as *mut B, bootstrap);
             }
             map_process_page(
                 address_space,
-                INIT_BOOTSTRAP_ADDRESS,
+                image.bootstrap_address,
                 data_frame,
                 PageTableFlags::PRESENT
                     | PageTableFlags::WRITABLE
@@ -1080,11 +1198,11 @@ pub(crate) fn launch_init_image(
                     | PageTableFlags::USER_ACCESSIBLE,
                 allocator,
             )?;
-            let user_stack_pointer = INIT_STACK_ADDRESS + INIT_STACK_PAGES * PAGE_SIZE;
-            let entry_rip = SERVICE_USER_CODE_ADDRESS + INIT_USERSPACE_ENTRY_OFFSET;
+            let user_stack_pointer = stack_address + image.stack_pages * PAGE_SIZE;
+            let entry_rip = SERVICE_USER_CODE_ADDRESS + image.entry_offset;
             let saved_stack_pointer =
                 build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
-            let address_space = slot.take().ok_or("init address space missing")?;
+            let address_space = slot.take().ok_or("bootstrap image address space missing")?;
             register_spawned_process_checked(
                 allocator,
                 address_space,

@@ -12,6 +12,10 @@ use clean_slate_service_lifecycle::InstanceGeneration;
 pub(crate) trait BootstrapGrantAuthority {
     /// Returns the encoded object-service role handle.
     fn grant_object_service_role(&mut self, pid: u64) -> Result<u64, &'static str>;
+    /// Returns the encoded `AUDIT_READ` handle on the audit log.
+    fn grant_audit_reader(&mut self, pid: u64) -> Result<u64, &'static str>;
+    /// Returns the console IPC send handle.
+    fn grant_console(&mut self, pid: u64) -> Result<u64, &'static str>;
 }
 
 /// Which client role a graphics role grant gives on the live compositor's port.
@@ -42,6 +46,8 @@ pub(crate) trait InstanceGrantAuthority {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BootstrapGrantHandles {
     pub(crate) object_service_role: Option<u64>,
+    pub(crate) audit_reader: Option<u64>,
+    pub(crate) console: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +56,8 @@ pub(crate) struct GrantFailure {
     pub(crate) message: &'static str,
 }
 
+/// Only native images with a bootstrap page call this. Linux rows and desktop rows apply
+/// `Console` on their own launch paths.
 pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
     grants: &[Grant],
     pid: u64,
@@ -61,6 +69,12 @@ pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
             Grant::ObjectServiceRole => {
                 handles.object_service_role = Some(authority.grant_object_service_role(pid)?);
             }
+            Grant::AuditReader => {
+                handles.audit_reader = Some(authority.grant_audit_reader(pid)?);
+            }
+            Grant::Console => {
+                handles.console = Some(authority.grant_console(pid)?);
+            }
             Grant::BlockDevice
             | Grant::NetworkService
             | Grant::GraphicsPort
@@ -68,9 +82,8 @@ pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
             | Grant::InputSeat
             | Grant::GraphicsShellRole
             | Grant::GraphicsAppRole => {}
-            // Applied by the Linux launch path while it builds the process, or written into a
-            // desktop image's launch page.
-            Grant::Console | Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {}
+            // Applied by the Linux launch path while it builds the process.
+            Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {}
         }
     }
     Ok(handles)
@@ -92,6 +105,7 @@ pub(crate) fn apply_instance_grants<A: InstanceGrantAuthority>(
             Grant::GraphicsShellRole => authority.grant_graphics_role(pid, GraphicsRole::Shell),
             Grant::GraphicsAppRole => authority.grant_graphics_role(pid, GraphicsRole::App),
             Grant::ObjectServiceRole
+            | Grant::AuditReader
             | Grant::Console
             | Grant::ConsoleInput
             | Grant::TmpObjects
@@ -114,6 +128,8 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Call {
         ObjectServiceRole(u64),
+        AuditReader(u64),
+        Console(u64),
         BlockDevice(u64),
         NetworkService(u64, InstanceGeneration),
         GraphicsPort(u64),
@@ -142,6 +158,16 @@ mod tests {
         fn grant_object_service_role(&mut self, pid: u64) -> Result<u64, &'static str> {
             self.calls.push(Call::ObjectServiceRole(pid));
             self.outcome(Grant::ObjectServiceRole).map(|()| 0xa0b0)
+        }
+
+        fn grant_audit_reader(&mut self, pid: u64) -> Result<u64, &'static str> {
+            self.calls.push(Call::AuditReader(pid));
+            self.outcome(Grant::AuditReader).map(|()| 0xad17)
+        }
+
+        fn grant_console(&mut self, pid: u64) -> Result<u64, &'static str> {
+            self.calls.push(Call::Console(pid));
+            self.outcome(Grant::Console).map(|()| 0xc0e5)
         }
     }
 
@@ -260,15 +286,34 @@ mod tests {
         );
     }
 
+    /// The Linux launch path applies its own grants and never builds a native bootstrap page.
     #[test]
-    fn linux_process_grants_reach_no_native_grant_call() {
+    fn linux_process_grants_reach_no_native_instance_grant_call() {
         let mut recorder = Recorder::default();
-        let handles = apply_both(
+        apply_instance_grants(
             grants_for(SYSTEM_MANIFEST, SYSTEM_SHELL_SERVICE_ID),
+            7,
+            InstanceGeneration(3),
             &mut recorder,
-        );
+        )
+        .unwrap();
         assert!(recorder.calls.is_empty());
-        assert_eq!(handles, BootstrapGrantHandles::default());
+    }
+
+    #[test]
+    fn the_audit_row_is_given_its_reader_and_console_handles_at_bootstrap() {
+        use clean_slate_service_fixtures::AUDIT_SERVICE_ID;
+        let mut recorder = Recorder::default();
+        let handles = apply_both(grants_for(SYSTEM_MANIFEST, AUDIT_SERVICE_ID), &mut recorder);
+        assert_eq!(recorder.calls, [Call::AuditReader(7), Call::Console(7)]);
+        assert_eq!(
+            handles,
+            BootstrapGrantHandles {
+                object_service_role: None,
+                audit_reader: Some(0xad17),
+                console: Some(0xc0e5),
+            }
+        );
     }
 
     #[test]
@@ -300,10 +345,16 @@ mod tests {
             COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
         };
 
+        // Desktop images get their console handle in their launch page, not a bootstrap page.
         let calls = |id| {
             let mut recorder = Recorder::default();
-            let handles = apply_both(grants_for(SYSTEM_DESKTOP_MANIFEST, id), &mut recorder);
-            assert_eq!(handles, BootstrapGrantHandles::default());
+            apply_instance_grants(
+                grants_for(SYSTEM_DESKTOP_MANIFEST, id),
+                7,
+                InstanceGeneration(3),
+                &mut recorder,
+            )
+            .unwrap();
             recorder.calls
         };
         assert_eq!(

@@ -3177,6 +3177,7 @@ fn build_network_userspace(release: bool) -> Result<(), XtaskError> {
     Ok(())
 }
 
+/// Init and the audit service: the supervisor-package images only the default image embeds.
 fn build_init_userspace(release: bool) -> Result<(), XtaskError> {
     let mut cmd = Command::new("cargo");
     cmd.arg("build")
@@ -3184,6 +3185,8 @@ fn build_init_userspace(release: bool) -> Result<(), XtaskError> {
         .arg("clean-slate-supervisor")
         .arg("--bin")
         .arg("clean-slate-supervisor-init")
+        .arg("--bin")
+        .arg("clean-slate-audit-userspace")
         .arg("--features")
         .arg("userspace")
         .arg("--target")

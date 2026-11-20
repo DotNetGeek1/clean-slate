@@ -413,6 +413,15 @@ mod tests {
     }
 
     #[test]
+    fn read_through_only_moves_forward() {
+        let mut log = BoundedAuditLog::<8>::new();
+        assert_eq!(log.read_through(), 0);
+        log.mark_read(5);
+        log.mark_read(3);
+        assert_eq!(log.read_through(), 5);
+    }
+
+    #[test]
     fn a_saturated_count_starts_a_new_record() {
         let mut log = BoundedAuditLog::<8>::new();
         let nearly_full = allowed_use(1, 0).with_count(u32::MAX as usize - 1);

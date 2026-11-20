@@ -165,7 +165,7 @@ jobs:
         env:
           RUSTC_BOOTSTRAP: "1"
         run: |
-          for bin in clean-slate-supervisor-userspace clean-slate-supervisor-restart-policy-userspace clean-slate-supervisor-recovery-userspace clean-slate-m6-fixture-userspace clean-slate-supervisor-init; do
+          for bin in clean-slate-supervisor-userspace clean-slate-supervisor-restart-policy-userspace clean-slate-supervisor-recovery-userspace clean-slate-m6-fixture-userspace clean-slate-supervisor-init clean-slate-audit-userspace; do
             cargo clippy -p clean-slate-supervisor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           done
           for bin in clean-slate-compositor-userspace clean-slate-compositor-client-userspace; do
@@ -188,7 +188,7 @@ jobs:
 
       # Every kernel build embeds the storage and network ELFs (kernel/build.rs), including
       # clippy, the bare kernel build, and host tests below; the featureless build (the default
-      # image, also the host tests) embeds init as well. The M4 supervisor and recovery
+      # image, also the host tests) embeds init and the audit service as well. The M4 supervisor and recovery
       # self-tests embed their supervisor ELFs, and the M6 fixture self-tests (with
       # m7-net-caps, m9-linux-fs, m9-userspace, m10-port and m10-shared-buffer) the M6 fixture.
       - name: Build embedded userspace images
@@ -197,7 +197,7 @@ jobs:
         run: |
           cargo build -p clean-slate-store --bin clean-slate-storage-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release
           cargo build -p clean-slate-net-service --bin clean-slate-network-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release
-          for bin in clean-slate-supervisor-init clean-slate-supervisor-userspace clean-slate-supervisor-recovery-userspace clean-slate-m6-fixture-userspace; do
+          for bin in clean-slate-supervisor-init clean-slate-audit-userspace clean-slate-supervisor-userspace clean-slate-supervisor-recovery-userspace clean-slate-m6-fixture-userspace; do
             cargo build -p clean-slate-supervisor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
           done
 
