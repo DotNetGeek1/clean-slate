@@ -1,7 +1,7 @@
 //! M6.7 bounded audit-event ring (`AuditSink` implementation, host-testable).
 
 use crate::audit::{AuditEvent, AuditKind, AuditSink};
-use crate::HolderId;
+use crate::{HolderId, ResourceClass, Rights};
 
 /// Most records one holder ([`AuditEvent::charged_holder`]) may have in the ring at once
 /// (#219). The kernel's own records, granted to or revoking the kernel, share one budget.
@@ -27,6 +27,8 @@ pub enum Recorded {
 /// An allowed use identical to the same holder's newest record, which no reader has been
 /// handed yet ([`Self::mark_read`]), is merged into it: the record's `count` becomes the
 /// number of uses it stands for (2, 3, ...; saturating, after which a new record starts).
+/// A read of this log merges even into a record already handed over, so a reader polling an
+/// idle log holds one record and consumes no sequences.
 /// Merging consumes no sequence and no space.
 ///
 /// Nothing is lost silently: every stored record consumes a sequence; [`Self::dropped`]
@@ -112,7 +114,7 @@ impl<const N: usize> BoundedAuditLog<N> {
     }
 
     /// `event` is an allowed use identical to `earlier` (but for sequence, time and count),
-    /// `earlier` has not been read, and its count has room.
+    /// `earlier` has not been read (or both are reads of this log), and its count has room.
     fn is_repeat(&self, earlier: &AuditEvent, event: &AuditEvent) -> bool {
         let comparable = |e: &AuditEvent| AuditEvent {
             sequence: 0,
@@ -122,7 +124,7 @@ impl<const N: usize> BoundedAuditLog<N> {
         };
         event.kind == AuditKind::Authorize
             && event.is_allowed()
-            && earlier.sequence > self.read_through
+            && (earlier.sequence > self.read_through || is_log_read(event))
             && earlier.count < u32::MAX
             && comparable(earlier) == comparable(event)
     }
@@ -217,6 +219,13 @@ impl<const N: usize> BoundedAuditLog<N> {
             .find(|event| event.sequence == sequence)
             .copied()
     }
+}
+
+/// A reader's use of its `AUDIT_READ` capability. A reader that has been handed its own read
+/// record already knows of that read, so later identical reads may still merge into it;
+/// otherwise every idle poll would store a record for the next poll to read.
+fn is_log_read(event: &AuditEvent) -> bool {
+    event.class == ResourceClass::Audit && event.requested == Rights::AUDIT_READ
 }
 
 impl<const N: usize> AuditSink for BoundedAuditLog<N> {
@@ -410,6 +419,49 @@ mod tests {
             "what the reader saw stays as it was"
         );
         assert_eq!(log.record_event(allowed_use(1, 0)), Recorded::Merged(2));
+    }
+
+    #[test]
+    fn a_reader_polling_an_idle_log_holds_one_record_and_takes_no_sequences() {
+        let reader = HolderId(3);
+        let read = crate::audit::event_for(
+            0,
+            reader,
+            ResourceRef {
+                class: ResourceClass::Audit,
+                id: 0,
+                instance_generation: 0,
+            },
+            Rights::AUDIT_READ,
+            CapabilityHandle::new(0, 1),
+            0,
+            Ok(()),
+        );
+        let mut log = BoundedAuditLog::<64>::new();
+        log.record(use_event(1));
+        let mut since = 1;
+        let mut poll = |log: &mut BoundedAuditLog<64>| {
+            log.record(read);
+            let mut buf = [AuditEvent::EMPTY; 8];
+            let (count, next_since) = log.read_from(since, &mut buf);
+            if count > 0 {
+                log.mark_read(next_since - 1);
+            }
+            since = next_since;
+            count
+        };
+        assert_eq!(poll(&mut log), 2, "the denial and the first read");
+        let after_first = log.next_sequence();
+        for _ in 0..100 {
+            assert_eq!(poll(&mut log), 0);
+        }
+        assert_eq!(log.next_sequence(), after_first);
+        assert_eq!(log.held_by(reader), 1);
+        assert_eq!(log.get(2).unwrap().count, 101);
+
+        log.record(use_event(1));
+        assert_eq!(poll(&mut log), 1, "new records still reach the reader");
+        assert_eq!(log.held_by(reader), 1);
     }
 
     #[test]
