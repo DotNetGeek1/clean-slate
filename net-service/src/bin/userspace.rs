@@ -920,7 +920,8 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         bootstrap.tls_heap_checkpoint = heap_checkpoint as u64;
         bootstrap.tls_heap_after_last = heap_checkpoint as u64;
     }
-    // Every stream is forked; dropping the root zeroes its key so it cannot be recovered later.
+    // Every stream is forked; dropping the root zeroes its own key storage. Copies left in dead
+    // stack memory (block-function locals, by-value moves) are not wiped.
     drop(rng);
     let Some(service) = (unsafe { service_state().map(|state| &mut *state) }) else {
         finish();

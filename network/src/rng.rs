@@ -155,7 +155,7 @@ impl NetRng {
             self.refill();
         }
         let word = self.batch[self.next_word];
-        self.batch[self.next_word] = 0;
+        wipe(core::slice::from_mut(&mut self.batch[self.next_word]));
         self.next_word += 1;
         word
     }
