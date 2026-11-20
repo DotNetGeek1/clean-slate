@@ -70,6 +70,9 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long the held connection must stay unanswered, with no prompt, before the fault: the
 /// reader is then parked in its read, not still on its way to it.
 const HOLD_SETTLE: Duration = Duration::from_secs(1);
+/// How long the booted system must stay settled before the flood: several of the audit service's
+/// one-second polls of an idle log, which must leave the log holding one record of its reads.
+const READER_POLLS_SETTLE: Duration = Duration::from_secs(3);
 /// BusyBox `wget` when the response read fails with `ECONNRESET`.
 const RESET_ERROR: &str = "wget: error getting response: Connection reset by peer";
 const HOOKS_BANNER: &str =
@@ -693,12 +696,13 @@ fn drive(
         let now = Instant::now();
         match progress {
             Ok(next) => {
-                let must_hold = states
-                    .len()
-                    .checked_sub(1)
-                    .is_some_and(|index| STEPS[index].expect == Expect::Held);
+                let settle = match states.len().checked_sub(1) {
+                    None => READER_POLLS_SETTLE,
+                    Some(index) if STEPS[index].expect == Expect::Held => HOLD_SETTLE,
+                    Some(_) => Duration::ZERO,
+                };
                 let since = *passing_since.get_or_insert(now);
-                if must_hold && now.duration_since(since) < HOLD_SETTLE {
+                if now.duration_since(since) < settle {
                     continue;
                 }
                 passing_since = None;
