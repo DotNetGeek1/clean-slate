@@ -1117,7 +1117,9 @@ mod tests {
         let audit_ready = "[SVC ] ready service=21760 ";
         text = text.replace(
             audit_ready,
-            &format!("[IPC ] console pid=8: [ADT ] drained through=60 records=20 denied=0 refused=0 lost=40\n{audit_ready}"),
+            &format!(
+                "[IPC ] console pid=8: [ADT ] drained through=60 records=20 lost=40\n{audit_ready}"
+            ),
         );
         text.push_str(
             "[IPC ] console pid=5: [COMP] started output=1280x800 tier=Q1\n\

@@ -776,7 +776,7 @@ mod tests {
              {audit_authority}\n\
              [SVC ] launch service=21760 pid=7 gen=1\n\
              [IPC ] console pid=7: [ADT ] lost first=1 missing=40\n\
-             [IPC ] console pid=7: [ADT ] drained through=60 records=20 denied=0 refused=0 lost=40\n\
+             [IPC ] console pid=7: [ADT ] drained through=60 records=20 lost=40\n\
              [SVC ] ready service=21760 pid=7 gen=1 source=live-instance kernel-observed audit-read-through=60 audit-next=61 audit-dropped=40 service-reported first-drain-records=20\n\
              [IPC ] console pid=3: [INIT] service=21760 ready gen=1\n\
              [SVC ] ready service=20736 pid=4 gen=1 source=live-instance kernel-observed block-write-requests={writes} service-reported formatted={formatted} store-generation=1\n\
@@ -862,17 +862,14 @@ mod tests {
             ("audit-read-through=60", "audit-read-through=59"),
             ("audit-read-through=60", "audit-read-through=0"),
             ("audit-next=61", "audit-next=60"),
-            (
-                "records=20 denied=0 refused=0 lost=40",
-                "records=20 denied=0 refused=0 lost=39",
-            ),
+            ("records=20 lost=40", "records=20 lost=39"),
             ("first-drain-records=20", "first-drain-records=21"),
             ("[ADT ] drained", "[ADT ] skimmed"),
         ] {
             let text = transcript(1, 9).replace(from, to);
             assert!(validate_boot(&text, Formatted::Yes).is_err(), "{to}");
         }
-        let drained = "[IPC ] console pid=7: [ADT ] drained through=60 records=20 denied=0 refused=0 lost=40\n";
+        let drained = "[IPC ] console pid=7: [ADT ] drained through=60 records=20 lost=40\n";
         let late = format!("{}{drained}", transcript(1, 9).replace(drained, ""));
         assert!(validate_boot(&late, Formatted::Yes)
             .unwrap_err()

@@ -6,13 +6,13 @@
 //! for. Gaps come back as `lost` records. The drain also checks that the sequences it is handed
 //! are contiguous, so a gap the kernel did not report is a `FAIL` line rather than silence.
 //!
-//! Lines, each at most one console message:
+//! Lines, each at most one console message, and ending in `~` where one had to be cut:
 //! - `[ADT ] lost first=S missing=N` for each lost run;
 //! - `[ADT ] seq=S actor=A OUTCOME [KIND] CLASS [subject=H]` for each denied or refused record,
 //!   naming `KIND` only when it is not `authorize`, and `subject=H` in place of the actor when
 //!   the kernel acted;
-//! - `[ADT ] drained through=S records=R denied=D refused=F lost=L`, which the service prints
-//!   after its first drain and after any drain that printed one of the above.
+//! - `[ADT ] drained through=S records=R lost=L`, which the service prints after its first
+//!   drain and after any drain that printed one of the above.
 
 use core::fmt::{self, Write};
 use core::mem::offset_of;
@@ -25,7 +25,7 @@ use clean_slate_capability::{
 pub const AUDIT_READ_BATCH: usize = 8;
 /// Reads one drain makes at most; a log still not caught up is finished by the next drain.
 pub const AUDIT_DRAIN_MAX_READS: usize = 16;
-/// The console refuses longer messages; a longer line is cut at this length.
+/// The console refuses longer messages; a longer line is cut to this length, its last byte `~`.
 pub const AUDIT_LINE_MAX_BYTES: usize = 64;
 
 pub type AuditReadBuffer = [[u8; AUDIT_EVENT_SIZE_BYTES]; AUDIT_READ_BATCH];
@@ -183,13 +183,15 @@ impl AuditDrain {
     }
 }
 
-/// The summary line the service prints after a drain.
+/// The summary line the service prints after a drain. Its records are at most
+/// [`AUDIT_READ_BATCH`] × [`AUDIT_DRAIN_MAX_READS`], so the line is cut only once `through` and
+/// `lost` together pass 23 digits.
 pub fn format_drain_summary(summary: &DrainSummary, emit: &mut impl FnMut(&str)) {
     emit_line(
         emit,
         format_args!(
-            "[ADT ] drained through={} records={} denied={} refused={} lost={}",
-            summary.through, summary.records, summary.denied, summary.refused, summary.lost
+            "[ADT ] drained through={} records={} lost={}",
+            summary.through, summary.records, summary.lost
         ),
     );
 }
@@ -223,13 +225,18 @@ impl fmt::Display for RecordLine<'_> {
     }
 }
 
-/// Formats into one console message, cutting what does not fit.
+/// Formats into one console message. What does not fit is cut, and the cut is marked by
+/// replacing the last byte with `~`, so a cut number is never read as a whole one.
 fn emit_line(emit: &mut impl FnMut(&str), args: fmt::Arguments<'_>) {
     let mut line = Line {
         bytes: [0; AUDIT_LINE_MAX_BYTES],
         len: 0,
+        cut: false,
     };
     let _ = line.write_fmt(args);
+    if line.cut {
+        line.bytes[AUDIT_LINE_MAX_BYTES - 1] = b'~';
+    }
     // Every field is ASCII, so a cut never splits a character.
     emit(core::str::from_utf8(&line.bytes[..line.len]).unwrap_or("[ADT ] ?"));
 }
@@ -237,6 +244,7 @@ fn emit_line(emit: &mut impl FnMut(&str), args: fmt::Arguments<'_>) {
 struct Line {
     bytes: [u8; AUDIT_LINE_MAX_BYTES],
     len: usize,
+    cut: bool,
 }
 
 impl Write for Line {
@@ -244,6 +252,7 @@ impl Write for Line {
         let take = s.len().min(self.bytes.len() - self.len);
         self.bytes[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
         self.len += take;
+        self.cut |= take < s.len();
         Ok(())
     }
 }
@@ -443,8 +452,32 @@ mod tests {
         });
         assert_eq!(
             summary_lines,
-            ["[ADT ] drained through=90 records=4 denied=2 refused=1 lost=86"]
+            ["[ADT ] drained through=90 records=4 lost=86"]
         );
+    }
+
+    #[test]
+    fn a_summary_fits_until_its_figures_pass_23_digits_and_a_cut_one_is_marked() {
+        let summary_line = |through: u64, lost: u64| {
+            let mut lines = Vec::new();
+            let summary = DrainSummary {
+                through,
+                records: (AUDIT_READ_BATCH * AUDIT_DRAIN_MAX_READS) as u64,
+                lost,
+                ..DrainSummary::default()
+            };
+            format_drain_summary(&summary, &mut |line: &str| lines.push(String::from(line)));
+            lines.remove(0)
+        };
+        let fits = summary_line(99_999_999_999, 99_999_999_999);
+        assert_eq!(
+            fits,
+            "[ADT ] drained through=99999999999 records=128 lost=99999999999"
+        );
+        assert_eq!(summary_line(999_999_999_999, 99_999_999_999).len(), 64);
+        let cut = summary_line(9_999_999_999_999, 99_999_999_999);
+        assert_eq!(cut.len(), AUDIT_LINE_MAX_BYTES);
+        assert!(cut.ends_with(" lost=999999999~"), "{cut}");
     }
 
     #[test]
@@ -486,6 +519,7 @@ mod tests {
         assert!(
             lines[0].starts_with("[ADT ] seq=1 actor=18446744073709551615 generation-exhausted")
         );
+        assert!(lines[0].ends_with('~'));
     }
 
     #[test]

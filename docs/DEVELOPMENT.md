@@ -56,36 +56,43 @@ In the default image the kernel launches userspace init instead of the two kerne
 [SVC ] declared service=20736
 [SVC ] declared service=20992
 [SVC ] declared service=21504
+[SVC ] declared service=21760
 [KERN] serial console input on vector=49
 [KERN] boot profile=base
-[KERN] init launched pid=1 slot=0 declared-services=3
+[KERN] init launched pid=1 slot=0 declared-services=4
 [KERN] init authority pid=1 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1
 [KERN] scheduler initialized
 [IPC ] console pid=1: [INIT] boot profile=base
-[IPC ] console pid=1: [INIT] started pid=1 services=3
+[IPC ] console pid=1: [INIT] started pid=1 services=4
 [IPC ] console pid=1: [INIT] SERVICE_READY from init refused: not a service
 [IPC ] console pid=1: [INIT] starting service=20736
 [SVC ] authority service=20736 pid=2 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1
 [SVC ] launch service=20736 pid=2 gen=1
+[IPC ] console pid=1: [INIT] starting service=21760
+[SVC ] authority service=21760 pid=3 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1
+[SVC ] launch service=21760 pid=3 gen=1
+[IPC ] console pid=3: [ADT ] drained through=15 records=15 lost=0
+[SVC ] ready service=21760 pid=3 gen=1 source=live-instance kernel-observed audit-read-through=15 audit-next=16 audit-dropped=0 service-reported first-drain-records=15
+[IPC ] console pid=1: [INIT] service=21760 ready gen=1
 [SVC ] ready service=20736 pid=2 gen=1 source=live-instance kernel-observed block-write-requests=0 service-reported formatted=0 store-generation=0
 [IPC ] console pid=1: [INIT] service=20736 ready gen=1
 [IPC ] console pid=1: [INIT] service=20736 ready; starting service=20992
-[SVC ] authority service=20992 pid=3 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1
-[SVC ] launch service=20992 pid=3 gen=1
+[SVC ] authority service=20992 pid=4 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1
+[SVC ] launch service=20992 pid=4 gen=1
 [IPC ] console pid=1: [INIT] service=20736 ready; starting service=21504
-[SVC ] shell process pid=4 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1
+[SVC ] shell process pid=5 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1
 [SVC ] console input so far lines=0 eofs=0 deferred=0 edit-overflow=0 refused=0 eof-dropped=0 control-dropped=0 irqs=0 spurious=0 bytes=0 max-drained=0 overruns=0 line-errors=0 rearms=0 stale=0 wakes=0 woken=0 committed=0 deferred-line=0
-[SVC ] authority service=21504 pid=4 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1
-[SVC ] launch service=21504 pid=4 gen=1
-[SVC ] ready service=20992 pid=3 gen=1 source=live-instance kernel-observed raw-backend=loopback service-reported link-up=1
+[SVC ] authority service=21504 pid=5 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1
+[SVC ] launch service=21504 pid=5 gen=1
+[SVC ] ready service=20992 pid=4 gen=1 source=live-instance kernel-observed raw-backend=loopback service-reported link-up=1
 [IPC ] console pid=1: [INIT] service=20992 ready gen=1
 
 
 # BusyBox v1.37.0 (2026-09-23 09:18:28 UTC) built-in shell (ash)
 
-[SVC ] ready service=21504 pid=4 gen=1 source=live-instance kernel-observed first-console-input-wait
+[SVC ] ready service=21504 pid=5 gen=1 source=live-instance kernel-observed first-console-input-wait
 [IPC ] console pid=1: [INIT] service=21504 ready gen=1
-[IPC ] console pid=1: [INIT] boot settled running=3 down=0; waiting, no deadline
+[IPC ] console pid=1: [INIT] boot settled running=4 down=0; waiting, no deadline
 [KERN] idle thread halted 16 times in a row while init pid=1 waited in LIFECYCLE_WAIT with no deadline
 ```
 
@@ -367,7 +374,7 @@ cargo test -p clean-slate-supervisor
 cargo xtask test-system-boot
 ```
 
-`test-system-boot` (alias `system-boot`) builds the default image (no Cargo feature) and boots it twice on a data disk of its own, `target/system-boot/system-data.img`, which it deletes and recreates first, with the network fixture peer attached. Each boot must print, in order, the kernel's serial-console line, `[KERN] boot profile=base`, the kernel's init launch and authority lines, init's `[INIT] boot profile=base` and its start and refused `SERVICE_READY`, the authority, launch and ready lines of storage (0x5100), network's (0x5200) authority and launch lines, then in either order the rest of network's lines and the shell's (0x5400) start, authority, launch and ready lines with init's announcements of both, then init's settled line (`running=4`) and the kernel's idle line, as in the [first development loop](#first-development-loop) output. The audit service (0x5500) starts beside storage, so its lines are not ordered against the others. The host then checks that init holds lifecycle control and the console only, that every `[INIT]` line came through init's own console capability, that each service was launched once, held exactly its manifest row's grants, and printed its authority, launch and ready lines in that order, with ready from the pid and generation the kernel launched, before init announced it, that the shell's authority line is exactly console, console input, four `/tmp` objects, the network client entitlement, one network client capability (network is launched before the shell in the same init wake, so its instance is live) and the Linux personality, that its process line shows `/bin/sh -i`, `PATH=/bin`, stdin, stdout, `/tmp` and the network client, and that it became ready by blocking on stdin, that the audit service's authority line is exactly `AUDIT_READ` on the log and the console, that its first `[ADT ] drained through=T records=R … lost=L` line has `R + L = T` (every sequence up to `T` was a record or inside a lost run), and that the kernel's `audit-read-through` on its ready line is exactly `T` and its `first-drain-records` is `R`, and that storage reported `formatted=1` with at least one block write on the first boot and `formatted=0` on the second. Any `[FAIL]` line fails the lane, as does any `[HOOK]` line, which only the `system-test-hooks` build prints. It prints `[SYS ] PASS`. It is a standalone constituent of the exhaustive suite, not part of a milestone gate.
+`test-system-boot` (alias `system-boot`) builds the default image (no Cargo feature) and boots it twice on a data disk of its own, `target/system-boot/system-data.img`, which it deletes and recreates first, with the network fixture peer attached. Each boot must print, in order, the kernel's serial-console line, `[KERN] boot profile=base`, the kernel's init launch and authority lines, init's `[INIT] boot profile=base` and its start and refused `SERVICE_READY`, the authority, launch and ready lines of storage (0x5100), network's (0x5200) authority and launch lines, then in either order the rest of network's lines and the shell's (0x5400) start, authority, launch and ready lines with init's announcements of both, then init's settled line (`running=4`) and the kernel's idle line, as in the [first development loop](#first-development-loop) output. The audit service (0x5500) starts beside storage, so its lines are not ordered against the others. The host then checks that init holds lifecycle control and the console only, that every `[INIT]` line came through init's own console capability, that each service was launched once, held exactly its manifest row's grants, and printed its authority, launch and ready lines in that order, with ready from the pid and generation the kernel launched, before init announced it, that the shell's authority line is exactly console, console input, four `/tmp` objects, the network client entitlement, one network client capability (network is launched before the shell in the same init wake, so its instance is live) and the Linux personality, that its process line shows `/bin/sh -i`, `PATH=/bin`, stdin, stdout, `/tmp` and the network client, and that it became ready by blocking on stdin, that the audit service's authority line is exactly `AUDIT_READ` on the log and the console, that its first `[ADT ] drained through=T records=R lost=L` line has `R + L = T` (every sequence up to `T` was a record or inside a lost run), and that the kernel's `audit-read-through` on its ready line is exactly `T` and its `first-drain-records` is `R`, and that storage reported `formatted=1` with at least one block write on the first boot and `formatted=0` on the second. Any `[FAIL]` line fails the lane, as does any `[HOOK]` line, which only the `system-test-hooks` build prints. It prints `[SYS ] PASS`. It is a standalone constituent of the exhaustive suite, not part of a milestone gate.
 
 For #218 S5, the serial-console shell of the default image:
 
@@ -414,19 +421,19 @@ Across the run the lane requires exactly one shell launch, two network launches,
 
 ```text
 [STM ] step "fault"
-[HOOK] network fault armed pid=3 gen=1 user_rip=0x0
-[PROC] fault pid=3 vector=14 err=0x14
+[HOOK] network fault armed pid=4 gen=1 user_rip=0x0
+[PROC] fault pid=4 vector=14 err=0x14
 [PROC] fault rip=0x0000000000000000 cr2=0x0000000000000000 instruction_fetch=1
-[NET ] requeued in-service=1 service_pid=3
+[NET ] requeued in-service=1 service_pid=4
 [NET ] linux sockets lost count=1 reason=instance-gone
 [CAP ] net client revoked count=2 reason=instance-gone
 wget: error getting response: Connection reset by peer
-[LNX ] exit pid=7 status=1
+[LNX ] exit pid=8 status=1
 # [IPC ] console pid=1: [SUP ] restart service=20992 attempt=1
-[SVC ] authority service=20992 pid=8 ... raw-net-link=1 linux=0 console-input=0 matches-manifest=1
-[CAP ] net client reissued holder=4 generation=2
-[SVC ] launch service=20992 pid=8 gen=2
-[SVC ] ready service=20992 pid=8 gen=2 source=live-instance kernel-observed raw-backend=virtio service-reported link-up=1
+[SVC ] authority service=20992 pid=9 ... raw-net-link=1 linux=0 console-input=0 matches-manifest=1
+[CAP ] net client reissued holder=5 generation=2
+[SVC ] launch service=20992 pid=9 gen=2
+[SVC ] ready service=20992 pid=9 gen=2 source=live-instance kernel-observed raw-backend=virtio service-reported link-up=1
 [IPC ] console pid=1: [INIT] service=20992 ready gen=2
 [IPC ] console pid=1: [INIT] boot settled running=4 down=0; waiting, no deadline
 ```

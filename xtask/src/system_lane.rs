@@ -996,7 +996,7 @@ mod tests {
             );
         }
         text += &format!(
-            "# [IPC ] console pid={AUDIT}: [ADT ] drained through=302 records=40 denied=17 refused=0 lost=104\n"
+            "# [IPC ] console pid={AUDIT}: [ADT ] drained through=302 records=40 lost=104\n"
         );
         text
     }
