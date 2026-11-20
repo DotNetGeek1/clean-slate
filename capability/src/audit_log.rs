@@ -1,7 +1,7 @@
 //! M6.7 bounded audit-event ring (`AuditSink` implementation, host-testable).
 
 use crate::audit::{AuditEvent, AuditKind, AuditSink};
-use crate::HolderId;
+use crate::{HolderId, ResourceClass, Rights};
 
 /// Most records one holder ([`AuditEvent::charged_holder`]) may have in the ring at once
 /// (#219). The kernel's own records, granted to or revoking the kernel, share one budget.
@@ -27,6 +27,8 @@ pub enum Recorded {
 /// An allowed use identical to the same holder's newest record, which no reader has been
 /// handed yet ([`Self::mark_read`]), is merged into it: the record's `count` becomes the
 /// number of uses it stands for (2, 3, ...; saturating, after which a new record starts).
+/// A read of this log merges even into a record already handed over, so a reader polling an
+/// idle log holds one record and consumes no sequences.
 /// Merging consumes no sequence and no space.
 ///
 /// Nothing is lost silently: every stored record consumes a sequence; [`Self::dropped`]
@@ -37,8 +39,11 @@ pub struct BoundedAuditLog<const N: usize> {
     len: usize,
     next_sequence: u64,
     dropped: u64,
+    /// Of [Self::dropped], the records a full log aged out (rather than a holder's own oldest).
+    aged_out: u64,
     holder_budget: usize,
-    /// Highest sequence handed to a reader; records at or below it are never merged into.
+    /// Highest sequence handed to a reader; records at or below it are merged into only by a
+    /// repeat of a read of this log (see `is_log_read`).
     read_through: u64,
 }
 
@@ -53,6 +58,7 @@ impl<const N: usize> BoundedAuditLog<N> {
             len: 0,
             next_sequence: 1,
             dropped: 0,
+            aged_out: 0,
             holder_budget,
             read_through: 0,
         }
@@ -73,6 +79,11 @@ impl<const N: usize> BoundedAuditLog<N> {
     /// Records sequences up to `sequence` as handed to a reader.
     pub fn mark_read(&mut self, sequence: u64) {
         self.read_through = self.read_through.max(sequence);
+    }
+
+    /// Highest sequence handed to a reader; 0 before the first read.
+    pub fn read_through(&self) -> u64 {
+        self.read_through
     }
 
     /// Adds `event` (its sequence is assigned here) and says where it went.
@@ -99,6 +110,7 @@ impl<const N: usize> BoundedAuditLog<N> {
                 .expect("a holder at its budget has a record");
             self.evict(oldest_of_holder);
         } else if self.len == N {
+            self.aged_out += 1;
             self.evict(0);
         }
         self.events[self.len] = event;
@@ -107,7 +119,7 @@ impl<const N: usize> BoundedAuditLog<N> {
     }
 
     /// `event` is an allowed use identical to `earlier` (but for sequence, time and count),
-    /// `earlier` has not been read, and its count has room.
+    /// `earlier` has not been read (or both are reads of this log), and its count has room.
     fn is_repeat(&self, earlier: &AuditEvent, event: &AuditEvent) -> bool {
         let comparable = |e: &AuditEvent| AuditEvent {
             sequence: 0,
@@ -117,7 +129,7 @@ impl<const N: usize> BoundedAuditLog<N> {
         };
         event.kind == AuditKind::Authorize
             && event.is_allowed()
-            && earlier.sequence > self.read_through
+            && (earlier.sequence > self.read_through || is_log_read(event))
             && earlier.count < u32::MAX
             && comparable(earlier) == comparable(event)
     }
@@ -150,6 +162,12 @@ impl<const N: usize> BoundedAuditLog<N> {
 
     pub fn dropped(&self) -> u64 {
         self.dropped
+    }
+
+    /// Records a full log dropped as the oldest overall. Only these can be the records of a
+    /// holder below its budget.
+    pub fn aged_out(&self) -> u64 {
+        self.aged_out
     }
 
     pub fn oldest_sequence(&self) -> Option<u64> {
@@ -212,6 +230,17 @@ impl<const N: usize> BoundedAuditLog<N> {
             .find(|event| event.sequence == sequence)
             .copied()
     }
+}
+
+/// A reader's use of its `AUDIT_READ` capability. A reader that has been handed its own read
+/// record already knows of that read, so later identical reads may still merge into it;
+/// otherwise every idle poll would store a record for the next poll to read.
+///
+/// Assumes one live reader: `read_through` is shared, so with a second reader a record handed
+/// only to one could still change under it. The kernel grants `AUDIT_READ` without `DELEGATE`
+/// and the manifest lets one row hold the grant, which keeps it so.
+fn is_log_read(event: &AuditEvent) -> bool {
+    event.class == ResourceClass::Audit && event.requested == Rights::AUDIT_READ
 }
 
 impl<const N: usize> AuditSink for BoundedAuditLog<N> {
@@ -320,6 +349,7 @@ mod tests {
         assert_eq!(log.held_by(HolderId(1)), 1);
         assert_eq!(log.held_by(HolderId(2)), 3);
         assert_eq!(log.dropped(), 7);
+        assert_eq!(log.aged_out(), 0, "holder 2 only displaced its own records");
         assert_eq!(log.next_sequence(), 12);
         // Holder 1's record survives; holder 2's first seven are a lost run behind it.
         assert_eq!(sequences(&log), [1, u64::MAX - 7, 9, 10, 11]);
@@ -332,6 +362,7 @@ mod tests {
             log.record(use_event(actor));
         }
         assert_eq!(log.dropped(), 2);
+        assert_eq!(log.aged_out(), 2);
         assert_eq!(sequences(&log), [u64::MAX - 2, 3, 4, 5, 6]);
     }
 
@@ -405,6 +436,58 @@ mod tests {
             "what the reader saw stays as it was"
         );
         assert_eq!(log.record_event(allowed_use(1, 0)), Recorded::Merged(2));
+    }
+
+    #[test]
+    fn a_reader_polling_an_idle_log_holds_one_record_and_takes_no_sequences() {
+        let reader = HolderId(3);
+        let read = crate::audit::event_for(
+            0,
+            reader,
+            ResourceRef {
+                class: ResourceClass::Audit,
+                id: 0,
+                instance_generation: 0,
+            },
+            Rights::AUDIT_READ,
+            CapabilityHandle::new(0, 1),
+            0,
+            Ok(()),
+        );
+        let mut log = BoundedAuditLog::<64>::new();
+        log.record(use_event(1));
+        let mut since = 1;
+        let mut poll = |log: &mut BoundedAuditLog<64>| {
+            log.record(read);
+            let mut buf = [AuditEvent::EMPTY; 8];
+            let (count, next_since) = log.read_from(since, &mut buf);
+            if count > 0 {
+                log.mark_read(next_since - 1);
+            }
+            since = next_since;
+            count
+        };
+        assert_eq!(poll(&mut log), 2, "the denial and the first read");
+        let after_first = log.next_sequence();
+        for _ in 0..100 {
+            assert_eq!(poll(&mut log), 0);
+        }
+        assert_eq!(log.next_sequence(), after_first);
+        assert_eq!(log.held_by(reader), 1);
+        assert_eq!(log.get(2).unwrap().count, 101);
+
+        log.record(use_event(1));
+        assert_eq!(poll(&mut log), 1, "new records still reach the reader");
+        assert_eq!(log.held_by(reader), 1);
+    }
+
+    #[test]
+    fn read_through_only_moves_forward() {
+        let mut log = BoundedAuditLog::<8>::new();
+        assert_eq!(log.read_through(), 0);
+        log.mark_read(5);
+        log.mark_read(3);
+        assert_eq!(log.read_through(), 5);
     }
 
     #[test]

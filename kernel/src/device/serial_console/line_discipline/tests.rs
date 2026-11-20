@@ -96,17 +96,20 @@ fn other_control_bytes_and_non_ascii_are_dropped_without_echo() {
     assert_eq!(discipline.stats().control_dropped, 7);
 }
 
-/// Ctrl-\, Ctrl-], Ctrl-^ and Ctrl-_ are the `system-test-hooks` fault bytes. To the line
-/// discipline, in every build, each is an ordinary dropped control byte: no echo, no edit, no
-/// signal, no wake.
+/// Ctrl-A and Ctrl-B (audit flood) and Ctrl-\, Ctrl-], Ctrl-^ and Ctrl-_ (faults) are the
+/// `system-test-hooks` bytes. To the line discipline, in every build, each is an ordinary
+/// dropped control byte: no echo, no edit, no signal, no wake.
 #[test]
 fn the_fault_bytes_are_ordinary_dropped_control_bytes() {
     let mut discipline = fresh();
-    assert_eq!(feed(&mut discipline, b"\x1c\x1d\x1e\x1f"), b"");
+    assert_eq!(feed(&mut discipline, b"\x01\x02\x1c\x1d\x1e\x1f"), b"");
     assert!(!discipline.take_wake());
-    assert_eq!(feed(&mut discipline, b"o\x1c\x1dk\x1e\x1f\r"), b"ok\r\n");
+    assert_eq!(
+        feed(&mut discipline, b"o\x01\x1c\x1dk\x02\x1e\x1f\r"),
+        b"ok\r\n"
+    );
     assert_eq!(read(&mut discipline, 64), b"ok\n");
-    assert_eq!(discipline.stats().control_dropped, 8);
+    assert_eq!(discipline.stats().control_dropped, 12);
 }
 
 #[test]
