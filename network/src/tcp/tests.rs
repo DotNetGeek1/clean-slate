@@ -8,6 +8,7 @@ mod integration {
         TCP_ECHO_PORT,
     };
     use crate::protocol::TrustedCaller;
+    use crate::rng::{IssKey, NetRng, EPHEMERAL_PORT_FIRST, SEED_BYTES};
     use crate::session::{SessionGeneration, SessionId};
     use crate::stack::L3Stack;
     use crate::tcp::test_peer::TestPeer;
@@ -50,9 +51,67 @@ mod integration {
         let mut peer_stack = L3Stack::new(peer_link, PEER_MAC, PEER_IPV4, ARP_TTL);
         // Peer must be able to answer toward the guest without an extra ARP round-trip.
         peer_stack.arp_cache_mut().insert(GUEST_IPV4, GUEST_MAC, 0);
-        let guest = TcpTransport::alloc_boxed(guest_stack, SessionGeneration::new(1));
+        let guest = TcpTransport::alloc_boxed(guest_stack, SessionGeneration::new(1), test_rng());
         let peer = TestPeer::new(peer_stack);
         (guest, peer)
+    }
+
+    fn test_rng() -> NetRng {
+        NetRng::from_seed([0x54; SEED_BYTES])
+    }
+
+    /// `(source port, ISS)` of two connections opened at tick 7 by a transport seeded `seed`.
+    fn first_syns(seed: u8) -> [(u16, u32); 2] {
+        let stack = L3Stack::new(
+            FakeLink::new(GUEST_MAC, true),
+            GUEST_MAC,
+            GUEST_IPV4,
+            ARP_TTL,
+        );
+        let mut guest = TcpTransport::alloc_boxed(
+            stack,
+            SessionGeneration::new(1),
+            NetRng::from_seed([seed; SEED_BYTES]),
+        );
+        let remote = SocketAddrV4::new(PEER_IPV4, TCP_ECHO_PORT);
+        [0, 1].map(|_| {
+            let id = guest.connect(7, OWNER, remote).unwrap();
+            let conn = guest.table().get(id, OWNER).unwrap();
+            (conn.local.port, conn.iss)
+        })
+    }
+
+    /// The same seed gives the same SYNs and another seed different ones; the two connections
+    /// get distinct ports in the dynamic range; and each ISS is the RFC 6528 function of the
+    /// transport's ISS key, the four-tuple and the clock.
+    #[test]
+    fn ports_and_iss_come_from_the_generator() {
+        let syns = first_syns(1);
+        assert_eq!(syns, first_syns(1));
+        let other = first_syns(2);
+        assert_ne!(syns.map(|(port, _)| port), other.map(|(port, _)| port));
+        assert_ne!(syns.map(|(_, iss)| iss), other.map(|(_, iss)| iss));
+        assert_ne!(syns[0].0, syns[1].0);
+        assert!(syns.iter().all(|&(port, _)| port >= EPHEMERAL_PORT_FIRST));
+
+        let mut rng = NetRng::from_seed([1; SEED_BYTES]);
+        let key = IssKey::new(&mut rng);
+        let local = SocketAddrV4::new(GUEST_IPV4, syns[0].0);
+        let remote = SocketAddrV4::new(PEER_IPV4, TCP_ECHO_PORT);
+        assert_eq!(key.iss(local, remote, 7), syns[0].1);
+    }
+
+    #[test]
+    fn ephemeral_ports_are_unique_across_a_full_table() {
+        let (mut guest, _peer) = setup_pair();
+        let remote = SocketAddrV4::new(PEER_IPV4, TCP_ECHO_PORT);
+        let ports: std::collections::HashSet<u16> = (0..32)
+            .map(|_| {
+                let id = guest.connect(0, OWNER, remote).unwrap();
+                guest.table().get(id, OWNER).unwrap().local.port
+            })
+            .collect();
+        assert_eq!(ports.len(), 32);
     }
 
     fn drive(now: u64, guest: &mut TcpTransport<FakeLink>, peer: &mut TestPeer<FakeLink>) {
@@ -340,7 +399,7 @@ mod integration {
         let (_stack, _table, _stats) = guest.into_parts();
         let guest_link = FakeLink::new(GUEST_MAC, true);
         let stack = L3Stack::new(guest_link, GUEST_MAC, GUEST_IPV4, ARP_TTL);
-        let guest = TcpTransport::alloc_boxed(stack, SessionGeneration::new(2));
+        let guest = TcpTransport::alloc_boxed(stack, SessionGeneration::new(2), test_rng());
         assert_eq!(
             guest.state(id, OWNER).unwrap_err(),
             NetworkError::Denied(DenialReason::StaleGeneration)
@@ -373,6 +432,7 @@ mod integration {
                 ARP_TTL,
             ),
             SessionGeneration::new(2),
+            test_rng(),
         );
         assert_eq!(
             replacement.state(id, OWNER).unwrap_err(),

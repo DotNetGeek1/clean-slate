@@ -168,7 +168,6 @@ dependencies = [
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
  "clean-slate-store",
- "rand_core",
  "uefi",
  "uefi-raw",
  "x86_64",
@@ -194,7 +193,6 @@ dependencies = [
  "clean-slate-native-abi",
  "clean-slate-network",
  "clean-slate-service-fixtures",
- "rand_core",
 ]
 
 [[package]]

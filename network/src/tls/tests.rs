@@ -27,6 +27,7 @@ mod integration {
         TLS_PORT, TLS_SERVER_NAME,
     };
     use crate::protocol::TrustedCaller;
+    use crate::rng::{NetRng, SEED_BYTES};
     use crate::session::SessionGeneration;
     use crate::stack::L3Stack;
     use crate::tcp::{
@@ -39,34 +40,16 @@ mod integration {
         TLS_RECORD_BUFFER_BYTES,
     };
 
-    use rand_core::{CryptoRng, RngCore};
-
     const ARP_TTL: u64 = 1000;
     const OWNER: TrustedCaller = TrustedCaller::new(1, 1, 1);
     const PINNED_CA: &[u8] = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
 
-    struct SeededRng(u64);
-
-    impl RngCore for SeededRng {
-        fn next_u32(&mut self) -> u32 {
-            (self.next_u64() >> 32) as u32
-        }
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
-            self.0
-        }
-        fn fill_bytes(&mut self, dest: &mut [u8]) {
-            for chunk in dest.iter_mut() {
-                *chunk = self.next_u64() as u8;
-            }
-        }
-        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-            self.fill_bytes(dest);
-            Ok(())
-        }
+    /// The network stack's generator, as the service hands it to each TLS transaction.
+    fn seeded_rng(seed: u64) -> NetRng {
+        let mut key = [0u8; SEED_BYTES];
+        key[..8].copy_from_slice(&seed.to_le_bytes());
+        NetRng::from_seed(key)
     }
-
-    impl CryptoRng for SeededRng {}
 
     fn setup_tls_pair(
         cert: TlsPeerCert,
@@ -79,7 +62,8 @@ mod integration {
         let guest_stack = L3Stack::new(guest_link, GUEST_MAC, GUEST_IPV4, ARP_TTL);
         let mut peer_stack = L3Stack::new(peer_link, PEER_MAC, PEER_IPV4, ARP_TTL);
         peer_stack.arp_cache_mut().insert(GUEST_IPV4, GUEST_MAC, 0);
-        let guest = TcpTransport::alloc_boxed(guest_stack, SessionGeneration::new(1));
+        let guest =
+            TcpTransport::alloc_boxed(guest_stack, SessionGeneration::new(1), seeded_rng(0x7c));
         let mut peer = TlsTestPeer::with_fixture_cert(peer_stack, cert);
         peer.set_fault(fault);
         (guest, peer)
@@ -95,7 +79,8 @@ mod integration {
         let guest_stack = L3Stack::new(guest_link, GUEST_MAC, GUEST_IPV4, ARP_TTL);
         let mut peer_stack = L3Stack::new(peer_link, PEER_MAC, PEER_IPV4, ARP_TTL);
         peer_stack.arp_cache_mut().insert(GUEST_IPV4, GUEST_MAC, 0);
-        let guest = TcpTransport::alloc_boxed(guest_stack, SessionGeneration::new(1));
+        let guest =
+            TcpTransport::alloc_boxed(guest_stack, SessionGeneration::new(1), seeded_rng(0x7c));
         let peer = TlsTestPeer::with_custom_config(peer_stack, config);
         (guest, peer)
     }
@@ -175,7 +160,7 @@ mod integration {
                 OWNER,
                 SocketAddrV4::new(PEER_IPV4, TLS_PORT),
                 TlsConfig::new(TLS_SERVER_NAME, anchor, VALIDATION_TIME_UNIX),
-                SeededRng(seed),
+                seeded_rng(seed),
                 &mut read_buf,
                 &mut write_buf,
                 APP_REQUEST_BYTES,
@@ -230,7 +215,7 @@ mod integration {
                 OWNER,
                 SocketAddrV4::new(PEER_IPV4, TLS_PORT),
                 TlsConfig::new(TLS_SERVER_NAME, PINNED_CA, VALIDATION_TIME_UNIX),
-                SeededRng(3),
+                seeded_rng(3),
                 &mut read_buf,
                 &mut write_buf,
                 APP_REQUEST_BYTES,

@@ -8,16 +8,13 @@ use crate::device::NetworkLink;
 use crate::error::{DenialReason, NetworkError};
 use crate::limits::MAX_TCP_CONNECTIONS;
 use crate::protocol::TrustedCaller;
+use crate::rng::{IssKey, NetRng};
 use crate::session::{SessionGeneration, SessionId};
 use crate::stack::{self, L3Stack};
-use crate::tcp::conn::{
-    deterministic_iss, write_tcp_to_buf, SegmentAction, TcpConnection, TimerAction,
-};
+use crate::tcp::conn::{write_tcp_to_buf, SegmentAction, TcpConnection, TimerAction};
 use crate::tcp::segment::{parse as parse_tcp, syn_segment, TcpFlags, MAX_TCP_PAYLOAD};
 use crate::tcp::state::TcpState;
 use crate::tcp::stats::TcpStats;
-
-const EPHEMERAL_PORT_BASE: u16 = 50_000;
 
 /// Max inbound frames one [`TcpTransport::poll`] processes (one device RX queue's worth).
 pub const TCP_POLL_RX_BUDGET: usize = crate::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize;
@@ -26,24 +23,29 @@ pub const TCP_POLL_RX_BUDGET: usize = crate::limits::MAX_DEVICE_RX_QUEUE_DEPTH a
 pub struct TcpTable {
     generation: SessionGeneration,
     pub(crate) slots: [Option<TcpConnection>; MAX_TCP_CONNECTIONS as usize],
-    iss_counter: u64,
+    /// Ephemeral ports.
+    rng: NetRng,
+    /// RFC 6528 initial sequence numbers.
+    iss_key: IssKey,
 }
 
 impl TcpTable {
     /// Initializes a zeroed [`TcpTable`] (static or heap-backed storage).
-    pub fn init_in_place(&mut self, generation: SessionGeneration) {
+    pub fn init_in_place(&mut self, generation: SessionGeneration, mut rng: NetRng) {
         self.generation = generation;
-        self.iss_counter = 0;
+        self.iss_key = IssKey::new(&mut rng);
+        self.rng = rng;
         for slot in self.slots.iter_mut() {
             *slot = None;
         }
     }
 
-    pub fn new(generation: SessionGeneration) -> Self {
+    pub fn new(generation: SessionGeneration, mut rng: NetRng) -> Self {
         Self {
             generation,
             slots: [const { None }; MAX_TCP_CONNECTIONS as usize],
-            iss_counter: 0,
+            iss_key: IssKey::new(&mut rng),
+            rng,
         }
     }
 
@@ -57,22 +59,25 @@ impl TcpTable {
 
     fn alloc_slot(
         &mut self,
+        now: u64,
         owner: TrustedCaller,
         remote: SocketAddrV4,
         our_ip: Ipv4Addr,
     ) -> Result<usize, NetworkError> {
-        for (index, slot) in self.slots.iter_mut().enumerate() {
-            if slot.is_none() {
-                let port = EPHEMERAL_PORT_BASE + index as u16;
-                let local = SocketAddrV4::new(our_ip, port);
-                let iss = deterministic_iss(self.generation, index as u32, self.iss_counter);
-                self.iss_counter += 1;
-                let conn = TcpConnection::new(owner, local, remote, iss);
-                *slot = Some(conn);
-                return Ok(index);
-            }
-        }
-        Err(NetworkError::SessionExhausted)
+        let index = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .ok_or(NetworkError::SessionExhausted)?;
+        let slots = &self.slots;
+        let port = self
+            .rng
+            .ephemeral_port(|port| slots.iter().flatten().any(|c| c.local.port == port))
+            .ok_or(NetworkError::SessionExhausted)?;
+        let local = SocketAddrV4::new(our_ip, port);
+        let iss = self.iss_key.iss(local, remote, now);
+        self.slots[index] = Some(TcpConnection::new(owner, local, remote, iss));
+        Ok(index)
     }
 
     fn check_id(&self, id: SessionId, owner: TrustedCaller) -> Result<usize, NetworkError> {
@@ -158,18 +163,23 @@ impl<L: NetworkLink> TcpTransport<L> {
     ///
     /// `slot` must point to valid, aligned storage (typically `MaybeUninit::zeroed()` static).
     /// No other references to `*slot` may exist until initialization completes.
-    pub unsafe fn init_in_place(slot: *mut Self, stack: L3Stack<L>, generation: SessionGeneration) {
+    pub unsafe fn init_in_place(
+        slot: *mut Self,
+        stack: L3Stack<L>,
+        generation: SessionGeneration,
+        rng: NetRng,
+    ) {
         unsafe {
             (*slot).stack = stack;
-            (*slot).table.init_in_place(generation);
+            (*slot).table.init_in_place(generation, rng);
             (*slot).stats = TcpStats::default();
         }
     }
 
-    pub fn new(stack: L3Stack<L>, generation: SessionGeneration) -> Self {
+    pub fn new(stack: L3Stack<L>, generation: SessionGeneration, rng: NetRng) -> Self {
         Self {
             stack,
-            table: TcpTable::new(generation),
+            table: TcpTable::new(generation, rng),
             stats: TcpStats::default(),
         }
     }
@@ -179,6 +189,7 @@ impl<L: NetworkLink> TcpTransport<L> {
     pub fn alloc_boxed(
         stack: L3Stack<L>,
         generation: SessionGeneration,
+        rng: NetRng,
     ) -> alloc::boxed::Box<Self> {
         let layout = core::alloc::Layout::new::<Self>();
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) as *mut Self };
@@ -187,10 +198,21 @@ impl<L: NetworkLink> TcpTransport<L> {
         }
         unsafe {
             core::ptr::write(&mut (*ptr).stack, stack);
-            (*ptr).table.init_in_place(generation);
+            (*ptr).table.init_in_place(generation, rng);
             (*ptr).stats = TcpStats::default();
             alloc::boxed::Box::from_raw(ptr)
         }
+    }
+
+    /// An independent generator keyed from this transport's, for the TLS transaction that
+    /// rides on it.
+    pub fn fork_rng(&mut self) -> NetRng {
+        self.table.rng.fork()
+    }
+
+    /// The length of one `now` tick, for the ISS clock (see [`IssKey::set_tick_period_ns`]).
+    pub fn set_tick_period_ns(&mut self, tick_period_ns: u64) {
+        self.table.iss_key.set_tick_period_ns(tick_period_ns);
     }
 
     pub fn stack(&self) -> &L3Stack<L> {
@@ -246,7 +268,7 @@ impl<L: NetworkLink> TcpTransport<L> {
         remote: SocketAddrV4,
     ) -> Result<SessionId, NetworkError> {
         let our_ip = self.stack.our_ip();
-        let index = self.table.alloc_slot(owner, remote, our_ip)?;
+        let index = self.table.alloc_slot(now, owner, remote, our_ip)?;
         let id = SessionId::new(self.table.generation, index as u32);
         self.table.slots[index]
             .as_mut()

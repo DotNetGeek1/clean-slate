@@ -9,6 +9,7 @@ use crate::error::{DenialReason, NetworkError};
 use crate::ethernet::ParseError;
 use crate::limits::{MAX_L3_PAYLOAD_BYTES, MAX_PENDING_REQUESTS_PER_SESSION, MAX_UDP_ENDPOINTS};
 use crate::protocol::TrustedCaller;
+use crate::rng::NetRng;
 use crate::session::{SessionGeneration, SessionId, SessionState};
 use crate::stack::{Inbound, L3Stack};
 
@@ -19,9 +20,6 @@ pub const UDP_HEADER_LEN: usize = 8;
 pub const MAX_UDP_PAYLOAD: usize = MAX_L3_PAYLOAD_BYTES
     .saturating_sub(crate::ipv4::IPV4_MIN_HEADER_LEN)
     .saturating_sub(UDP_HEADER_LEN);
-
-/// First ephemeral local port for deterministic auto-bind ([`UdpTable::open`] with `None`).
-pub const EPHEMERAL_PORT_BASE: u16 = 49_152;
 
 /// Session handle for a UDP endpoint (same packing as [`SessionId`]).
 pub type UdpEndpointId = SessionId;
@@ -282,13 +280,16 @@ pub struct UdpTable {
     meta: [SlotMeta; ENDPOINT_SLOTS],
     rx: [RxQueue; ENDPOINT_SLOTS],
     queued_total: usize,
+    /// Ephemeral ports, and the IDs of the DNS queries sent from them.
+    rng: NetRng,
 }
 
 impl UdpTable {
     /// Initializes a zeroed [`UdpTable`] (for static or heap-backed storage).
-    pub fn init_in_place(&mut self, generation: SessionGeneration) {
+    pub fn init_in_place(&mut self, generation: SessionGeneration, rng: NetRng) {
         self.generation = generation;
         self.queued_total = 0;
+        self.rng = rng;
         for i in 0..ENDPOINT_SLOTS {
             self.meta[i] = SlotMeta::vacant();
         }
@@ -297,10 +298,14 @@ impl UdpTable {
     /// Creates an empty table tagged with `generation` (stale ids from prior tables fail checks).
     ///
     /// The table is ~1 MiB; prefer zeroed static storage plus [`init_in_place`] in the network service.
-    pub fn new(generation: SessionGeneration) -> Self {
+    pub fn new(generation: SessionGeneration, rng: NetRng) -> Self {
         let mut table = unsafe { core::mem::MaybeUninit::<Self>::zeroed().assume_init() };
-        table.init_in_place(generation);
+        table.init_in_place(generation, rng);
         table
+    }
+
+    pub(crate) fn rng_mut(&mut self) -> &mut NetRng {
+        &mut self.rng
     }
 
     pub fn generation(&self) -> SessionGeneration {
@@ -323,7 +328,7 @@ impl UdpTable {
         Ok(self.meta[index].local_port)
     }
 
-    /// Opens a UDP endpoint; `local_port == None` picks the lowest free ephemeral port.
+    /// Opens a UDP endpoint; `local_port == None` picks a random free ephemeral port.
     pub fn open(
         &mut self,
         owner: TrustedCaller,
@@ -403,14 +408,14 @@ impl UdpTable {
         self.meta.iter().any(|m| m.live && m.local_port == port)
     }
 
-    fn allocate_ephemeral_port(&self) -> Result<u16, NetworkError> {
-        for i in 0..ENDPOINT_SLOTS {
-            let port = EPHEMERAL_PORT_BASE + i as u16;
-            if !self.port_in_use(port) {
-                return Ok(port);
-            }
+    fn allocate_ephemeral_port(&mut self) -> Result<u16, NetworkError> {
+        if self.find_free_slot().is_none() {
+            return Err(NetworkError::SessionExhausted);
         }
-        Err(NetworkError::SessionExhausted)
+        let meta = &self.meta;
+        self.rng
+            .ephemeral_port(|port| meta.iter().any(|m| m.live && m.local_port == port))
+            .ok_or(NetworkError::SessionExhausted)
     }
 
     fn find_free_slot(&self) -> Option<usize> {
@@ -504,10 +509,15 @@ impl<L: NetworkLink> UdpTransport<L> {
     /// # Safety
     ///
     /// `slot` must point to valid storage for [`UdpTransport`].
-    pub unsafe fn init_in_place(slot: *mut Self, stack: L3Stack<L>, generation: SessionGeneration) {
+    pub unsafe fn init_in_place(
+        slot: *mut Self,
+        stack: L3Stack<L>,
+        generation: SessionGeneration,
+        rng: NetRng,
+    ) {
         unsafe {
             core::ptr::write(&mut (*slot).stack, stack);
-            (*slot).table.init_in_place(generation);
+            (*slot).table.init_in_place(generation, rng);
             core::ptr::write(&mut (*slot).stats, UdpStats::default());
         }
     }
@@ -517,6 +527,7 @@ impl<L: NetworkLink> UdpTransport<L> {
     pub fn alloc_boxed(
         stack: L3Stack<L>,
         generation: SessionGeneration,
+        rng: NetRng,
     ) -> alloc::boxed::Box<Self> {
         let layout = core::alloc::Layout::new::<Self>();
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) as *mut Self };
@@ -525,17 +536,17 @@ impl<L: NetworkLink> UdpTransport<L> {
         }
         unsafe {
             core::ptr::write(&mut (*ptr).stack, stack);
-            (*ptr).table.init_in_place(generation);
+            (*ptr).table.init_in_place(generation, rng);
             (*ptr).stats = UdpStats::default();
             alloc::boxed::Box::from_raw(ptr)
         }
     }
 
     /// Creates transport with a fresh endpoint table for `generation`.
-    pub fn new(stack: L3Stack<L>, generation: SessionGeneration) -> Self {
+    pub fn new(stack: L3Stack<L>, generation: SessionGeneration, rng: NetRng) -> Self {
         Self {
             stack,
-            table: UdpTable::new(generation),
+            table: UdpTable::new(generation, rng),
             stats: UdpStats::default(),
         }
     }
@@ -670,12 +681,20 @@ mod tests {
     const OWNER_B: TrustedCaller = TrustedCaller::new(2, 0, 0);
     const GEN: SessionGeneration = SessionGeneration::new(7);
 
+    fn test_rng() -> NetRng {
+        NetRng::from_seed([0x55; crate::rng::SEED_BYTES])
+    }
+
     fn heap_table(generation: SessionGeneration) -> std::boxed::Box<UdpTable> {
+        heap_table_with(generation, test_rng())
+    }
+
+    fn heap_table_with(generation: SessionGeneration, rng: NetRng) -> std::boxed::Box<UdpTable> {
         let layout = core::alloc::Layout::new::<UdpTable>();
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) as *mut UdpTable };
         assert!(!ptr.is_null(), "UdpTable heap allocation failed");
         unsafe {
-            (*ptr).init_in_place(generation);
+            (*ptr).init_in_place(generation, rng);
             std::boxed::Box::from_raw(ptr)
         }
     }
@@ -689,7 +708,7 @@ mod tests {
         assert!(!ptr.is_null(), "UdpTransport heap allocation failed");
         unsafe {
             core::ptr::write(&mut (*ptr).stack, stack);
-            (*ptr).table.init_in_place(generation);
+            (*ptr).table.init_in_place(generation, test_rng());
             (*ptr).stats = UdpStats::default();
             std::boxed::Box::from_raw(ptr)
         }
@@ -831,13 +850,41 @@ mod tests {
         assert_eq!(t.endpoints_in_use(), 2);
         let p1 = t.local_port(id1, OWNER_A).unwrap();
         let p2 = t.local_port(id2, OWNER_A).unwrap();
-        assert_eq!(p1, EPHEMERAL_PORT_BASE);
-        assert_eq!(p2, EPHEMERAL_PORT_BASE + 1);
+        assert!(p1 >= crate::rng::EPHEMERAL_PORT_FIRST && p2 >= crate::rng::EPHEMERAL_PORT_FIRST);
+        assert_ne!(p1, p2);
         t.close(id1, OWNER_A).unwrap();
         let id3 = t.open(OWNER_A, None).unwrap();
         let p3 = t.local_port(id3, OWNER_A).unwrap();
-        assert_eq!(p3, EPHEMERAL_PORT_BASE);
+        assert_ne!(p3, p2);
         assert_eq!(t.endpoints_in_use(), 2);
+    }
+
+    /// Tables seeded differently hand out different ephemeral ports for the same opens.
+    #[test]
+    fn ephemeral_ports_differ_between_generators() {
+        let ports = |seed: u8| {
+            let mut table = heap_table_with(GEN, NetRng::from_seed([seed; crate::rng::SEED_BYTES]));
+            (0..4)
+                .map(|_| {
+                    let id = table.open(OWNER_A, None).unwrap();
+                    table.local_port(id, OWNER_A).unwrap()
+                })
+                .collect::<std::vec::Vec<_>>()
+        };
+        assert_ne!(ports(1), ports(2));
+    }
+
+    #[test]
+    fn ephemeral_ports_never_collide_with_a_live_endpoint() {
+        let mut t = heap_table(GEN);
+        let ports: std::collections::HashSet<u16> = (0..ENDPOINT_SLOTS)
+            .map(|_| {
+                let id = t.open(OWNER_A, None).unwrap();
+                t.local_port(id, OWNER_A).unwrap()
+            })
+            .collect();
+        assert_eq!(ports.len(), ENDPOINT_SLOTS);
+        assert_eq!(t.open(OWNER_A, None), Err(NetworkError::SessionExhausted));
     }
 
     #[test]

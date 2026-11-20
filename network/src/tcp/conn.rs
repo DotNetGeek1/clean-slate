@@ -3,7 +3,6 @@
 use crate::addr::{Ipv4Addr, SocketAddrV4};
 use crate::error::NetworkError;
 use crate::protocol::TrustedCaller;
-use crate::session::SessionGeneration;
 use crate::tcp::segment::{
     write as write_segment, TcpFlags, TcpSegment, MAX_TCP_PAYLOAD, OUR_TCP_MSS,
 };
@@ -704,13 +703,6 @@ pub enum SegmentAction {
     MaybeSendData,
     Closed,
     Failed(NetworkError),
-}
-
-/// Deterministic initial sequence number from service generation, slot index, and a counter.
-pub fn deterministic_iss(generation: SessionGeneration, index: u32, counter: u64) -> u32 {
-    let g = generation.get() as u32;
-    let c = counter as u32;
-    g ^ (index.wrapping_mul(0x9E37_79B9)) ^ c.wrapping_mul(0x85EB_CA6B)
 }
 
 pub fn seq_lt(a: u32, b: u32) -> bool {

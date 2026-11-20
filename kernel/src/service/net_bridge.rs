@@ -7,11 +7,56 @@ use clean_slate_network::addr::MacAddr;
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
 use clean_slate_network::protocol::{NetworkRequest, NetworkResponse, TrustedCaller};
+use clean_slate_network::rng::SeedError;
 use clean_slate_network::session::SessionGeneration;
 use clean_slate_service_fixtures::{
-    NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES, NETWORK_REQUEST_SLOTS,
+    NetworkServiceBootstrap, NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES, NETWORK_REQUEST_SLOTS,
+    NETWORK_SERVICE_AUX_NO_ENTROPY, NETWORK_SERVICE_AUX_NO_ENTROPY_REASON_MASK,
+    NETWORK_SERVICE_RESULT_ERROR,
 };
 use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Start of the one line logged when the network service fails closed for lack of entropy
+/// (#221). It is a guest failure line, so only a lane that requires it accepts it.
+pub(crate) const ENTROPY_FAIL_CLOSED_LINE: &str = "[NET ] FAIL no hardware entropy:";
+
+/// Why the network service exited before it started, when the reason is that it could not
+/// seed its CSPRNG from RDSEED/RDRAND.
+pub(crate) fn entropy_failure(report: &NetworkServiceBootstrap) -> Option<SeedError> {
+    if report.result_code != NETWORK_SERVICE_RESULT_ERROR
+        || report.aux_status & !NETWORK_SERVICE_AUX_NO_ENTROPY_REASON_MASK
+            != NETWORK_SERVICE_AUX_NO_ENTROPY
+    {
+        return None;
+    }
+    SeedError::from_code(report.aux_status & NETWORK_SERVICE_AUX_NO_ENTROPY_REASON_MASK)
+}
+
+/// Logs [`ENTROPY_FAIL_CLOSED_LINE`] if `report` is a fail-closed entropy exit.
+pub(crate) fn log_entropy_failure(report: &NetworkServiceBootstrap) -> bool {
+    let Some(error) = entropy_failure(report) else {
+        return false;
+    };
+    kernel_log_fmt(format_args!(
+        "{ENTROPY_FAIL_CLOSED_LINE} {}; network service failed closed and did not start\n",
+        error.reason()
+    ));
+    true
+}
+
+/// Exit-trap hook for supervised processes: `pid` is leaving through `int 0x80` and its
+/// address space is still current, so the network service's bootstrap page is readable.
+pub(crate) fn on_exit_trap(pid: u64) {
+    let controller = unsafe { crate::service::control::service_lifecycle_controller_mut() };
+    if controller.live_pid(clean_slate_service_fixtures::NETWORK_SERVICE_ID) != Some(pid) {
+        return;
+    }
+    if let Ok(report) = crate::mm::user_access::read_user::<NetworkServiceBootstrap>(
+        clean_slate_service_fixtures::NETWORK_SERVICE_BOOTSTRAP_ADDRESS,
+    ) {
+        log_entropy_failure(&report);
+    }
+}
 
 const LOOPBACK_MAC: MacAddr = MacAddr([0x02, 0x10, 0x77, 0, 0, 1]);
 /// Callers the live service may hold state for. A `Live` entry belongs to a registered
@@ -990,6 +1035,48 @@ pub(crate) fn log_network_denied(pid: u64) {
 mod tests {
     use super::*;
     use clean_slate_network::session::SocketKind;
+    use clean_slate_service_fixtures::NETWORK_SERVICE_MODE_ACCEPTANCE;
+
+    #[test]
+    fn entropy_failure_is_decoded_only_from_a_fail_closed_exit() {
+        let report = |result_code, aux_status| NetworkServiceBootstrap {
+            result_code,
+            aux_status,
+            ..NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_ACCEPTANCE, 1)
+        };
+        for error in [
+            SeedError::Unavailable,
+            SeedError::Exhausted,
+            SeedError::Unhealthy,
+        ] {
+            let exit = report(
+                NETWORK_SERVICE_RESULT_ERROR,
+                NETWORK_SERVICE_AUX_NO_ENTROPY | error.code(),
+            );
+            assert_eq!(entropy_failure(&exit), Some(error));
+        }
+        assert_eq!(
+            entropy_failure(&report(
+                NETWORK_SERVICE_RESULT_ERROR,
+                NETWORK_SERVICE_AUX_NO_ENTROPY
+            )),
+            None
+        );
+        assert_eq!(
+            entropy_failure(&report(
+                NETWORK_SERVICE_RESULT_ERROR,
+                SeedError::Unavailable.code()
+            )),
+            None
+        );
+        assert_eq!(
+            entropy_failure(&report(
+                clean_slate_service_fixtures::NETWORK_SERVICE_RESULT_OK,
+                NETWORK_SERVICE_AUX_NO_ENTROPY | SeedError::Unavailable.code()
+            )),
+            None
+        );
+    }
 
     #[test]
     fn loopback_transmit_receive_round_trip() {

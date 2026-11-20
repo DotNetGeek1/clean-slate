@@ -1,10 +1,12 @@
-use core::arch::x86_64::{__cpuid, _rdrand64_step};
 use core::future::Future;
 use core::mem::MaybeUninit;
 use core::pin::pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 
+use crate::device::virtio::net::{NetInterruptSinks, VirtioNetDevice};
+use crate::selftest::boot_wait::{self, now_ms};
+use crate::{serial_write_fmt, serial_write_line};
 use clean_slate_network::addr::SocketAddrV4;
 use clean_slate_network::device::NetworkLink;
 #[cfg(not(feature = "m7-tls-fail-closed-self-test"))]
@@ -15,6 +17,7 @@ use clean_slate_network::fixture::{
     APP_REQUEST_BYTES, APP_RESPONSE_BYTES, GUEST_IPV4, PEER_IPV4, TLS_PORT, TLS_SERVER_NAME,
 };
 use clean_slate_network::protocol::TrustedCaller;
+use clean_slate_network::rng::NetRng;
 use clean_slate_network::session::SessionGeneration;
 #[cfg(not(feature = "m7-tls-fail-closed-self-test"))]
 use clean_slate_network::session::SessionId;
@@ -27,12 +30,6 @@ use clean_slate_network::tls::{
     tls_transaction, TlsConfig, TlsError, TlsTransactionBudget, TlsTransactionClock,
     TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
 };
-use rand_core::{CryptoRng, RngCore};
-
-use crate::device::virtio::net::{NetInterruptSinks, VirtioNetDevice};
-use crate::diagnostics::qemu::fatal_kernel_error;
-use crate::selftest::boot_wait::{self, now_ms};
-use crate::{serial_write_fmt, serial_write_line};
 
 const OWNER: TrustedCaller = TrustedCaller::new(1, 0, 1);
 /// The stack clock is calibrated TSC milliseconds ([`now_ms`]).
@@ -47,8 +44,6 @@ const TLS_BUDGET: TlsTransactionBudget = TlsTransactionBudget {
 };
 /// Backstop over the transaction's own phase deadlines, which fail it first.
 const TLS_WAIT_BUDGET_MS: u64 = TLS_BUDGET.handshake_ticks + 3 * TLS_BUDGET.io_ticks;
-/// RDRAND can transiently underflow; Intel's guidance is ten retries.
-const RDRAND_RETRIES: usize = 10;
 
 static mut TCP_TRANSPORT: MaybeUninit<TcpTransport<VirtioNetDevice>> = MaybeUninit::uninit();
 static mut TCP_TRANSPORT_READY: bool = false;
@@ -58,60 +53,6 @@ static mut TLS_WRITE_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_
 
 /// [`now_ms`] when the handshake trace reported "handshake finished".
 static HANDSHAKE_FINISHED_MS: AtomicU64 = AtomicU64::new(0);
-
-pub struct RdrandRng;
-
-impl RdrandRng {
-    /// Requires CPUID.1:ECX[30] (RDRAND) and a working `RDRAND` instruction.
-    pub fn new() -> Result<Self, &'static str> {
-        let leaf1 = unsafe { __cpuid(1) };
-        if leaf1.ecx & (1 << 30) == 0 {
-            return Err("rdrand-unavailable");
-        }
-        let mut word = 0u64;
-        if unsafe { _rdrand64_step(&mut word) } == 0 {
-            return Err("rdrand-unavailable");
-        }
-        Ok(Self)
-    }
-}
-
-/// One RDRAND word. `RngCore` cannot report failure, so persistent underflow is fatal
-/// instead of spinning.
-fn rdrand_word() -> u64 {
-    for _ in 0..RDRAND_RETRIES {
-        let mut word = 0u64;
-        if unsafe { _rdrand64_step(&mut word) } != 0 {
-            return word;
-        }
-    }
-    fatal_kernel_error("m7 tls rdrand exhausted its retries");
-}
-
-impl CryptoRng for RdrandRng {}
-
-impl RngCore for RdrandRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut buf = [0u8; 4];
-        self.fill_bytes(&mut buf);
-        u32::from_le_bytes(buf)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        rdrand_word()
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        for chunk in dest.chunks_mut(8) {
-            chunk.copy_from_slice(&rdrand_word().to_le_bytes()[..chunk.len()]);
-        }
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
-        Ok(())
-    }
-}
 
 fn tls_handshake_marker(step: &'static str) {
     let line = match step {
@@ -160,8 +101,13 @@ fn tcp_transport() -> Result<&'static mut TcpTransport<VirtioNetDevice>, &'stati
             let device = VirtioNetDevice::discover(NetInterruptSinks::NONE)?;
             let mac = device.link().mac;
             let stack = L3Stack::new(device, mac, GUEST_IPV4, ARP_TTL_MS);
+            let rng = NetRng::from_hardware().map_err(|error| {
+                serial_write_fmt(format_args!("[TLS ] FAIL entropy: {}\n", error.reason()));
+                "no hardware entropy"
+            })?;
+            serial_write_line("[TLS ] rng=chacha20 seed=hardware");
             let slot = TCP_TRANSPORT.as_mut_ptr();
-            TcpTransport::init_in_place(slot, stack, SessionGeneration::new(1));
+            TcpTransport::init_in_place(slot, stack, SessionGeneration::new(1), rng);
             TCP_TRANSPORT_READY = true;
         }
         Ok(&mut *TCP_TRANSPORT.as_mut_ptr())
@@ -237,12 +183,7 @@ fn run_tls_phase(
     let remote_tls = SocketAddrV4::new(PEER_IPV4, TLS_PORT);
     let read_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_READ_BUF) };
     let write_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_WRITE_BUF) };
-    let rng = RdrandRng::new().inspect_err(|&reason| {
-        if reason == "rdrand-unavailable" {
-            serial_write_line("[TLS ] FAIL reason=rdrand-unavailable");
-        }
-    })?;
-    serial_write_line("[TLS ] rng=rdrand");
+    let rng = tcp.fork_rng();
     let transport: *mut TcpTransport<VirtioNetDevice> = tcp;
     let clock = TlsTransactionClock::new();
     let started_ms = now_ms();

@@ -26,6 +26,11 @@ pub const NETWORK_SERVICE_MODE_CONVERGED_CLIENT: u64 = 7;
 pub const NETWORK_SERVICE_RESULT_PENDING: u64 = 0;
 pub const NETWORK_SERVICE_RESULT_OK: u64 = 1;
 pub const NETWORK_SERVICE_RESULT_ERROR: u64 = 2;
+/// #221: `aux_status` of an acceptance-mode service that failed closed before it was ready
+/// because it could not seed its CSPRNG. The low byte is the
+/// `clean_slate_network::rng::SeedError` code.
+pub const NETWORK_SERVICE_AUX_NO_ENTROPY: u64 = 0x4e45_0000;
+pub const NETWORK_SERVICE_AUX_NO_ENTROPY_REASON_MASK: u64 = 0xff;
 
 pub const NET_SUBOP_SUBMIT: u64 = 1;
 pub const NET_SUBOP_POLL: u64 = 2;
