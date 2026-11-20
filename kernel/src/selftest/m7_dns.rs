@@ -8,6 +8,7 @@ use clean_slate_network::fixture::{
     DNS_SERVER_ADDR, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS, FIXTURE_HOSTNAME, GUEST_IPV4,
 };
 use clean_slate_network::protocol::TrustedCaller;
+use clean_slate_network::rng::NetRng;
 use clean_slate_network::session::SessionGeneration;
 use clean_slate_network::stack::L3Stack;
 
@@ -34,6 +35,10 @@ pub(crate) fn run_m7_dns_self_test() -> Result<(), &'static str> {
     mac.write_to(&mut SerialWriter)
         .map_err(|_| "serial write failed")?;
     serial_write_line("");
+    let rng = NetRng::from_hardware().map_err(|error| {
+        serial_write_fmt(format_args!("[DNS ] FAIL entropy: {}\n", error.reason()));
+        "no hardware entropy"
+    })?;
 
     unsafe {
         DnsResolver::init_in_place(
@@ -42,6 +47,7 @@ pub(crate) fn run_m7_dns_self_test() -> Result<(), &'static str> {
             SessionGeneration::new(1),
             DNS_SERVER_ADDR,
             MS_PER_SEC,
+            rng,
         );
         run_cases(&mut *RESOLVER_STORAGE.as_mut_ptr())?;
     }

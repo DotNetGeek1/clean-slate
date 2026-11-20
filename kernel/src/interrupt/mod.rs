@@ -656,12 +656,14 @@ pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> 
             bit(context.error_code, 4)
         ));
     }
-    if context.vector as usize == crate::arch::x86_64::USER_TEST_VECTOR
-        && unsafe { service_lifecycle_controller_mut() }
+    if context.vector as usize == crate::arch::x86_64::USER_TEST_VECTOR {
+        crate::service::net_bridge::on_exit_trap(pid);
+        if unsafe { service_lifecycle_controller_mut() }
             .live_pid(clean_slate_service_fixtures::STORAGE_SERVICE_ID)
             == Some(pid)
-    {
-        crate::service::storage_refusal::log_exiting_service_refusal();
+        {
+            crate::service::storage_refusal::log_exiting_service_refusal();
+        }
     }
     crate::service::system_init::on_process_death(
         pid,

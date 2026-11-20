@@ -13,6 +13,7 @@ use crate::device::NetworkLink;
 use crate::error::NetworkError;
 use crate::limits::{MAX_DNS_LABEL_LEN, MAX_DNS_NAME_LEN, MAX_IN_FLIGHT_RESOLVER_QUERIES};
 use crate::protocol::TrustedCaller;
+use crate::rng::NetRng;
 use crate::session::{SessionGeneration, SessionId};
 use crate::udp::{UdpTransport, MAX_UDP_PAYLOAD};
 
@@ -838,7 +839,6 @@ pub struct DnsResolver<L: NetworkLink> {
     server: SocketAddrV4,
     pending: [PendingQuery; PENDING_SLOTS],
     next_query_id: u32,
-    dns_id_counter: u16,
     generation: SessionGeneration,
     ticks_per_sec: u64,
     stats: DnsResolverStats,
@@ -860,7 +860,6 @@ impl<L: NetworkLink> DnsResolver<L> {
             server,
             pending: [PendingQuery::vacant(); PENDING_SLOTS],
             next_query_id: 1,
-            dns_id_counter: 1,
             generation,
             ticks_per_sec: ticks_per_sec.max(1),
             stats: DnsResolverStats::default(),
@@ -879,14 +878,19 @@ impl<L: NetworkLink> DnsResolver<L> {
         generation: SessionGeneration,
         server: SocketAddrV4,
         ticks_per_sec: u64,
+        rng: NetRng,
     ) {
         unsafe {
-            UdpTransport::init_in_place(core::ptr::addr_of_mut!((*slot).udp), stack, generation);
+            UdpTransport::init_in_place(
+                core::ptr::addr_of_mut!((*slot).udp),
+                stack,
+                generation,
+                rng,
+            );
             (*slot).cache = DnsCache::new();
             (*slot).server = server;
             (*slot).pending = [PendingQuery::vacant(); PENDING_SLOTS];
             (*slot).next_query_id = 1;
-            (*slot).dns_id_counter = 1;
             (*slot).generation = generation;
             (*slot).ticks_per_sec = ticks_per_sec.max(1);
             (*slot).stats = DnsResolverStats::default();
@@ -900,6 +904,7 @@ impl<L: NetworkLink> DnsResolver<L> {
         generation: SessionGeneration,
         server: SocketAddrV4,
         ticks_per_sec: u64,
+        rng: NetRng,
     ) -> alloc::boxed::Box<Self> {
         let layout = core::alloc::Layout::new::<Self>();
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) as *mut Self };
@@ -907,7 +912,7 @@ impl<L: NetworkLink> DnsResolver<L> {
             alloc::alloc::handle_alloc_error(layout);
         }
         unsafe {
-            Self::init_in_place(ptr, stack, generation, server, ticks_per_sec);
+            Self::init_in_place(ptr, stack, generation, server, ticks_per_sec, rng);
             alloc::boxed::Box::from_raw(ptr)
         }
     }
@@ -924,11 +929,14 @@ impl<L: NetworkLink> DnsResolver<L> {
         &mut self.udp
     }
 
+    /// A random query ID that no live query is using.
     fn alloc_dns_id(&mut self) -> u16 {
-        let gen = self.generation.get() as u16;
-        let id = self.dns_id_counter;
-        self.dns_id_counter = self.dns_id_counter.wrapping_add(1);
-        id ^ gen
+        loop {
+            let id = self.udp.table_mut().rng_mut().next_u32() as u16;
+            if !self.pending.iter().any(|p| p.live && p.dns_id == id) {
+                return id;
+            }
+        }
     }
 
     fn alloc_query_id(&mut self) -> u32 {
@@ -1196,7 +1204,6 @@ impl<L: NetworkLink> DnsResolver<L> {
         }
         self.cache.clear();
         self.stats = DnsResolverStats::default();
-        self.dns_id_counter = 1;
         self.udp.reset().map_err(DnsError::Transport)?;
         Ok(())
     }
@@ -1537,7 +1544,8 @@ mod tests {
         impl TestDnsServer {
             fn new(link: FakeLink) -> Self {
                 let stack = L3Stack::new(link, PEER_MAC, PEER_IPV4, 1000);
-                let mut transport = UdpTransport::alloc_boxed(stack, GEN);
+                let mut transport =
+                    UdpTransport::alloc_boxed(stack, GEN, NetRng::from_seed([0x53; 32]));
                 transport
                     .stack_mut()
                     .arp_cache_mut()
@@ -1615,8 +1623,12 @@ mod tests {
         }
 
         fn make_resolver(link: FakeLink) -> DnsResolver<FakeLink> {
+            make_resolver_seeded(link, 0x52)
+        }
+
+        fn make_resolver_seeded(link: FakeLink, seed: u8) -> DnsResolver<FakeLink> {
             let stack = L3Stack::new(link, GUEST_MAC, GUEST_IPV4, 1000);
-            let mut udp = UdpTransport::new(stack, GEN);
+            let mut udp = UdpTransport::new(stack, GEN, NetRng::from_seed([seed; 32]));
             udp.stack_mut()
                 .arp_cache_mut()
                 .insert(PEER_IPV4, PEER_MAC, 0);
@@ -1673,6 +1685,38 @@ mod tests {
                     resolver.take_result(qid, OWNER).unwrap(),
                     Err(DnsError::NameNotFound)
                 );
+            });
+        }
+
+        /// Six concurrent queries carry six distinct IDs, and a resolver seeded differently
+        /// sends different IDs from different source ports.
+        #[test]
+        fn query_ids_and_ports_are_random_and_unique_among_live_queries() {
+            run_on_large_stack(|| {
+                let sent = |seed: u8| {
+                    let (a, b) = FakeLink::pair();
+                    let mut server = TestDnsServer::new(b);
+                    server.ensure_bind53();
+                    server.ignore_queries = u32::MAX;
+                    let mut resolver = make_resolver_seeded(a, seed);
+                    let mut ports = Vec::new();
+                    for name in ["a.test", "b.test", "c.test", "d.test", "e.test", "f.test"] {
+                        resolver.resolve(0, OWNER, name).unwrap();
+                    }
+                    for query in resolver.pending.iter().filter(|p| p.live) {
+                        let table = resolver.udp.table();
+                        ports.push(table.local_port(query.endpoint, OWNER).unwrap());
+                    }
+                    pump_both(&mut resolver, &mut server, 0, 20);
+                    (server.ignored_ids.clone(), ports)
+                };
+                let (ids, ports) = sent(1);
+                assert_eq!(ids.len(), 6);
+                let distinct: std::collections::HashSet<u16> = ids.iter().copied().collect();
+                assert_eq!(distinct.len(), ids.len(), "IDs {ids:?} repeat");
+                let (other_ids, other_ports) = sent(2);
+                assert_ne!(ids, other_ids);
+                assert_ne!(ports, other_ports);
             });
         }
 
