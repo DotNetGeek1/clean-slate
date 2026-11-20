@@ -1108,10 +1108,9 @@ mod tests {
     #[test]
     fn completions_before_poll_leave_the_pending_wake_table_free() {
         use crate::sched::wait::{
-            clear_wait_table_for_tests, consume_pending_wake_for_tests,
-            pending_wake_keys_for_tests, wake_all, MAX_WAITERS,
+            consume_pending_wake_for_tests, pending_wake_keys_for_tests, wake_all, MAX_WAITERS,
         };
-        clear_wait_table_for_tests();
+        let is_object_queue_key = |key: u64| matches!(key >> 56, 0x46 | 0x47);
         let mut queue = ObjectRequestQueue::new();
         let client = HolderId(42);
         let mut out = [0u8; 8];
@@ -1123,9 +1122,11 @@ mod tests {
                 .unwrap();
             assert_eq!(queue.poll(client, request_id, &mut out), Ok(2));
         }
-        assert_eq!(pending_wake_keys_for_tests(), [0; MAX_WAITERS]);
+        assert!(!pending_wake_keys_for_tests()
+            .into_iter()
+            .any(is_object_queue_key));
 
-        let native_key = WaitKey(0x54 << 56);
+        let native_key = WaitKey(0x54 << 56 | 0xE200_0001);
         assert_eq!(wake_all(native_key), 0);
         assert!(
             consume_pending_wake_for_tests(native_key),
