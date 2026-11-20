@@ -210,6 +210,11 @@ impl<L: NetworkLink> TcpTransport<L> {
         self.table.rng.fork()
     }
 
+    /// The length of one `now` tick, for the ISS clock (see [`IssKey::set_tick_period_ns`]).
+    pub fn set_tick_period_ns(&mut self, tick_period_ns: u64) {
+        self.table.iss_key.set_tick_period_ns(tick_period_ns);
+    }
+
     pub fn stack(&self) -> &L3Stack<L> {
         &self.stack
     }

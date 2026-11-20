@@ -1,16 +1,26 @@
 //! The network stack's one CSPRNG (#221).
 //!
-//! [`NetRng`] is ChaCha20 (the RFC 8439 block function) run as a keystream generator: a 256-bit
-//! key, a 64-bit block counter in state words 12-13 and a zero nonce. The network service seeds
-//! one root from the CPU's hardware entropy ([`NetRng::from_hardware`]: RDSEED, falling back to
-//! RDRAND) and hands each consumer a stream keyed from it ([`NetRng::fork`]): the TCP transport
-//! (ephemeral ports, the RFC 6528 ISS key), the DNS resolver's UDP table (ephemeral ports, query
-//! IDs) and each TLS transaction. There is no weak fallback: if the hardware offers no entropy,
-//! or the entropy fails its health checks, seeding returns a [`SeedError`] and the service does
-//! not start.
+//! [`NetRng`] is ChaCha20 (the RFC 8439 block function) run as a keystream generator with fast
+//! key erasure: each refill computes [`BATCH_BLOCKS`] blocks under the current 256-bit key
+//! (block counters `0..BATCH_BLOCKS`, zero nonce), takes the first eight words of the batch as
+//! the next key and hands out only the words after them. The old key is overwritten and the new
+//! one is never output, so state captured later cannot reproduce output already handed out.
+//!
+//! The network service seeds one root from the CPU's hardware entropy
+//! ([`NetRng::from_hardware`]: RDSEED, falling back to RDRAND) and hands each consumer a stream
+//! keyed from it ([`NetRng::fork`]): the TCP transport (ephemeral ports, the RFC 6528 ISS key),
+//! the DNS resolver's UDP table (ephemeral ports, query IDs) and each TLS transaction. There is
+//! no weak fallback: if the hardware offers no entropy, or the entropy fails its health checks,
+//! seeding returns a [`SeedError`] and the service does not start.
+
+use core::sync::atomic::{compiler_fence, Ordering};
 
 const CHACHA_CONSTANTS: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
 const BLOCK_WORDS: usize = 16;
+const KEY_WORDS: usize = 8;
+/// ChaCha20 blocks computed per [`NetRng`] refill.
+pub const BATCH_BLOCKS: usize = 4;
+const BATCH_WORDS: usize = BATCH_BLOCKS * BLOCK_WORDS;
 
 /// Bytes of key material a [`NetRng`] is seeded with.
 pub const SEED_BYTES: usize = 32;
@@ -20,10 +30,12 @@ pub const EPHEMERAL_PORT_FIRST: u16 = 49_152;
 pub const EPHEMERAL_PORT_LAST: u16 = u16::MAX;
 const EPHEMERAL_PORT_COUNT: u32 = (EPHEMERAL_PORT_LAST - EPHEMERAL_PORT_FIRST) as u32 + 1;
 
-/// Consecutive "no data" results tolerated per RDRAND word (Intel SDM guidance: ten retries).
-pub const RDRAND_RETRIES: usize = 10;
-/// RDSEED underflows far more readily than RDRAND; Intel recommends retrying with a pause.
-pub const RDSEED_RETRIES: usize = 128;
+/// RDRAND executions per seed word, the first included, before seeding gives up (Intel SDM
+/// guidance: ten).
+pub const RDRAND_ATTEMPTS: usize = 10;
+/// RDSEED executions per seed word, the first included. RDSEED underflows far more readily than
+/// RDRAND; Intel recommends retrying with a pause.
+pub const RDSEED_ATTEMPTS: usize = 128;
 
 #[inline(always)]
 fn quarter_round(s: &mut [u32; BLOCK_WORDS], a: usize, b: usize, c: usize, d: usize) {
@@ -61,8 +73,8 @@ pub fn chacha20_block(key: &[u32; 8], counter: u32, nonce: &[u32; 3]) -> [u32; B
     state
 }
 
-const fn key_words(seed: &[u8; SEED_BYTES]) -> [u32; 8] {
-    let mut key = [0u32; 8];
+const fn key_words(seed: &[u8; SEED_BYTES]) -> [u32; KEY_WORDS] {
+    let mut key = [0u32; KEY_WORDS];
     let mut i = 0;
     while i < key.len() {
         key[i] = u32::from_le_bytes([
@@ -76,13 +88,21 @@ const fn key_words(seed: &[u8; SEED_BYTES]) -> [u32; 8] {
     key
 }
 
+/// Zeroes `values` with volatile writes, which the compiler may not drop as dead stores.
+fn wipe<T: Copy + Default>(values: &mut [T]) {
+    for value in values.iter_mut() {
+        // SAFETY: `value` is a valid, aligned, exclusive reference.
+        unsafe { core::ptr::write_volatile(value, T::default()) };
+    }
+    compiler_fence(Ordering::SeqCst);
+}
+
 /// ChaCha20 keystream generator. Deterministic for a given seed; unpredictable only when the
-/// seed is (see [`NetRng::from_hardware`]).
-#[derive(Clone)]
+/// seed is (see [`NetRng::from_hardware`]). Not `Clone`: a copy would repeat this generator's
+/// output. Its key and unread output are zeroed when it is dropped.
 pub struct NetRng {
-    key: [u32; 8],
-    counter: u64,
-    block: [u32; BLOCK_WORDS],
+    key: [u32; KEY_WORDS],
+    batch: [u32; BATCH_WORDS],
     next_word: usize,
 }
 
@@ -92,35 +112,50 @@ impl core::fmt::Debug for NetRng {
     }
 }
 
+impl Drop for NetRng {
+    fn drop(&mut self) {
+        wipe(&mut self.key);
+        wipe(&mut self.batch);
+    }
+}
+
 impl NetRng {
     pub const fn from_seed(seed: [u8; SEED_BYTES]) -> Self {
+        Self::from_key(key_words(&seed))
+    }
+
+    const fn from_key(key: [u32; KEY_WORDS]) -> Self {
         Self {
-            key: key_words(&seed),
-            counter: 0,
-            block: [0; BLOCK_WORDS],
-            next_word: BLOCK_WORDS,
+            key,
+            batch: [0; BATCH_WORDS],
+            next_word: BATCH_WORDS,
         }
     }
 
     /// Seeds from the CPU (RDSEED, else RDRAND) after the health checks in [`seed_from`].
     #[cfg(target_arch = "x86_64")]
     pub fn from_hardware() -> Result<Self, SeedError> {
-        hardware::seed().map(Self::from_seed)
+        let mut seed = hardware::seed()?;
+        let rng = Self::from_key(key_words(&seed));
+        wipe(&mut seed);
+        Ok(rng)
     }
 
     fn refill(&mut self) {
-        let nonce = [(self.counter >> 32) as u32, 0, 0];
-        self.block = chacha20_block(&self.key, self.counter as u32, &nonce);
-        self.counter = self.counter.wrapping_add(1);
-        self.next_word = 0;
+        for (counter, block) in self.batch.chunks_exact_mut(BLOCK_WORDS).enumerate() {
+            block.copy_from_slice(&chacha20_block(&self.key, counter as u32, &[0; 3]));
+        }
+        self.key.copy_from_slice(&self.batch[..KEY_WORDS]);
+        wipe(&mut self.batch[..KEY_WORDS]);
+        self.next_word = KEY_WORDS;
     }
 
     pub fn next_u32(&mut self) -> u32 {
-        if self.next_word == BLOCK_WORDS {
+        if self.next_word == BATCH_WORDS {
             self.refill();
         }
-        let word = self.block[self.next_word];
-        self.block[self.next_word] = 0;
+        let word = self.batch[self.next_word];
+        self.batch[self.next_word] = 0;
         self.next_word += 1;
         word
     }
@@ -154,7 +189,9 @@ impl NetRng {
     pub fn fork(&mut self) -> Self {
         let mut seed = [0u8; SEED_BYTES];
         self.fill_bytes(&mut seed);
-        Self::from_seed(seed)
+        let child = Self::from_key(key_words(&seed));
+        wipe(&mut seed);
+        child
     }
 
     /// A free ephemeral port: a uniformly random start in the dynamic range, then the next free
@@ -170,9 +207,9 @@ impl NetRng {
 /// RFC 6528 initial sequence numbers: `ISN = M + F(local, remote, secret)`, where `F` is the
 /// ChaCha20 block function keyed with a secret drawn from a [`NetRng`] and given the
 /// connection's four-tuple as the nonce, and `M` is a clock.
-#[derive(Clone)]
 pub struct IssKey {
-    secret: [u32; 8],
+    secret: [u32; KEY_WORDS],
+    tick_period_ns: u64,
 }
 
 impl core::fmt::Debug for IssKey {
@@ -181,16 +218,35 @@ impl core::fmt::Debug for IssKey {
     }
 }
 
-/// `M` advances this much per stack tick: RFC 6528's 4 µs clock at the 1 ms production tick.
-pub const ISS_CLOCK_PER_TICK: u32 = 250;
+impl Drop for IssKey {
+    fn drop(&mut self) {
+        wipe(&mut self.secret);
+    }
+}
+
+/// RFC 6528's clock `M` advances once every 4 µs.
+pub const ISS_CLOCK_PERIOD_NS: u64 = 4_000;
+/// The stack tick an [`IssKey`] assumes until [`IssKey::set_tick_period_ns`] says otherwise: the
+/// kernel self-tests drive the stack with a millisecond clock.
+pub const DEFAULT_TICK_PERIOD_NS: u64 = 1_000_000;
 
 impl IssKey {
     pub fn new(rng: &mut NetRng) -> Self {
         let mut seed = [0u8; SEED_BYTES];
         rng.fill_bytes(&mut seed);
-        Self {
+        let key = Self {
             secret: key_words(&seed),
-        }
+            tick_period_ns: DEFAULT_TICK_PERIOD_NS,
+        };
+        wipe(&mut seed);
+        key
+    }
+
+    /// The length of one `now` tick passed to [`Self::iss`], so `M` keeps RFC 6528's 4 µs rate
+    /// whatever the stack clock's period. Must be non-zero.
+    pub fn set_tick_period_ns(&mut self, tick_period_ns: u64) {
+        debug_assert!(tick_period_ns != 0);
+        self.tick_period_ns = tick_period_ns;
     }
 
     pub fn iss(
@@ -204,7 +260,7 @@ impl IssKey {
             u32::from_be_bytes(remote.addr.octets()),
             (u32::from(local.port) << 16) | u32::from(remote.port),
         ];
-        let clock = (now as u32).wrapping_mul(ISS_CLOCK_PER_TICK);
+        let clock = (now.wrapping_mul(self.tick_period_ns) / ISS_CLOCK_PERIOD_NS) as u32;
         clock.wrapping_add(chacha20_block(&self.secret, 0, &nonce)[0])
     }
 }
@@ -253,17 +309,32 @@ pub trait EntropySource {
     fn word(&mut self) -> Option<u64>;
 }
 
-/// A [`SEED_BYTES`] seed from `source`, allowing `retries` attempts per word. Each word must not
-/// be all zeros or all ones (the signature of a broken DRNG that still reports success) and
-/// must differ from the word before it (a stuck output).
+/// A [`SEED_BYTES`] seed from `source`, executing it at most `attempts` times per word. Each
+/// word must not be all zeros or all ones (the signature of a broken DRNG that still reports
+/// success) and must differ from the word before it (a stuck output). A failed seed's partial
+/// contents are zeroed.
 pub fn seed_from(
     source: &mut impl EntropySource,
-    retries: usize,
+    attempts: usize,
 ) -> Result<[u8; SEED_BYTES], SeedError> {
     let mut seed = [0u8; SEED_BYTES];
+    match fill_seed(source, attempts, &mut seed) {
+        Ok(()) => Ok(seed),
+        Err(error) => {
+            wipe(&mut seed);
+            Err(error)
+        }
+    }
+}
+
+fn fill_seed(
+    source: &mut impl EntropySource,
+    attempts: usize,
+    seed: &mut [u8; SEED_BYTES],
+) -> Result<(), SeedError> {
     let mut previous = None;
     for chunk in seed.chunks_exact_mut(8) {
-        let word = (0..retries)
+        let word = (0..attempts)
             .find_map(|_| source.word())
             .ok_or(SeedError::Exhausted)?;
         if word == 0 || word == u64::MAX || previous == Some(word) {
@@ -272,7 +343,7 @@ pub fn seed_from(
         previous = Some(word);
         chunk.copy_from_slice(&word.to_le_bytes());
     }
-    Ok(seed)
+    Ok(())
 }
 
 /// RDSEED when present; RDRAND when RDSEED is absent or runs dry. Unhealthy output never falls
@@ -288,13 +359,13 @@ pub fn seed_with_fallback(
         }
     }
     let from_rdseed = match rdseed {
-        Some(source) => seed_from(&mut Dyn(source), RDSEED_RETRIES),
+        Some(source) => seed_from(&mut Dyn(source), RDSEED_ATTEMPTS),
         None => Err(SeedError::Unavailable),
     };
     match (from_rdseed, rdrand) {
         (Ok(seed), _) => Ok(seed),
         (Err(SeedError::Unhealthy), _) => Err(SeedError::Unhealthy),
-        (Err(_), Some(source)) => seed_from(&mut Dyn(source), RDRAND_RETRIES),
+        (Err(_), Some(source)) => seed_from(&mut Dyn(source), RDRAND_ATTEMPTS),
         (Err(error), None) => Err(error),
     }
 }
@@ -419,21 +490,61 @@ mod tests {
         assert_eq!(serialize(&block), expected);
     }
 
-    /// RFC 8439 appendix A.1, test vectors 1 and 2: the all-zero key's keystream from block 0.
+    /// RFC 8439 appendix A.1, test vectors 1 and 2: blocks 0 and 1 of the all-zero key and nonce.
+    const RFC_8439_A_1_STREAM: &str = "76 b8 e0 ad a0 f1 3d 90 40 5d 6a e5 53 86 bd 28
+         bd d2 19 b8 a0 8d ed 1a a8 36 ef cc 8b 77 0d c7
+         da 41 59 7c 51 57 48 8d 77 24 e0 3f b8 d8 4a 37
+         6a 43 b8 f4 15 18 a1 1c c3 87 b6 69 b2 ee 65 86
+         9f 07 e7 be 55 51 38 7a 98 ba 97 7c 73 2d 08 0d
+         cb 0f 29 a0 48 e3 65 69 12 c6 53 3e 32 ee 7a ed
+         29 b7 21 76 9c e6 4e 43 d5 71 33 b0 74 d8 39 d5
+         31 ed 1f 28 51 0a fb 45 ac e1 0a 1f 4b 79 4d 6f";
+
     #[test]
-    fn generator_stream_matches_rfc_8439_a_1() {
+    fn block_function_matches_rfc_8439_a_1() {
+        let key = key_words(&[0; SEED_BYTES]);
+        let mut stream = serialize(&chacha20_block(&key, 0, &[0; 3]));
+        stream.extend(serialize(&chacha20_block(&key, 1, &[0; 3])));
+        assert_eq!(stream, hex(RFC_8439_A_1_STREAM));
+    }
+
+    /// The all-zero seed's output starts 32 bytes into the RFC 8439 A.1 keystream: the first
+    /// eight words of each batch become the next key and are never handed out.
+    #[test]
+    fn generator_output_skips_the_rekeying_words_of_the_rfc_8439_a_1_stream() {
         let mut rng = NetRng::from_seed([0; SEED_BYTES]);
-        let mut stream = [0u8; 128];
+        let mut stream = [0u8; 96];
         rng.fill_bytes(&mut stream);
-        let expected = hex("76 b8 e0 ad a0 f1 3d 90 40 5d 6a e5 53 86 bd 28
-             bd d2 19 b8 a0 8d ed 1a a8 36 ef cc 8b 77 0d c7
-             da 41 59 7c 51 57 48 8d 77 24 e0 3f b8 d8 4a 37
-             6a 43 b8 f4 15 18 a1 1c c3 87 b6 69 b2 ee 65 86
-             9f 07 e7 be 55 51 38 7a 98 ba 97 7c 73 2d 08 0d
-             cb 0f 29 a0 48 e3 65 69 12 c6 53 3e 32 ee 7a ed
-             29 b7 21 76 9c e6 4e 43 d5 71 33 b0 74 d8 39 d5
-             31 ed 1f 28 51 0a fb 45 ac e1 0a 1f 4b 79 4d 6f");
-        assert_eq!(stream.to_vec(), expected);
+        assert_eq!(stream.to_vec(), hex(RFC_8439_A_1_STREAM)[32..]);
+    }
+
+    fn batch(key: &[u32; KEY_WORDS]) -> Vec<u32> {
+        (0..BATCH_BLOCKS as u32)
+            .flat_map(|counter| chacha20_block(key, counter, &[0; 3]))
+            .collect()
+    }
+
+    /// Fast key erasure: each batch is keyed by the first eight words of the one before.
+    #[test]
+    fn each_batch_is_keyed_by_words_the_previous_batch_withheld() {
+        let mut rng = NetRng::from_seed([9; SEED_BYTES]);
+        let mut key = key_words(&[9; SEED_BYTES]);
+        for _ in 0..3 {
+            let expected = batch(&key);
+            let output: Vec<u32> = (KEY_WORDS..BATCH_WORDS).map(|_| rng.next_u32()).collect();
+            assert_eq!(output, expected[KEY_WORDS..]);
+            assert_eq!(rng.key[..], expected[..KEY_WORDS]);
+            assert!(!output.iter().any(|word| rng.key.contains(word)));
+            key.copy_from_slice(&expected[..KEY_WORDS]);
+        }
+    }
+
+    #[test]
+    fn a_refill_leaves_no_copy_of_the_new_key_in_the_batch() {
+        let mut rng = NetRng::from_seed([10; SEED_BYTES]);
+        rng.next_u32();
+        assert!(rng.batch[..KEY_WORDS].iter().all(|&word| word == 0));
+        assert_eq!(rng.batch[KEY_WORDS], 0, "handed-out words are zeroed");
     }
 
     #[test]
@@ -507,9 +618,12 @@ mod tests {
 
     #[test]
     fn ephemeral_port_skips_ports_in_use() {
-        let mut rng = NetRng::from_seed([4; SEED_BYTES]);
-        let first = rng.clone().ephemeral_port(|_| false).unwrap();
-        let next = rng.ephemeral_port(|port| port == first).unwrap();
+        let first = NetRng::from_seed([4; SEED_BYTES])
+            .ephemeral_port(|_| false)
+            .unwrap();
+        let next = NetRng::from_seed([4; SEED_BYTES])
+            .ephemeral_port(|port| port == first)
+            .unwrap();
         assert_eq!(
             next,
             if first == EPHEMERAL_PORT_LAST {
@@ -545,10 +659,7 @@ mod tests {
         assert_ne!(iss, other_key.iss(local, remote, 1_000));
         let (other_local, _) = tuple(50_001);
         assert_ne!(iss, key.iss(other_local, remote, 1_000));
-        assert_eq!(
-            key.iss(local, remote, 1_001),
-            iss.wrapping_add(ISS_CLOCK_PER_TICK)
-        );
+        assert_eq!(key.iss(local, remote, 1_001), iss.wrapping_add(250));
         let sample: HashSet<u32> = (0..10_000u16)
             .map(|port| {
                 let (local, remote) = tuple(EPHEMERAL_PORT_FIRST + port);
@@ -556,6 +667,29 @@ mod tests {
             })
             .collect();
         assert!(sample.len() > 9_980, "{} distinct ISSs", sample.len());
+    }
+
+    /// `M` advances once per 4 µs of stack time whatever the stack tick's length.
+    #[test]
+    fn iss_clock_keeps_four_microseconds_per_step_for_any_tick_period() {
+        let mut rng = NetRng::from_seed([11; SEED_BYTES]);
+        let mut key = IssKey::new(&mut rng);
+        let (local, remote) = tuple(50_000);
+        for (tick_period_ns, ticks, steps) in [
+            (1_000_000, 1, 250),
+            (10_000_000, 1, 2_500),
+            (100_000, 10, 250),
+            (999_848, 1_000, 249_962),
+        ] {
+            key.set_tick_period_ns(tick_period_ns);
+            let start = 5_000;
+            assert_eq!(
+                key.iss(local, remote, start + ticks)
+                    .wrapping_sub(key.iss(local, remote, start)),
+                steps,
+                "tick period {tick_period_ns} ns"
+            );
+        }
     }
 
     struct Scripted(Vec<Option<u64>>);

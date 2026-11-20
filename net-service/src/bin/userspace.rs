@@ -914,11 +914,14 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             generation,
             rng.fork(),
         );
+        shared_tcp_transport_mut().set_tick_period_ns(tick_period_ns());
         let heap_checkpoint = current_heap_offset();
         TLS_HEAP_CHECKPOINT.store(heap_checkpoint, Ordering::SeqCst);
         bootstrap.tls_heap_checkpoint = heap_checkpoint as u64;
         bootstrap.tls_heap_after_last = heap_checkpoint as u64;
     }
+    // Every stream is forked; dropping the root zeroes its key so it cannot be recovered later.
+    drop(rng);
     let Some(service) = (unsafe { service_state().map(|state| &mut *state) }) else {
         finish();
     };
