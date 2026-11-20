@@ -9,8 +9,8 @@ use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_capability::syscall_abi::SYSCALL_NR_CAP_AUDIT_READ;
 use clean_slate_capability::{
-    event_for, format_audit_line, AuditEvent, AuditKind, AuditSink, BoundedAuditLog,
-    CapabilityError, CapabilityHandle, HolderId, ResourceClass, ResourceRef, Rights,
+    event_for, format_audit_line, AuditEvent, AuditKind, BoundedAuditLog, CapabilityError,
+    CapabilityHandle, HolderId, Recorded, ResourceClass, ResourceRef, Rights,
     AUDIT_EVENT_SIZE_BYTES,
 };
 
@@ -79,14 +79,12 @@ pub(crate) fn record(mut event: AuditEvent) {
     event.timestamp_ns = audit_timestamp_ns();
     let class = event.class;
     let log = unsafe { audit_log_mut() };
-    log.record(event);
+    let (Recorded::Stored(sequence) | Recorded::Merged(sequence)) = log.record_event(event);
     let echo = unsafe { *AUDIT_SERIAL_ECHO.get() };
     // Serial `[AUD ]` lines are for attribution proof (M6.7/M6.8 gates), not every
-    // capability check — object-service polls would otherwise flood the log.
+    // capability check — object-service polls would otherwise flood the log. A merged
+    // use re-echoes the record it joined, with its new `count`.
     if echo && class == ResourceClass::Audit {
-        let sequence = log
-            .newest_sequence()
-            .expect("audit record should exist after insert");
         let stored = log
             .get(sequence)
             .expect("audit record should exist after insert");
@@ -154,10 +152,10 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
         return;
     }
 
-    let log = unsafe { &*AUDIT_LOG.get() };
+    let log = unsafe { audit_log_mut() };
     let mut scratch = [AuditEvent::EMPTY; MAX_AUDIT_READ_EVENTS];
     // Gaps in what the reader asked for come back as `AuditKind::Lost` records.
-    let (count, _) = log.read_from(since, &mut scratch[..max_events]);
+    let (count, next_since) = log.read_from(since, &mut scratch[..max_events]);
     if count > 0 {
         // SAFETY: `AuditEvent` is `repr(C)` with its padding spelled out as zeroed fields, so all
         // `count * AUDIT_EVENT_SIZE_BYTES` bytes of the kernel scratch are initialised.
@@ -171,6 +169,8 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
             frame.rax = CapabilityError::InvalidHandle.syscall_status();
             return;
         }
+        // Later uses must not change what this reader was given.
+        log.mark_read(next_since - 1);
     }
     frame.rax = count as u64;
 }
@@ -179,6 +179,7 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
 mod tests {
     use super::*;
     use crate::service::capability::lifecycle_capabilities_mut;
+    use clean_slate_capability::AUDIT_HOLDER_BUDGET;
 
     fn newest() -> AuditEvent {
         with_audit_log(|log| {
@@ -263,7 +264,27 @@ mod tests {
     }
 
     #[test]
-    fn a_full_ring_tells_a_late_reader_exactly_what_it_missed() {
+    fn repeated_allowed_decisions_are_one_record_with_a_count() {
+        let holder = HolderId(48);
+        let handle = grant_root(holder, AUDIT_RESOURCE, Rights::AUDIT_READ).expect("grant");
+        let first = next_sequence();
+        for _ in 0..3 {
+            record_decision(
+                holder,
+                AUDIT_RESOURCE,
+                Rights::AUDIT_READ,
+                handle,
+                0,
+                Ok(()),
+            );
+        }
+        assert_eq!(next_sequence(), first + 1);
+        let merged = with_audit_log(|log| log.get(first)).expect("merged record");
+        assert_eq!((merged.actor, merged.count), (holder, 3));
+    }
+
+    #[test]
+    fn a_flooding_holder_keeps_its_budget_and_a_late_reader_is_told_the_rest() {
         let first = next_sequence();
         let total = AUDIT_RING_CAPACITY as u64 + 37;
         for _ in 0..total {
@@ -282,9 +303,14 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(out[0].kind, AuditKind::Lost);
         assert_eq!(out[0].sequence, first);
-        assert_eq!(out[0].resource_id, 37);
-        assert_eq!(out[1].sequence, first + 37);
+        let missing = total - AUDIT_HOLDER_BUDGET as u64;
+        assert_eq!(out[0].resource_id, missing);
+        assert_eq!(out[1].sequence, first + missing);
         assert_eq!(out[1].kind, AuditKind::Authorize);
-        assert!(with_audit_log(|log| log.dropped()) >= 37);
+        assert_eq!(
+            with_audit_log(|log| log.held_by(HolderId(47))),
+            AUDIT_HOLDER_BUDGET
+        );
+        assert!(with_audit_log(|log| log.dropped()) >= missing);
     }
 }

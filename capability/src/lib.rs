@@ -27,7 +27,7 @@ pub use audit::{
     authorize_audited, event_for, format_audit_line, AuditEvent, AuditKind, AuditOutcome,
     AuditSink, NullAuditSink, PolicyRefusal, AUDIT_EVENT_SIZE_BYTES,
 };
-pub use audit_log::BoundedAuditLog;
+pub use audit_log::{BoundedAuditLog, Recorded, AUDIT_HOLDER_BUDGET};
 pub use authorize::{authorize, fork_inheritable, validate_delegation};
 pub use delegation::{delegate, delegation_depth, list_holder};
 pub use error::syscall_abi;

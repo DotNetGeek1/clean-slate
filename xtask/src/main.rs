@@ -689,16 +689,25 @@ const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[M6.5] quota holder=1 held=16 quota=16 table_slots=128 ",
     "[M6.5] PASS",
 ];
-/// The lane makes 124 records into the 64-slot ring (`kernel/src/selftest/m6_audit.rs`), so a
-/// reader starting at 1 must be told exactly 60 are lost. Seq 60 and 124 are the kernel's
-/// record-time echoes of the last lost record and the late read itself; the `reader told` line
-/// is what the CPL3 reader received.
-const M6_AUDIT_ACCEPTANCE_MARKERS: [&str; 6] = [
+/// `kernel/src/selftest/m6_audit.rs`: the auditor (pid 1) is granted the reader (seq 1),
+/// is denied once (seq 2) and polls 5 times (one record, seq 3, echoed again with each
+/// merged use). Then the intruder (pid 2) makes 100 denials (seq 4..=103), more than the
+/// 64-entry ring, but keeps only its 16-record budget, so its first 84 are the only loss.
+/// The auditor's late read merges into seq 3 (count=6) and must get its three records back
+/// intact; the `reader` lines are what the CPL3 reader received.
+const M6_AUDIT_ACCEPTANCE_MARKERS: [&str; 13] = [
     "[AUD ] seq=1 kind=grant ",
     "outcome=allowed",
-    "[AUD ] seq=60 kind=authorize ",
-    "[AUD ] seq=124 kind=authorize ",
-    "[M6.7] reader told lost first=1 missing=60 next=61 ",
+    "[AUD ] seq=2 kind=authorize actor=1 ",
+    "[AUD ] seq=3 kind=authorize actor=1 ",
+    " count=5 ",
+    "[AUD ] seq=4 kind=authorize actor=2 ",
+    "[AUD ] seq=103 kind=authorize actor=2 ",
+    "[AUD ] seq=3 kind=authorize actor=1 ",
+    " count=6 ",
+    "[M6.7] reader kept grant=1 denial=2 merged=3 count=6",
+    "[M6.7] reader told lost first=4 missing=84 next=88 records=8",
+    "[M6.7] budget holder=2 held=16 budget=16 ring=64 denials=100",
     "[M6.7] PASS",
 ];
 /// Workload progress=1 is logged before any fixture is spawned. The owner revokes
