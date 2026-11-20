@@ -34,11 +34,12 @@
 //! write-back cache from persisting the superblock ahead of the payload it
 //! references.
 //!
-//! The device is assumed to write a 512-byte logical sector atomically on power
-//! loss. Each superblock is one sector, so a slot holds either a whole
-//! superblock or its previous bytes, and no crash, including one during the
-//! first [`ObjectStore::format`], leaves a device that is neither blank nor
-//! mountable. A device that tears inside a sector can interrupt the first
+//! The device is assumed to write one logical block (512 bytes on today's
+//! disks) atomically on power loss. Each superblock is one block, so a slot
+//! holds either a whole superblock or its previous bytes, and no crash,
+//! including one during the first [`ObjectStore::format`], leaves a device that
+//! is neither blank nor mountable. A device that tears inside a block can
+//! interrupt the first
 //! format with a slot holding only a byte prefix of the new superblock;
 //! [`probe`] refuses that as [`Refusal::InterruptedFormat`] rather than treat
 //! it as blank, because damage to a real store can leave the same bytes.

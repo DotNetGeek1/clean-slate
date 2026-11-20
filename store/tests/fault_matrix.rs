@@ -26,7 +26,7 @@
 //!   must mount, and never one older than the last acknowledged commit;
 //! - once `format` is acknowledged on a device that keeps flushes and writes
 //!   in place, no crash or bit flip makes the image `Blank` again;
-//! - the store's device contract is that a logical-sector write is atomic on
+//! - the store's device contract is that a one-logical-block write is atomic on
 //!   power loss. On an honest device that keeps it, no crash, including one
 //!   during the first `format`, leaves the image refused. The honest mode
 //!   never tears; the sector-atomic mode tears at logical-block boundaries,

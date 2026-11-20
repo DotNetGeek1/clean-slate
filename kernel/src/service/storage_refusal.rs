@@ -12,8 +12,35 @@ use crate::service::service_lifecycle_controller_mut;
 
 /// Logs the refusal recorded in `report`, if any.
 pub(crate) fn log_refusal(report: &StorageServiceBootstrap) {
-    if let Some(refusal) = DiskRefusal::decode(report.refusal) {
-        kernel_log_fmt(format_args!("[STOR] refusing data disk: {refusal}\n"));
+    if let Some(reason) = RefusalReason::from_code(report.refusal) {
+        kernel_log_fmt(format_args!("[STOR] refusing data disk: {reason}\n"));
+    }
+}
+
+/// A non-zero refusal code from the bootstrap page. A code this kernel cannot decode is still a
+/// refusal and is reported as such.
+#[derive(Debug, PartialEq, Eq)]
+enum RefusalReason {
+    Known(DiskRefusal),
+    Unknown(u64),
+}
+
+impl RefusalReason {
+    fn from_code(code: u64) -> Option<Self> {
+        match (code, DiskRefusal::decode(code)) {
+            (0, _) => None,
+            (_, Some(refusal)) => Some(Self::Known(refusal)),
+            (_, None) => Some(Self::Unknown(code)),
+        }
+    }
+}
+
+impl core::fmt::Display for RefusalReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Known(refusal) => write!(f, "{refusal}"),
+            Self::Unknown(code) => write!(f, "unknown refusal code {code:#x}"),
+        }
     }
 }
 
@@ -32,5 +59,36 @@ fn log_exiting_service_refusal() {
         Err(message) => kernel_log_fmt(format_args!(
             "[STOR] storage service bootstrap page unreadable at exit: {message}\n"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_is_no_refusal() {
+        assert_eq!(RefusalReason::from_code(0), None);
+    }
+
+    #[test]
+    fn a_known_code_reads_as_the_service_reason() {
+        let code = DiskRefusal::InterruptedFormat.encode();
+        let reason = RefusalReason::from_code(code).unwrap();
+        assert_eq!(
+            std::format!("{reason}"),
+            std::format!("{}", DiskRefusal::InterruptedFormat)
+        );
+    }
+
+    #[test]
+    fn an_undecodable_code_is_still_reported() {
+        for code in [6, 0xff, DiskRefusal::NotAStore.encode() | 1 << 8] {
+            let reason = RefusalReason::from_code(code).unwrap();
+            assert_eq!(
+                std::format!("{reason}"),
+                std::format!("unknown refusal code {code:#x}")
+            );
+        }
     }
 }
