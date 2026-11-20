@@ -1181,6 +1181,16 @@ mod tests {
             "revoke_for_holder",
         ),
         (
+            "capability/mod.rs",
+            "a_slot_allowance_lasts_until_teardown",
+            "revoke_for_holder",
+        ),
+        (
+            "capability/mod.rs",
+            "a_fork_child_does_not_inherit_its_parents_slot_allowance",
+            "revoke_for_holder",
+        ),
+        (
             "capability/graphics.rs",
             "grants_land_on_one_holder_and_teardown_revokes_them",
             "revoke_for_holder",

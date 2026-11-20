@@ -96,7 +96,9 @@ impl PolicyRefusal {
 /// affects (the receiver of a grant or delegation, the holder whose capabilities were
 /// revoked); for a use it is the actor. `count` is the number of capabilities a revoke or
 /// inherit touched; on an allowed use it is the number of identical uses the ring merged
-/// into this record (see [`crate::BoundedAuditLog`]); otherwise 0.
+/// into this record (see [`crate::BoundedAuditLog`]); on a service launch record (a grant
+/// naming the launched process) it is the slot allowance the manifest row gave the instance,
+/// 0 for the default quota; otherwise 0.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuditEvent {

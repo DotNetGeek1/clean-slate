@@ -9,6 +9,16 @@ pub const MAX_SLOTS: usize = 128;
 /// is exempt. With [`MAX_SLOTS`], no single holder can fill more than an eighth of the table.
 pub const HOLDER_SLOT_QUOTA: usize = 16;
 
+/// Largest slot allowance a holder may be given in place of [`HOLDER_SLOT_QUOTA`]. Only the
+/// kernel sets one, from a launch-manifest row, and never more than a quarter of the table.
+pub const MAX_SLOT_ALLOWANCE: usize = 32;
+
+/// Holders that may carry a slot allowance at once.
+pub const MAX_SLOT_ALLOWANCES: usize = 8;
+
+const _: () =
+    assert!(HOLDER_SLOT_QUOTA < MAX_SLOT_ALLOWANCE && MAX_SLOT_ALLOWANCE <= MAX_SLOTS / 4);
+
 /// Maximum delegation chain depth (root grant is depth 0).
 pub const MAX_DELEGATION_DEPTH: u8 = 4;
 

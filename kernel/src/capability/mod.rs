@@ -215,11 +215,21 @@ pub(crate) fn revoke_for_holder(holder: HolderId) -> usize {
             revoked_buffers.note(resource)
         });
     revoked_buffers.reconcile();
+    unsafe { capability_space_mut() }.clear_slot_allowance(holder);
     if revoked > 0 {
         // Names the process whose whole capability tree went, not one of its resources.
         audit::record_kernel_revoke(holder, ResourceRef::process(holder.0, 0), revoked);
     }
     revoked
+}
+
+/// Gives the instance `holder` of a manifest row the row's slot allowance. Only the service
+/// launch path calls this, before the row's grants; [`revoke_for_holder`] (teardown) clears it.
+pub(crate) fn set_slot_allowance(
+    holder: HolderId,
+    allowance: usize,
+) -> Result<(), CapabilityError> {
+    unsafe { capability_space_mut() }.set_slot_allowance(holder, allowance)
 }
 
 /// Returns whether `holder` holds any live capability for `resource` with `required` rights.
@@ -439,6 +449,46 @@ mod tests {
             (HOLDER_SLOT_QUOTA, CapabilityError::QuotaExceeded)
         );
         assert_eq!(revoke_for_holder(holder), HOLDER_SLOT_QUOTA);
+    }
+
+    #[test]
+    fn a_slot_allowance_lasts_until_teardown() {
+        let holder = HolderId(0x7e01);
+        assert_eq!(set_slot_allowance(holder, 24), Ok(()));
+        let mut granted = 0;
+        while grant_root(holder, ResourceRef::object(0x7e00), Rights::READ).is_ok() {
+            granted += 1;
+        }
+        assert_eq!(granted, 24);
+        assert_eq!(revoke_for_holder(holder), 24);
+        assert_eq!(
+            with_capability_space(|table| table.slot_allowance(holder)),
+            None,
+            "teardown returns the pid to the default quota"
+        );
+        assert_eq!(
+            set_slot_allowance(holder, clean_slate_capability::MAX_SLOT_ALLOWANCE + 1),
+            Err(CapabilityError::QuotaExceeded)
+        );
+    }
+
+    #[cfg(clean_slate_linux_proc)]
+    #[test]
+    fn a_fork_child_does_not_inherit_its_parents_slot_allowance() {
+        let (parent, child) = (HolderId(0x7f01), HolderId(0x7f02));
+        assert_eq!(set_slot_allowance(parent, 24), Ok(()));
+        grant_objects(parent, 0x7f00, 20);
+        assert_eq!(
+            inherit_capabilities_for_fork(parent, child),
+            Err(CapabilityError::QuotaExceeded)
+        );
+        assert_eq!(charge_of(child), (0, 0));
+        assert_eq!(
+            with_capability_space(|table| table.slot_allowance(child)),
+            None
+        );
+        revoke_for_holder(parent);
+        revoke_for_holder(child);
     }
 
     #[test]

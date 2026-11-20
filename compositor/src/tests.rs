@@ -29,6 +29,7 @@ use clean_slate_native_abi::{
     TrustedEnvelope,
 };
 use clean_slate_port::fake::{FakeConnection, FakePort};
+use clean_slate_service_fixtures::manifest::COMPOSITOR_SERVICE_SPEC;
 
 use clean_slate_graphics::geometry::Rect;
 use clean_slate_raster::{Canvas, Color};
@@ -307,9 +308,13 @@ impl<P: WindowPolicy> Harness<P> {
             presents: Vec::new(),
         };
         comp.start(&mut display).unwrap();
+        let mut port = FakePort::new(params).unwrap();
+        if let Some(allowance) = COMPOSITOR_SERVICE_SPEC.slot_allowance {
+            port.set_server_slot_allowance(allowance).unwrap();
+        }
         Self {
             comp,
-            port: FakePort::new(params).unwrap(),
+            port,
             shm: Box::new(Shm::new()),
             display,
             input: Box::new(FakeInput::new()),
