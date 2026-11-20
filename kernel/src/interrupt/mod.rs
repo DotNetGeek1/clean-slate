@@ -303,6 +303,9 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
 
     #[cfg(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test"))]
     if context.vector as usize == USER_TEST_VECTOR {
+        if let Ok(pid) = current_process_id() {
+            crate::service::storage_refusal::log_storage_service_exit(pid);
+        }
         fatal_kernel_error("object storage service issued an unexpected phase trap");
     }
 
@@ -656,12 +659,8 @@ pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> 
             bit(context.error_code, 4)
         ));
     }
-    if context.vector as usize == crate::arch::x86_64::USER_TEST_VECTOR
-        && unsafe { service_lifecycle_controller_mut() }
-            .live_pid(clean_slate_service_fixtures::STORAGE_SERVICE_ID)
-            == Some(pid)
-    {
-        crate::service::storage_refusal::log_exiting_service_refusal();
+    if context.vector as usize == crate::arch::x86_64::USER_TEST_VECTOR {
+        crate::service::storage_refusal::log_storage_service_exit(pid);
     }
     crate::service::system_init::on_process_death(
         pid,

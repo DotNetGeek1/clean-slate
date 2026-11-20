@@ -55,7 +55,9 @@ pub struct StorageServiceBootstrap {
 pub enum DiskRefusal {
     /// Neither superblock slot holds the store magic, and they are not all zero.
     NotAStore,
-    /// A superblock slot holds the store magic with a format version this build does not read.
+    /// A superblock slot with the store magic and a checksum valid under its own version's rules
+    /// records a format version this build does not read. A slot whose checksum fails is
+    /// corruption, whatever its version field says.
     UnsupportedVersion(u16),
     /// The store magic is present, but neither superblock slot is valid.
     SuperblocksInvalid,

@@ -124,6 +124,19 @@ impl FaultDevice {
         }
     }
 
+    /// A device whose live and durable images both start as `image`.
+    pub fn from_image(geometry: BlockGeometry, image: &[u8]) -> Self {
+        let live =
+            FakeBlockDevice::from_durable_bytes(geometry, image).expect("image matches geometry");
+        let device = Self::new(geometry, FaultConfig::default());
+        {
+            let mut state = device.state.borrow_mut();
+            state.live = live;
+            state.durable = image.to_vec();
+        }
+        device
+    }
+
     pub fn log(&self) -> Vec<Op> {
         self.state.borrow().log.clone()
     }

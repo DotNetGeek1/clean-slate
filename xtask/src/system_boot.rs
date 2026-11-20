@@ -1006,6 +1006,23 @@ mod tests {
         }
         disk_with_header(&path, &header);
         let error = ensure_data_disk(&path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(": corrupt (both superblock slots invalid);"),
+            "a version field whose checksum fails is corruption, not a stale disk: {error}"
+        );
+
+        for slot in header.chunks_exact_mut(DATA_DISK_BLOCK_BYTES) {
+            let byte_sum = slot
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !(8..12).contains(index))
+                .fold(0u32, |sum, (_, byte)| sum.wrapping_add(u32::from(*byte)));
+            slot[8..12].copy_from_slice(&byte_sum.to_le_bytes());
+        }
+        disk_with_header(&path, &header);
+        let error = ensure_data_disk(&path).unwrap_err();
         assert!(matches!(
             error,
             XtaskError::StaleDataDisk {

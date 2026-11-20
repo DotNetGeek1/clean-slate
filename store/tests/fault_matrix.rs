@@ -9,6 +9,11 @@
 //! `Incompatible` error. Never a mix, and never data no commit wrote. An
 //! unmountable image must probe as `Refused`, so the storage service leaves it
 //! alone, unless both superblock slots are all zero; only then is it `Blank`.
+//! `ObjectStore::open` must reach the same decision, and write nothing unless
+//! it formats a blank image. A refusal must name the damage on disk: a payload
+//! when some slot holds an intact superblock, "not a store" when neither slot
+//! holds the magic, and corrupt superblocks otherwise; never another format
+//! version, since no fault here produces a foreign slot with a valid checksum.
 //!
 //! Stronger checks where the device allows them:
 //! - unless writes are misdirected, every superblock on disk sits in the slot
@@ -16,7 +21,18 @@
 //!   whose superblock and payload bytes are intact, or an error when none is;
 //! - on an honest device (flushes kept, writes in place; pending writes may
 //!   persist in any subset and order, and tear), the newest intact superblock
-//!   must mount, and never one older than the last acknowledged commit.
+//!   must mount, and never one older than the last acknowledged commit;
+//! - once `format` is acknowledged on a device that keeps flushes and writes
+//!   in place, no crash or bit flip makes the image `Blank` again;
+//! - on an honest device whose writes tear only at logical-block boundaries,
+//!   no crash, including one during the first `format`, leaves the image
+//!   refused;
+//! - on an honest device whose writes tear at any byte, an image is refused
+//!   only when the first `format` was interrupted, and then each superblock
+//!   slot is blank or a zero-filled byte prefix of the block `format` wrote.
+//!   No format order avoids this: the first write to make a slot non-zero can
+//!   tear just after its first non-zero byte, which leaves a slot that is
+//!   neither blank nor a superblock.
 //!
 //! The run is bounded for `cargo test`; set `CLEAN_SLATE_STORE_FAULT_SCALE=N`
 //! to run N times as many seeded workloads.
@@ -29,7 +45,8 @@ use std::time::Instant;
 use clean_slate_block::fake::FakeBlockDevice;
 use clean_slate_block::{BlockDeviceId, BlockGeometry};
 use clean_slate_store::{
-    probe, ObjectStore, Probe, Refusal, StoreError, MAX_OBJECTS, SUPERBLOCK_SLOTS,
+    probe, ObjectStore, OpenError, Opened, Probe, Refusal, StoreError, MAX_OBJECTS, STORE_MAGIC,
+    SUPERBLOCK_SLOTS,
 };
 use support::fault_device::{CrashStep, FaultConfig, FaultDevice, OpKind, OpOutcome};
 
@@ -77,6 +94,9 @@ const TEAR_OFFSETS: &[usize] = &[
     BLOCK + 48,
 ];
 const RANDOM_TEAR_OFFSETS: usize = 3;
+/// Fixed bit flips in each superblock slot: the magic, the version field (2
+/// becomes 3, 0 and 258), the checksum and the generation.
+const FLIP_BITS: &[usize] = &[0, 32, 33, 40, 64, 96];
 /// Pending-write counts up to this enumerate every subset; above it, sample.
 const EXHAUSTIVE_SUBSET_LIMIT: usize = 6;
 const SAMPLED_SUBSETS: usize = 64;
@@ -299,6 +319,8 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 enum Mode {
     /// Pending writes persist in any subset and order at the crash.
     Honest,
+    /// As `Honest`, and one pending write tears at a logical-block boundary.
+    SectorAtomic,
     /// As `Honest`, and one pending write tears at a byte offset.
     Torn,
     /// Flushes are acknowledged without persisting; pending writes then
@@ -313,7 +335,17 @@ enum Mode {
 impl Mode {
     /// The device keeps its flush promise and stores data where it was told.
     fn is_honest(self) -> bool {
-        matches!(self, Self::Honest | Self::Torn)
+        matches!(self, Self::Honest | Self::SectorAtomic | Self::Torn)
+    }
+
+    /// Honest, and no logical block is ever left part old and part new.
+    fn is_sector_atomic(self) -> bool {
+        matches!(self, Self::Honest | Self::SectorAtomic)
+    }
+
+    /// What a flush acknowledged stays on disk where it was written, give or take a flipped bit.
+    fn persists_acknowledged_writes(self) -> bool {
+        self.is_honest() || self == Self::BitFlip
     }
 
     /// Every superblock on disk sits in the slot it was written for.
@@ -331,6 +363,8 @@ enum Outcome {
     RolledBack,
     /// Unmountable, so the storage service refuses the disk and leaves it as is.
     Refused(Refusal),
+    /// Refused, and `format` was never acknowledged: the crash interrupted the first format.
+    InterruptedFormat(Refusal),
     /// Unmountable with both superblock slots still all zero: no format or
     /// commit reached them, so the service formats a disk that holds nothing.
     Blank,
@@ -414,9 +448,40 @@ fn check(mode: Mode, run: &Run, image: &[u8]) -> Result<Outcome, String> {
             if blank { "all zero" } else { "not all zero" }
         ));
     }
+    if probed == Probe::Blank && run.last_acked.is_some() && mode.persists_acknowledged_writes() {
+        return Err(format!(
+            "format was acknowledged, yet the image probes {probed:?} and would be reformatted"
+        ));
+    }
+    if let Probe::Refused(refusal) = probed {
+        if let Some(expected) = expected_refusal(run, image) {
+            if refusal != expected {
+                return Err(format!(
+                    "refused as {refusal:?}, but the damage on disk is {expected:?}"
+                ));
+            }
+        }
+        if mode.is_sector_atomic() {
+            return Err(format!(
+                "a crash on an honest device with sector-atomic writes left it refused as \
+                 {refusal:?}"
+            ));
+        }
+        if mode == Mode::Torn && (run.last_acked.is_some() || !torn_first_format(run, image)) {
+            return Err(format!(
+                "honest device refused as {refusal:?}, and not because a tear interrupted the \
+                 first format"
+            ));
+        }
+    }
+    check_open(image, probed, &mounted)?;
 
     Ok(match (generation, run.last_acked) {
-        (None, _) => match probed {
+        (None, None) => match probed {
+            Probe::Refused(refusal) => Outcome::InterruptedFormat(refusal),
+            _ => Outcome::Blank,
+        },
+        (None, Some(_)) => match probed {
             Probe::Refused(refusal) => Outcome::Refused(refusal),
             _ => Outcome::Blank,
         },
@@ -426,12 +491,96 @@ fn check(mode: Mode, run: &Run, image: &[u8]) -> Result<Outcome, String> {
     })
 }
 
+/// The refusal an unmountable image must get, judged from where its slot bytes
+/// came from rather than by the store's decoder. `None` when a slot holds a
+/// superblock aimed at the other slot, which may or may not decode where it
+/// landed.
+fn expected_refusal(run: &Run, image: &[u8]) -> Option<Refusal> {
+    let writes = superblock_writes(&run.device);
+    let slots = (0..SUPERBLOCK_SLOTS)
+        .map(|lba| (lba, stored_block(image, lba)))
+        .collect::<Vec<_>>();
+    if slots.iter().any(|(lba, bytes)| {
+        writes
+            .iter()
+            .any(|write| write.lba == *lba && write.bytes == *bytes)
+    }) {
+        Some(Refusal::PayloadInvalid)
+    } else if slots
+        .iter()
+        .any(|(_, bytes)| writes.iter().any(|write| write.bytes == *bytes))
+    {
+        None
+    } else if slots
+        .iter()
+        .all(|(_, bytes)| bytes[..4] != STORE_MAGIC.to_le_bytes())
+    {
+        Some(Refusal::NotAStore)
+    } else {
+        Some(Refusal::SuperblocksInvalid)
+    }
+}
+
+/// Each superblock slot is blank or a strict byte prefix of the block `format`
+/// wrote, zero-filled after it: a sub-sector tear of the first format.
+fn torn_first_format(run: &Run, image: &[u8]) -> bool {
+    let Some(format_block) = superblock_writes(&run.device)
+        .into_iter()
+        .find(|write| write.generation == 0)
+        .map(|write| write.bytes)
+    else {
+        return false;
+    };
+    (0..SUPERBLOCK_SLOTS).all(|lba| {
+        let slot = stored_block(image, lba);
+        let written = slot
+            .iter()
+            .rposition(|&byte| byte != 0)
+            .map_or(0, |last| last + 1);
+        slot[..written] == format_block[..written] && slot != format_block.as_slice()
+    })
+}
+
+/// `open` must reach the decision `probe` made, and write nothing unless it
+/// formats a blank image.
+fn check_open(
+    image: &[u8],
+    probed: Probe,
+    mounted: &Result<(u64, Snapshot), StoreError>,
+) -> Result<(), String> {
+    let device = FaultDevice::from_image(geometry(), image);
+    let opened = ObjectStore::open(device.clone());
+    let mutations = device.log().len();
+    let holds = match (&opened, probed) {
+        (Ok((store, Opened::Formatted)), Probe::Blank) => {
+            store.committed_generation() == 0 && store.objects().is_empty()
+        }
+        (Ok((store, Opened::Mounted)), Probe::Mountable) => {
+            mutations == 0
+                && mounted.as_ref().ok()
+                    == Some(&(store.committed_generation(), snapshot_of(store)))
+        }
+        (Err(OpenError::Refused(refusal)), Probe::Refused(probed_refusal)) => {
+            mutations == 0 && *refusal == probed_refusal
+        }
+        _ => false,
+    };
+    if holds {
+        Ok(())
+    } else {
+        Err(format!(
+            "probe decided {probed:?}, but open gave {:?} after {mutations} writes and flushes",
+            opened.map(|(store, how)| (how, store.committed_generation()))
+        ))
+    }
+}
+
 /// Device faults for one run: none, a random non-empty set of dropped
 /// flushes, or one misdirected write.
 fn device_faults(mode: Mode, clean: &Run, rng: &mut Rng) -> FaultConfig {
     let log = clean.device.log();
     match mode {
-        Mode::Honest | Mode::Torn | Mode::BitFlip => FaultConfig::default(),
+        Mode::Honest | Mode::SectorAtomic | Mode::Torn | Mode::BitFlip => FaultConfig::default(),
         Mode::DroppedFlush => {
             let flushes = log.iter().filter(|op| op.kind == OpKind::Flush).count();
             let mut dropped_flushes = (0..flushes).filter(|_| rng.coin()).collect::<Vec<_>>();
@@ -542,6 +691,16 @@ fn crash_plans(mode: Mode, device: &FaultDevice, rng: &mut Rng) -> Vec<Vec<Crash
         .position(|write| log[write.op].outcome == OpOutcome::PowerLoss);
     match mode {
         Mode::Honest => subset_plans(count, rng),
+        Mode::SectorAtomic => {
+            let mut plans = subset_plans(count, rng);
+            for (index, write) in pending.iter().enumerate() {
+                for bytes in (BLOCK..write.data.len()).step_by(BLOCK) {
+                    plans.push(with_tear(Vec::new(), index, bytes));
+                    plans.push(with_tear(random_subset(count, rng), index, bytes));
+                }
+            }
+            plans
+        }
         Mode::Torn => {
             let mut plans = Vec::new();
             for (index, write) in pending.iter().enumerate() {
@@ -586,7 +745,7 @@ fn crash_plans(mode: Mode, device: &FaultDevice, rng: &mut Rng) -> Vec<Vec<Crash
                 })
                 .flat_map(|(lba, blocks)| lba..lba + u64::try_from(blocks).unwrap())
                 .collect::<Vec<_>>();
-            (0..6)
+            let mut plans = (0..6)
                 .map(|_| {
                     let mut plan = random_subset(count, rng);
                     let lba = if written.is_empty() || rng.below(4) == 0 {
@@ -600,7 +759,15 @@ fn crash_plans(mode: Mode, device: &FaultDevice, rng: &mut Rng) -> Vec<Vec<Crash
                     });
                     plan
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            for lba in 0..SUPERBLOCK_SLOTS {
+                for &bit in FLIP_BITS {
+                    let mut plan = random_subset(count, rng);
+                    plan.push(CrashStep::FlipBit { lba, bit });
+                    plans.push(plan);
+                }
+            }
+            plans
         }
         Mode::Misdirected => {
             let mut plans = vec![Vec::new(), (0..count).map(CrashStep::Persist).collect()];
@@ -710,34 +877,51 @@ fn assert_holds(report: &Report) {
     );
 }
 
+fn has_outcome(report: &Report, prefix: &str) -> bool {
+    report.outcomes.keys().any(|key| key.starts_with(prefix))
+}
+
 #[test]
 fn honest_crash_at_every_prefix_mounts_newest_intact_commit() {
     let report = crash_matrix(Mode::Honest);
     assert_holds(&report);
     assert!(report.outcomes.contains_key("InFlight") && report.outcomes.contains_key("LastAcked"));
+    assert!(report.outcomes.contains_key("Blank"));
 }
 
+/// The first `format` included: every crash leaves the disk blank or mountable.
+#[test]
+fn sector_atomic_tear_at_every_prefix_never_leaves_a_refused_disk() {
+    let report = crash_matrix(Mode::SectorAtomic);
+    assert_holds(&report);
+    assert!(report.outcomes.contains_key("InFlight") && report.outcomes.contains_key("LastAcked"));
+    assert!(report.outcomes.contains_key("Blank"));
+}
+
+/// A sub-sector tear during the first `format` can leave a refused disk
+/// (`InterruptedFormat`); once `format` is acknowledged, no tear does.
 #[test]
 fn torn_write_at_every_prefix_never_mixes_generations() {
     let report = crash_matrix(Mode::Torn);
     assert_holds(&report);
     assert!(report.outcomes.contains_key("InFlight") && report.outcomes.contains_key("LastAcked"));
+    assert!(!has_outcome(&report, "Refused"));
 }
 
 #[test]
 fn dropped_flush_at_every_prefix_never_mixes_generations() {
     let report = crash_matrix(Mode::DroppedFlush);
     assert_holds(&report);
-    assert!(
-        report.outcomes.contains_key("RolledBack")
-            || report.outcomes.keys().any(|key| key.starts_with("Refused"))
-    );
+    assert!(report.outcomes.contains_key("RolledBack") || has_outcome(&report, "Refused"));
 }
 
 #[test]
 fn bit_flip_at_every_prefix_never_mixes_generations() {
     let report = crash_matrix(Mode::BitFlip);
     assert_holds(&report);
+    assert!(report
+        .outcomes
+        .contains_key("InterruptedFormat(SuperblocksInvalid)"));
 }
 
 /// Holds before checksums bind object id and location (stage E of #224): a
