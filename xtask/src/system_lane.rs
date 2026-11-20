@@ -17,13 +17,16 @@
 //! The shell boot is `test-system-shell`'s: a fresh lane-owned data disk, the network fixture
 //! peer and COM1 on a loopback socket. Each [`Step`] is typed once the step before it is complete:
 //!
-//! 1. `nslookup` and `wget` from the shell reach the fixture through network generation 1.
-//! 2. A foreground `wget` to the fixture's hold port, which accepts and never answers, leaves
+//! 1. The audit flood (#219): [`AUDIT_FLOOD_DENIALS`] Ctrl-A then Ctrl-B, and the audit service
+//!    must print what the ring's per-holder budget kept and exactly how much it lost
+//!    ([`check_audit_flood`]).
+//! 2. `nslookup` and `wget` from the shell reach the fixture through network generation 1.
+//! 3. A foreground `wget` to the fixture's hold port, which accepts and never answers, leaves
 //!    the shell's child blocked in a TCP read.
-//! 3. Ctrl-\ faults the network service. The blocked read must fail with the reset error and
+//! 4. Ctrl-\ faults the network service. The blocked read must fail with the reset error and
 //!    the shell must still prompt; init restarts the service once; generation 2 passes its
 //!    launch audit, the shell's client capability is re-issued for it, and init settles again.
-//! 4. `nslookup` and `wget` from the same shell work again, through generation 2.
+//! 5. `nslookup` and `wget` from the same shell work again, through generation 2.
 //!
 //! Each `wget` step proves a full exchange both ways: the fixture answers port 4001 only after
 //! receiving the complete request, and the step requires it to have answered exactly one
@@ -45,7 +48,7 @@ use crate::m7_fixture::{FixtureCounts, M7FixturePeer};
 use crate::marker_spec::{first_guest_failure, first_guest_failure_in_bytes};
 use crate::serial_input_lane::{accept_serial, find, spawn_serial_reader, tail, SerialEvent};
 use crate::system_boot::{
-    ensure_data_disk, field, number, start_shell_fixture_peer, system_vm_config,
+    ensure_data_disk, field, number, start_shell_fixture_peer, system_vm_config, AUDIT_SERVICE,
     SYSTEM_DATA_DISK_FILENAME,
 };
 use crate::system_shell::{
@@ -71,7 +74,18 @@ const HOLD_SETTLE: Duration = Duration::from_secs(1);
 const RESET_ERROR: &str = "wget: error getting response: Connection reset by peer";
 const HOOKS_BANNER: &str =
     "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service";
-const SETTLED: &str = "[INIT] boot settled running=3 down=0; waiting, no deadline";
+const SETTLED: &str = "[INIT] boot settled running=4 down=0; waiting, no deadline";
+/// How many denials the flood step asks for: well past the budget, so most are lost.
+const AUDIT_FLOOD_DENIALS: u64 = 100;
+/// `clean_slate_capability::AUDIT_HOLDER_BUDGET`, the records one holder keeps in the audit
+/// ring, stated here rather than taken from the code under test.
+const AUDIT_HOLDER_BUDGET: u64 = 16;
+/// One Ctrl-A per denial, then Ctrl-B to commit them.
+const AUDIT_FLOOD_SEND: [u8; AUDIT_FLOOD_DENIALS as usize + 1] = {
+    let mut bytes = [0x01; AUDIT_FLOOD_DENIALS as usize + 1];
+    bytes[AUDIT_FLOOD_DENIALS as usize] = 0x02;
+    bytes
+};
 /// What a step must produce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Expect {
@@ -88,6 +102,8 @@ enum Expect {
     Held,
     /// The fault, the woken reader, the restart and generation 2 (see [`check_fault`]).
     Fault,
+    /// The flood and the audit service's report of it (see [`check_audit_flood`]).
+    AuditFlood,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -116,7 +132,12 @@ const WGET: Step = Step {
     },
 };
 
-const STEPS: [Step; 6] = [
+const STEPS: [Step; 7] = [
+    Step {
+        name: "audit flood",
+        send: &AUDIT_FLOOD_SEND,
+        expect: Expect::AuditFlood,
+    },
     NSLOOKUP,
     WGET,
     Step {
@@ -152,12 +173,13 @@ struct State {
     init_pid: u64,
     shell: Shell,
     network: Network,
+    audit_pid: u64,
 }
 
 /// The kernel's launch audit for a network instance must be exactly the row's grants.
 fn expected_network_authority(pid: u64) -> String {
     format!(
-        "[SVC ] authority service={NETWORK_SERVICE} pid={pid} lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1"
+        "[SVC ] authority service={NETWORK_SERVICE} pid={pid} lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1"
     )
 }
 
@@ -204,14 +226,15 @@ fn check_network_instance(
     Ok((Network { pid, generation }, announced_at + announced.len()))
 }
 
-/// The boot: the hooks build's banner, network generation 1, the first shell and init settled
-/// with all three services running.
+/// The boot: the hooks build's banner, network generation 1, the first shell, the audit service
+/// and init settled with all four services running.
 fn check_boot_segment(segment: &str) -> Result<State, String> {
     if !lines(segment).any(|line| line.contains(HOOKS_BANNER)) {
         return Err(format!("no {HOOKS_BANNER:?}: this is not the hooks build"));
     }
     let (init_pid, shell) = check_boot(segment)?;
     let (network, _) = check_network_instance(segment, 1, init_pid)?;
+    let audit = only_kernel_line(segment, &format!("[SVC ] launch service={AUDIT_SERVICE} "))?;
     if !lines(segment).any(|line| line.contains(SETTLED)) {
         return Err(format!("init has not printed {SETTLED:?}"));
     }
@@ -219,7 +242,93 @@ fn check_boot_segment(segment: &str) -> Result<State, String> {
         init_pid,
         shell,
         network,
+        audit_pid: number(audit, "pid")?,
     })
+}
+
+/// The flood, in `segment` (the output since it was typed). The kernel's hook line must show it
+/// denied init once (the witness) and then the shell once per Ctrl-A the host typed, in
+/// contiguous sequences, with none allowed and the shell's holder keeping only the budget.
+/// Then the audit service, from its own reads, must print the witness, one lost run of exactly
+/// the denials the budget evicted, and each kept denial, each once and nothing else for those
+/// sequences, before a summary that reaches the last of them. The counts it must match come
+/// from the host: how many bytes it typed and the budget.
+fn check_audit_flood(segment: &str, state: State) -> Result<State, String> {
+    let hook = only_kernel_line(segment, "[HOOK] audit flood ")?;
+    let witness = number(hook, "witness-seq")?;
+    let first = number(hook, "first-seq")?;
+    let next = number(hook, "next-seq")?;
+    if number(hook, "witness-holder")? != state.init_pid
+        || number(hook, "holder")? != state.shell.pid
+        || number(hook, "denials")? != AUDIT_FLOOD_DENIALS
+        || first != witness + 1
+        || next != first + AUDIT_FLOOD_DENIALS
+        || number(hook, "allowed")? != 0
+        || number(hook, "held")? != AUDIT_HOLDER_BUDGET
+    {
+        return Err(format!(
+            "expected init pid={} denied once, then the shell pid={} denied {AUDIT_FLOOD_DENIALS} times in the next sequences and keeping {AUDIT_HOLDER_BUDGET}: {hook:?}",
+            state.init_pid, state.shell.pid
+        ));
+    }
+    let after = &segment[line_at(segment, hook)?..];
+    let prefix = format!("[IPC ] console pid={}: [ADT ] ", state.audit_pid);
+    let reported: Vec<&str> = kernel_lines(after, &prefix)
+        .map(|line| &line[prefix.len()..])
+        .collect();
+    let last = next - 1;
+    let summary = reported
+        .iter()
+        .position(|line| {
+            line.starts_with("drained ") && number(line, "through").is_ok_and(|seq| seq >= last)
+        })
+        .ok_or_else(|| {
+            format!(
+                "waiting for the audit service pid={} to drain through seq={last}",
+                state.audit_pid
+            )
+        })?;
+    let reported = &reported[..summary];
+
+    let lost_run = format!(
+        "lost first={first} missing={}",
+        AUDIT_FLOOD_DENIALS - AUDIT_HOLDER_BUDGET
+    );
+    let mut want = vec![
+        format!("seq={witness} actor={} missing-right audit", state.init_pid),
+        lost_run.clone(),
+    ];
+    want.extend(
+        (next - AUDIT_HOLDER_BUDGET..next)
+            .map(|seq| format!("seq={seq} actor={} missing-right audit", state.shell.pid)),
+    );
+    for line in &want {
+        let count = reported.iter().filter(|got| *got == line).count();
+        if count != 1 {
+            return Err(format!(
+                "the audit service printed \"[ADT ] {line}\" {count} times, expected once"
+            ));
+        }
+    }
+    let flood = witness..next;
+    for line in reported {
+        let about_flood = if let Some(rest) = line.strip_prefix("seq=") {
+            let seq = rest.split(' ').next().and_then(|seq| seq.parse().ok());
+            seq.is_some_and(|seq| flood.contains(&seq))
+        } else if line.starts_with("lost ") {
+            let (start, missing) = (number(line, "first")?, number(line, "missing")?);
+            start < flood.end && flood.start < start + missing
+        } else {
+            false
+        };
+        if about_flood && !want.iter().any(|wanted| wanted == line) {
+            return Err(format!(
+                "the audit service printed \"[ADT ] {line}\" for the flood's sequences {}..={last}",
+                flood.start
+            ));
+        }
+    }
+    Ok(state)
 }
 
 /// Offset of the first line containing `needle` in `segment`.
@@ -245,6 +354,7 @@ fn check_fault(segment: &str, state: State) -> Result<State, String> {
         init_pid,
         shell,
         network,
+        ..
     } = state;
     let armed = format!(
         "[HOOK] network fault armed pid={} gen={} user_rip=0x0 parked-in=native",
@@ -371,6 +481,7 @@ fn check_step(
             Ok(state)
         }
         Expect::Fault => check_fault(segment, state),
+        Expect::AuditFlood => check_audit_flood(segment, state),
     }
 }
 
@@ -387,9 +498,11 @@ fn check_whole(transcript: &str) -> Result<(), String> {
     for (prefix, want) in [
         (format!("[SVC ] launch service={SHELL_SERVICE} "), 1),
         (format!("[SVC ] launch service={NETWORK_SERVICE} "), 2),
+        (format!("[SVC ] launch service={AUDIT_SERVICE} "), 1),
         ("[SUP ] restart service=".to_owned(), 1),
         ("[PROC] fault pid=".to_owned(), 1),
         ("[HOOK] network fault armed ".to_owned(), 1),
+        ("[HOOK] audit flood ".to_owned(), 1),
         ("[NET ] linux sockets lost ".to_owned(), 1),
     ] {
         let got = kernel_lines(transcript, &prefix).count();
@@ -443,8 +556,8 @@ pub(crate) fn run() -> Result<(), XtaskError> {
     let before = states[0];
     let after = states[states.len() - 1];
     println!(
-        "\n[STM ] PASS ({HOOKS_FEATURE} build) shell pid={} resolved through the fixture and fetched from it through network pid={} gen={}, the fixture answering the request it received; the next wget's request reached the fixture's hold port, which held it unanswered; Ctrl-\\ faulted the network service, the blocked wget read failed with ECONNRESET and the shell prompted again, init restarted the service as pid={} gen={}, its launch audit matched, the shell's client capability was re-issued for it, init settled, and from the same shell nslookup resolved through the fixture again and wget's request reached the fixture and was answered again",
-        before.shell.pid, before.network.pid, before.network.generation, after.network.pid, after.network.generation
+        "\n[STM ] PASS ({HOOKS_FEATURE} build) after {AUDIT_FLOOD_DENIALS} audit denials of the shell, the audit service pid={} printed the witness, the {AUDIT_HOLDER_BUDGET} denials the budget kept and exactly {} lost; shell pid={} resolved through the fixture and fetched from it through network pid={} gen={}, the fixture answering the request it received; the next wget's request reached the fixture's hold port, which held it unanswered; Ctrl-\\ faulted the network service, the blocked wget read failed with ECONNRESET and the shell prompted again, init restarted the service as pid={} gen={}, its launch audit matched, the shell's client capability was re-issued for it, init settled, and from the same shell nslookup resolved through the fixture again and wget's request reached the fixture and was answered again",
+        before.audit_pid, AUDIT_FLOOD_DENIALS - AUDIT_HOLDER_BUDGET, before.shell.pid, before.network.pid, before.network.generation, after.network.pid, after.network.generation
     );
     Ok(())
 }
@@ -622,6 +735,7 @@ mod tests {
     const SHELL: u64 = 4;
     const NET1: u64 = 3;
     const NET2: u64 = 8;
+    const AUDIT: u64 = 2;
 
     fn network_instance(pid: u64, generation: u64) -> String {
         format!(
@@ -638,8 +752,9 @@ mod tests {
             "{HOOKS_BANNER}\n\
              [KERN] serial console input on vector=0x31\n\
              [KERN] boot profile=base\n\
-             [KERN] init launched pid={INIT} slot=0 declared-services=3\n\
+             [KERN] init launched pid={INIT} slot=0 declared-services=4\n\
              [IPC ] console pid={INIT}: [INIT] boot profile=base\n\
+             [SVC ] launch service=21760 pid={AUDIT} gen=1\n\
              {}\
              {}\n\
              [SVC ] shell process pid={SHELL} gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
@@ -706,6 +821,7 @@ mod tests {
                     pid: NET1,
                     generation: 1
                 },
+                audit_pid: AUDIT,
             }
         );
         let after = check_fault(&fault(), state).expect("fault");
@@ -723,7 +839,8 @@ mod tests {
     fn the_boot_must_be_the_hooks_build_and_settled() {
         let error = check_boot_segment(&boot().replace(HOOKS_BANNER, "")).unwrap_err();
         assert!(error.contains("not the hooks build"), "{error}");
-        assert!(check_boot_segment(&boot().replace("running=3", "running=2")).is_err());
+        assert!(check_boot_segment(&boot().replace("running=4", "running=3")).is_err());
+        assert!(check_boot_segment(&boot().replace("service=21760", "service=21761")).is_err());
         let wrong_audit = boot().replace("raw-net-link=1", "raw-net-link=0");
         assert!(check_boot_segment(&wrong_audit)
             .unwrap_err()
@@ -837,7 +954,8 @@ mod tests {
 
     #[test]
     fn the_reader_must_be_held_and_unprompted() {
-        let held = &STEPS[2];
+        let held = &STEPS[3];
+        assert_eq!(held.expect, Expect::Held);
         let state = booted();
         let typed =
             "wget -q -O - http://m7.fixture.test:4003/\r\n[LNX ] personality=x86_64 pid=7\n";
@@ -862,9 +980,111 @@ mod tests {
         );
     }
 
+    /// Init's denial at seq 200, the shell's 100 at 201..=300, of which it keeps 285..=300; the
+    /// service had lost 150..=169 before the flood.
+    fn flood() -> String {
+        let mut text = format!(
+            "[HOOK] audit flood witness-holder={INIT} witness-seq=200 holder={SHELL} denials=100 first-seq=201 next-seq=301 allowed=0 held=16\n\
+             [IPC ] console pid={AUDIT}: [ADT ] lost first=150 missing=20\n\
+             [IPC ] console pid={AUDIT}: [ADT ] seq=200 actor={INIT} missing-right audit\n\
+             [IPC ] console pid={AUDIT}: [ADT ] lost first=201 missing=84\n"
+        );
+        for seq in 285..301 {
+            text += &format!(
+                "[IPC ] console pid={AUDIT}: [ADT ] seq={seq} actor={SHELL} missing-right audit\n"
+            );
+        }
+        text += &format!(
+            "# [IPC ] console pid={AUDIT}: [ADT ] drained through=302 records=40 denied=17 refused=0 lost=104\n"
+        );
+        text
+    }
+
+    fn flood_error(segment: &str) -> String {
+        check_audit_flood(segment, booted()).unwrap_err()
+    }
+
+    #[test]
+    fn the_audit_service_reports_the_witness_the_kept_denials_and_the_exact_loss() {
+        assert_eq!(check_audit_flood(&flood(), booted()), Ok(booted()));
+        let unfinished = flood().replace("through=302", "through=299");
+        assert!(flood_error(&unfinished).contains("waiting for the audit service"));
+        let elsewhere = flood().replace(
+            &format!("console pid={AUDIT}: [ADT ] drained"),
+            "console pid=9: [ADT ] drained",
+        );
+        assert!(flood_error(&elsewhere).contains("waiting for the audit service"));
+        for (from, to) in [
+            ("missing=84", "missing=85"),
+            ("missing=84", "missing=83"),
+            ("[ADT ] seq=200 actor=1 missing-right audit\n", ""),
+            ("[ADT ] seq=290 ", "[ADT ] seq=29 "),
+            (
+                "[ADT ] seq=300 actor=4 missing-right audit",
+                "[ADT ] seq=300 actor=5 missing-right audit",
+            ),
+        ] {
+            let error = flood_error(&flood().replace(from, to));
+            assert!(error.contains("expected once"), "{to}: {error}");
+        }
+        let doubled = flood().replace(
+            "[ADT ] seq=290 actor=4 missing-right audit\n",
+            "[ADT ] seq=290 actor=4 missing-right audit\n[IPC ] console pid=2: [ADT ] seq=290 actor=4 missing-right audit\n",
+        );
+        assert!(flood_error(&doubled).contains("2 times"));
+        for extra in [
+            "seq=250 actor=4 missing-right audit",
+            "lost first=190 missing=11",
+            "lost first=300 missing=5",
+        ] {
+            let text = flood().replace(
+                "# [IPC ]",
+                &format!("[IPC ] console pid={AUDIT}: [ADT ] {extra}\n# [IPC ]"),
+            );
+            assert!(flood_error(&text).contains("flood's sequences"), "{extra}");
+        }
+        let before_flood = flood().replace(
+            "[ADT ] lost first=150 missing=20",
+            "[ADT ] lost first=150 missing=51",
+        );
+        assert!(flood_error(&before_flood).contains("flood's sequences"));
+    }
+
+    #[test]
+    fn the_flood_hook_must_show_the_typed_denials_contiguous_and_budgeted() {
+        for (from, to) in [
+            ("denials=100", "denials=99"),
+            ("first-seq=201", "first-seq=202"),
+            ("next-seq=301", "next-seq=300"),
+            ("allowed=0", "allowed=1"),
+            ("held=16", "held=17"),
+            ("witness-holder=1", "witness-holder=3"),
+            ("holder=4 denials", "holder=3 denials"),
+        ] {
+            let error = flood_error(&flood().replace(from, to));
+            assert!(error.contains("denied once"), "{to}: {error}");
+        }
+        assert!(
+            flood_error(&flood().replace("[HOOK] audit flood", "[HOOK] flood")).contains("no line")
+        );
+    }
+
+    #[test]
+    fn the_flood_is_typed_first_as_one_queue_byte_per_denial_then_one_commit() {
+        assert_eq!(STEPS[0].expect, Expect::AuditFlood);
+        let (commit, queued) = STEPS[0].send.split_last().unwrap();
+        assert_eq!(*commit, 0x02);
+        assert_eq!(queued.len() as u64, AUDIT_FLOOD_DENIALS);
+        assert!(queued.iter().all(|byte| *byte == 0x01));
+        assert!(AUDIT_FLOOD_DENIALS > AUDIT_HOLDER_BUDGET);
+        for step in &STEPS[1..] {
+            assert!(!step.send.iter().any(|byte| [0x01, 0x02].contains(byte)));
+        }
+    }
+
     #[test]
     fn the_whole_run_allows_one_fault_one_restart_and_no_failure() {
-        let whole = format!("{}{}", boot(), fault());
+        let whole = format!("{}{}{}", boot(), flood(), fault());
         assert_eq!(check_whole(&whole), Ok(()));
         for extra in [
             "[FAIL] something\n",
