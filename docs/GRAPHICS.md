@@ -192,10 +192,11 @@ Shared-buffer allocation is ambient but bounded by a per-owner quota (#195); sha
 
 ## Reserved syscalls
 
-Numbers are reserved in `clean_slate_capability::syscall_abi` and aliased in `native-abi`. Each row gives that syscall's status on this tree; an unimplemented number returns `SYSCALL_ENOSYS` (`u64::MAX - 37`) for every subop. Status sentinels live in `native-abi/src/status.rs`.
+Numbers 16–20 are reserved in `clean_slate_capability::syscall_abi` and aliased in `native-abi`; 3 is defined in `native-abi` alone. Each row gives that syscall's status on this tree; an unimplemented number returns `SYSCALL_ENOSYS` (`u64::MAX - 37`) for every subop. Status sentinels live in `native-abi/src/status.rs`.
 
 | Number | Constant | Owner | Status |
 |---|---|---|---|
+| 3 | `SYSCALL_NR_IPC_SEND` (`native-abi::desktop`) | #220 | implemented: console output only, in every build. A handle that does not name the console sink is `EBADF` ([ARCHITECTURE.md](ARCHITECTURE.md#m35-initial-capability-authorized-ipc-direction)) |
 | 16 | `SYSCALL_NR_SHARED_BUFFER` | #195 | implemented: subops 1–5 ([Shared buffers](#shared-buffers-syscall-16-195)); 0 and 6.. → `EINVAL` |
 | 17 | `SYSCALL_NR_SERVICE_PORT` | #200 | implemented: subops 1–9 ([Service port ABI](#service-port-abi-syscall-17)); 0 and 10.. → `EINVAL` |
 | 18 | `SYSCALL_NR_DISPLAY` | #111, #114 | implemented: subops 1–6 ([Display ABI](#display-abi-syscall-18)); 0 and 7.. `EINVAL`; subops frozen in `graphics::abi::display` |

@@ -72,8 +72,12 @@ impl DesktopLaunchPage {
     }
 }
 
-/// Syscall 3 `IPC_SEND(handle, ptr, len)`: on a console-sink handle the kernel prints
-/// `[IPC ] console pid=<pid>: <text>` on serial.
+/// Syscall 3 `IPC_SEND(handle, ptr, len)` is native console output: the kernel prints
+/// `[IPC ] console pid=<pid>: <text>` on serial and returns the byte count. It writes only to
+/// the console sink: a handle that names anything else, a torn-down sink included, is `EBADF`;
+/// a live sink's handle the caller does not hold is `EACCES`; the caller's capability revoked
+/// while the sink lives is `ESTALE`; and an unreadable buffer or a length of 0 or over
+/// [`CONSOLE_LINE_BYTES`] is `EINVAL`.
 pub const SYSCALL_NR_IPC_SEND: u64 = 3;
 /// Longest console message the kernel accepts.
 pub const CONSOLE_LINE_BYTES: usize = 64;

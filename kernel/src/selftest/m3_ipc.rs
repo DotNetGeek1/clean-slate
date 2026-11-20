@@ -417,8 +417,12 @@ pub(crate) fn handle_userspace_ipc_entry(context: &InterruptContext) -> Result<u
             kernel_log_line(IPC_UNAUTHORIZED_DENIED_MARKER);
             let table = unsafe { endpoint_table_mut() };
             table.teardown_endpoint(state.endpoint_slot)?;
-            match table.send_message(USERSPACE_IPC_TEST_PID, state.granted_capability, b"stale") {
-                Err(IpcSendError::StaleCapability) => {}
+            match table.send_console_message(
+                USERSPACE_IPC_TEST_PID,
+                state.granted_capability,
+                b"stale",
+            ) {
+                Err(IpcSendError::NotConsoleSink) => {}
                 _ => {
                     return Err("endpoint teardown did not invalidate outstanding capability");
                 }

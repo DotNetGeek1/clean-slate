@@ -418,6 +418,14 @@ The first IPC primitive should keep policy narrow and explicit:
 
 This initial implementation uses copying and intentionally defers shared-memory/zero-copy optimization to later milestones.
 
+Syscall 3 (`SYSCALL_NR_IPC_SEND`) is native console output and nothing else (#220): init, the services, the compositor, the desktop shell and native apps write their `[IPC ] console pid=N: …` lines through it, and messages between processes go through the service port (syscall 17). It accepts a handle only if the endpoint the handle names (slot and generation) is a live console sink, and it checks that before the sender's capability. Any other handle is `EBADF`, including one naming a console sink that has been torn down. The kernel records the first 8 such refusals of a boot as `[IPC ] console write refused pid=N handle=…: not the console sink`, followed by one line saying later refusals are not logged: any native process can make the call, and serial output runs with interrupts masked. A live console sink's handle that the caller does not hold is `EACCES`, and the caller's capability revoked while the sink lives is `ESTALE`.
+
+The Linux console write (`write(2)` on a console descriptor) checks in a different order: the caller's `IpcEndpoint` write right first (`EACCES`), then that the descriptor's endpoint is live (`EBADF`) and a console sink (`EBADF`). It records nothing.
+
+Mailbox endpoints, and kernel delivery to them, compile only into the `m3-resources-self-test` and `m4-crash-service-self-test` builds, which use them to account for per-process IPC resources. Every other build, the system kernel included, has console sinks only.
+
+At boot, init calls syscall 3 with its lifecycle handle, and `test-system-boot` requires the kernel's refusal record for init's pid. That handle (`0x10000`) names endpoint generation 0, which no endpoint ever has, so the lane shows that a handle naming no endpoint is refused with `EBADF` in the default image. The lane also fails if the probe text reaches serial, but only as a regression guard. Refusing a live endpoint of another kind is covered by the kernel host tests alone.
+
 ## M4.1 service lifecycle protocol direction
 
 M4.1 defines the shared contract between the userspace supervisor, supervised services, and the kernel lifecycle-control path before implementation lanes fan out. The canonical types and wire encoding live in the workspace crate `clean-slate-service-lifecycle` (`service-lifecycle/`).

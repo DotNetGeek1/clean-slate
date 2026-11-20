@@ -37,7 +37,6 @@ use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::interrupt::timer::kernel_ticks;
 use crate::ipc::endpoint_table_mut;
-use crate::ipc::IpcEndpointKind;
 use crate::ipc::IpcSendError;
 use crate::ipc::IPC_MAX_MESSAGE_BYTES;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -114,6 +113,7 @@ use crate::syscall::validation::validate_canonical_user_return_state;
 use crate::syscall::validation::validate_sysret_selector_triplet;
 use clean_slate_capability::syscall_abi as cap_abi;
 use clean_slate_native_abi::lifecycle as lifecycle_abi;
+use clean_slate_native_abi::status::STATUS_EBADF;
 use clean_slate_service_fixtures::{
     BlockTransportOp, BlockTransportRequest, BlockTransportResponse, BlockTransportStatus,
     BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES, BLOCK_TRANSPORT_REQUEST_BYTES,
@@ -226,27 +226,26 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
         }
     };
     let table = unsafe { endpoint_table_mut() };
-    match table.send_message(sender_pid, frame.rdi, &copied[..length]) {
-        Ok(result) => {
-            if result.endpoint_kind == IpcEndpointKind::ConsoleSink {
-                let message = core::str::from_utf8(&copied[..length]).unwrap_or("<non-utf8>");
-                kernel_log_fmt(format_args!("[IPC ] console pid={sender_pid}: {message}\n"));
-                #[cfg(feature = "m4-supervisor-self-test")]
-                if sender_pid == USERSPACE_SUPERVISOR_TEST_PID {
-                    observe_supervisor_console_line(sender_pid, message.trim_end());
-                }
+    match table.send_console_message(sender_pid, frame.rdi, &copied[..length]) {
+        Ok(bytes_sent) => {
+            let message = core::str::from_utf8(&copied[..length]).unwrap_or("<non-utf8>");
+            kernel_log_fmt(format_args!("[IPC ] console pid={sender_pid}: {message}\n"));
+            #[cfg(feature = "m4-supervisor-self-test")]
+            if sender_pid == USERSPACE_SUPERVISOR_TEST_PID {
+                observe_supervisor_console_line(sender_pid, message.trim_end());
             }
             #[cfg(feature = "m3-ipc-self-test")]
             if let Some(state) = unsafe { (&mut *USERSPACE_IPC_TEST_STATE.get()).as_mut() } {
                 if sender_pid == USERSPACE_IPC_TEST_PID && !state.send_ok_observed {
-                    kernel_log_fmt(format_args!(
-                        "{IPC_SEND_PASS_MARKER}{}\n",
-                        result.bytes_sent
-                    ));
+                    kernel_log_fmt(format_args!("{IPC_SEND_PASS_MARKER}{bytes_sent}\n"));
                     state.send_ok_observed = true;
                 }
             }
-            frame.rax = result.bytes_sent as u64;
+            frame.rax = bytes_sent as u64;
+        }
+        Err(IpcSendError::NotConsoleSink) => {
+            log_console_refusal(sender_pid, frame.rdi);
+            frame.rax = STATUS_EBADF;
         }
         Err(IpcSendError::Unauthorized) => {
             #[cfg(feature = "m3-ipc-self-test")]
@@ -268,6 +267,40 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
         }
         Err(IpcSendError::StaleCapability) => frame.rax = SYSCALL_ESTALE,
         Err(IpcSendError::InvalidMessageLength) => frame.rax = SYSCALL_EINVAL,
+    }
+}
+
+/// Any native process can call syscall 3 and serial output runs with interrupts masked, so only
+/// the first refusals of a boot are recorded, followed by one line saying the rest are not.
+const CONSOLE_REFUSAL_LOG_LIMIT: u64 = 8;
+static CONSOLE_REFUSAL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConsoleRefusalLog {
+    Record,
+    Suppressed,
+    Silent,
+}
+
+const fn console_refusal_log(earlier_refusals: u64) -> ConsoleRefusalLog {
+    if earlier_refusals < CONSOLE_REFUSAL_LOG_LIMIT {
+        ConsoleRefusalLog::Record
+    } else if earlier_refusals == CONSOLE_REFUSAL_LOG_LIMIT {
+        ConsoleRefusalLog::Suppressed
+    } else {
+        ConsoleRefusalLog::Silent
+    }
+}
+
+fn log_console_refusal(sender_pid: u64, handle: u64) {
+    match console_refusal_log(CONSOLE_REFUSAL_COUNT.fetch_add(1, Ordering::Relaxed)) {
+        ConsoleRefusalLog::Record => kernel_log_fmt(format_args!(
+            "[IPC ] console write refused pid={sender_pid} handle={handle:#x}: not the console sink\n"
+        )),
+        ConsoleRefusalLog::Suppressed => kernel_log_fmt(format_args!(
+            "[IPC ] console write refusals after the first {CONSOLE_REFUSAL_LOG_LIMIT} are not logged\n"
+        )),
+        ConsoleRefusalLog::Silent => {}
     }
 }
 
@@ -988,6 +1021,21 @@ pub(crate) fn current_syscall_caller_pid() -> Result<u64, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_refusals_log_at_most_the_limit_and_one_suppression_line() {
+        let actions = (0..1000).map(console_refusal_log);
+        let recorded = actions
+            .clone()
+            .filter(|action| *action == ConsoleRefusalLog::Record)
+            .count();
+        let suppressed = actions
+            .filter(|action| *action == ConsoleRefusalLog::Suppressed)
+            .count();
+        assert_eq!(recorded, CONSOLE_REFUSAL_LOG_LIMIT as usize);
+        assert_eq!(suppressed, 1);
+        assert_eq!(console_refusal_log(0), ConsoleRefusalLog::Record);
+    }
 
     #[test]
     fn lifecycle_reply_capacity_rejects_short_buffers() {

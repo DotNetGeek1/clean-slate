@@ -13,7 +13,7 @@ use clean_slate_native_abi::lifecycle::{
     decode_wait_result, LifecycleWait, LIFECYCLE_WAIT_NO_DEADLINE, SYSCALL_NR_LIFECYCLE_WAIT,
 };
 use clean_slate_native_abi::service_ready::{ServiceReadyResult, SYSCALL_NR_SERVICE_READY};
-use clean_slate_native_abi::status::is_status;
+use clean_slate_native_abi::status::{is_status, STATUS_EBADF};
 use clean_slate_native_abi::work_set::{SYSCALL_NR_WORK_SET, WORK_SET_OP_NOW};
 use clean_slate_service_fixtures::init_bootstrap::{
     InitBootstrap, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_VIRTIO_GPU,
@@ -28,6 +28,8 @@ use clean_slate_supervisor::{
 const SYSCALL_NR_IPC_SEND: u64 = 3;
 /// The kernel refuses longer IPC messages.
 const IPC_MAX_MESSAGE_BYTES: usize = 64;
+/// Must never appear on serial: the boot lane fails if it does.
+const CONSOLE_PROBE: &[u8] = b"[INIT] console probe on a non-console handle\n";
 /// Supervisor slots; the desktop manifest has six rows, the base one three.
 const SERVICE_SLOTS: usize = 8;
 
@@ -65,6 +67,7 @@ pub extern "C" fn _start() -> ! {
         fail(console, b"[INIT] could not register the system manifest\n");
     };
     probe_service_ready_refusal(console);
+    probe_console_refusal(console, bootstrap.lifecycle_capability);
 
     init.boot(now(console));
     loop {
@@ -99,6 +102,34 @@ fn probe_service_ready_refusal(console: u64) {
             );
         }
         _ => fail(console, b"[INIT] SERVICE_READY from init was not refused\n"),
+    }
+}
+
+/// Syscall 3 writes only to the console sink, so the kernel must refuse it on init's lifecycle
+/// handle. The boot lane checks the kernel's refusal record, and the kernel records only the
+/// first refusals of a boot, so this must run before any service starts.
+fn probe_console_refusal(console: u64, lifecycle_capability: u64) {
+    let sent = syscall(
+        SYSCALL_NR_IPC_SEND,
+        [
+            lifecycle_capability,
+            CONSOLE_PROBE.as_ptr() as u64,
+            CONSOLE_PROBE.len() as u64,
+            0,
+            0,
+            0,
+        ],
+    );
+    if sent == STATUS_EBADF {
+        let _ = ipc_send(
+            console,
+            b"[INIT] console write on the lifecycle handle refused: EBADF\n",
+        );
+    } else {
+        fail(
+            console,
+            b"[INIT] console write on the lifecycle handle was not refused with EBADF\n",
+        );
     }
 }
 
