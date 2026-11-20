@@ -72,9 +72,9 @@ impl GuestValues {
     }
 }
 
-/// Boots that send at least this many DNS queries must also change their query IDs alone from
-/// one boot to the next; with fewer, a chance repeat of the ID list (1 in 65536 for one query)
-/// would fail a sound guest, so only (port, ID) pairs are compared.
+/// Boots that send at least this many DNS queries must have query IDs alone that differ from the
+/// previous boot's and from the legacy IDs; with fewer, a chance match of the ID list (1 in
+/// 65536 for one query) would fail a sound guest, so only (port, ID) pairs are compared.
 const DNS_IDS_COMPARED_ALONE_FROM: usize = 2;
 
 fn push_distinct<T: PartialEq>(values: &mut Vec<T>, value: T) {
@@ -100,9 +100,10 @@ pub struct LegacyValues {
     pub dns_queries: &'static [(u16, u16)],
 }
 
-/// Every boot sent exactly `expected`; no boot repeats the legacy ports or DNS IDs; consecutive
-/// boots differ in their TCP source ports and in their DNS (port, ID) pairs, and also in their
-/// DNS IDs alone when a boot sends [`DNS_IDS_COMPARED_ALONE_FROM`] queries or more; no ISS
+/// Every boot sent exactly `expected`; no boot repeats the legacy ports or DNS (port, ID) pairs;
+/// consecutive boots differ in their TCP source ports and in their DNS (port, ID) pairs; when a
+/// boot sends [`DNS_IDS_COMPARED_ALONE_FROM`] queries or more, its DNS IDs alone differ from the
+/// previous boot's and from the legacy IDs; no ISS
 /// repeats anywhere in the lane. Lists are compared whole, so a chance repeat of one 16-bit
 /// value cannot fail a lane.
 pub fn require_unpredictable(
@@ -134,10 +135,19 @@ pub fn require_unpredictable(
                 boot.tcp_ports()
             ));
         }
-        if !legacy_dns_ids.is_empty() && boot.dns_ids() == legacy_dns_ids {
+        if expected.dns_queries >= DNS_IDS_COMPARED_ALONE_FROM
+            && !legacy_dns_ids.is_empty()
+            && boot.dns_ids() == legacy_dns_ids
+        {
             return Err(format!(
                 "{name}: DNS query IDs {:?} are the old counter values",
                 boot.dns_ids()
+            ));
+        }
+        if !legacy.dns_queries.is_empty() && boot.dns_queries == legacy.dns_queries {
+            return Err(format!(
+                "{name}: DNS (port, ID) pairs {:?} are the old counter values",
+                boot.dns_queries
             ));
         }
         for &(port, iss) in &boot.tcp_syns {
@@ -367,18 +377,28 @@ mod tests {
     }
 
     #[test]
-    fn legacy_dns_ids_fail_whatever_the_ports() {
+    fn legacy_dns_ids_fail_a_multi_query_lane_whatever_the_ports() {
         let mut boots = dns_boots();
         boots[1].dns_queries = vec![(52_000, 0x0000), (63_000, 0x0003)];
         assert_fails(
             require_unpredictable("dns", &boots, DNS, DNS_LEGACY),
             "boot 2: DNS query IDs [0, 3] are the old counter values",
         );
+    }
+
+    #[test]
+    fn a_single_query_lane_fails_on_the_legacy_pair_only() {
         let mut boots = network_boots();
         boots[0].dns_queries = vec![(58_000, 0x0000)];
+        assert_eq!(
+            require_unpredictable("net", &boots, NETWORK, NETWORK_LEGACY),
+            Ok(()),
+            "the legacy ID from a fresh port is a 1-in-65536 chance, not the old stack"
+        );
+        boots[0].dns_queries = vec![(49_152, 0x0000)];
         assert_fails(
             require_unpredictable("net", &boots, NETWORK, NETWORK_LEGACY),
-            "boot 1: DNS query IDs [0] are the old counter values",
+            "boot 1: DNS (port, ID) pairs [(49152, 0)] are the old counter values",
         );
     }
 
