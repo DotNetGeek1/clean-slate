@@ -135,7 +135,8 @@ fn classify<D: BlockDevice>(
 
     // A slot that still decodes makes this a damaged store of this version, whatever the other
     // slot holds. Only a slot whose checksum holds names another format: a damaged version field
-    // must not make a corrupt store look like a foreign one.
+    // must not make a corrupt store look like a foreign one. Version 0 was never written, so a
+    // slot claiming it is damaged, not foreign.
     let refusal = if (0..SUPERBLOCK_SLOTS)
         .zip(slots.iter())
         .any(|(slot, bytes)| decode_superblock(geometry, slot, bytes).is_ok())
@@ -144,7 +145,7 @@ fn classify<D: BlockDevice>(
     } else if let Some(version) = slots
         .iter()
         .filter_map(|bytes| checksummed_format_version(bytes))
-        .find(|&version| version != STORE_VERSION)
+        .find(|&version| version != 0 && version != STORE_VERSION)
     {
         Refusal::UnsupportedVersion(version)
     } else if holds_interrupted_first_format(geometry, &slots)? {
@@ -1476,6 +1477,19 @@ mod tests {
         device.flush().unwrap();
 
         assert_open_refuses(device, Refusal::UnsupportedVersion(STORE_VERSION + 1));
+    }
+
+    #[test]
+    fn version_zero_with_a_valid_checksum_is_corruption() {
+        let mut device = device_holding_one_object();
+        for slot_lba in 0..SUPERBLOCK_SLOTS {
+            let mut slot = durable_slot(&mut device, slot_lba);
+            set_version_with_valid_crc(&mut slot, 0);
+            device.write_blocks(slot_lba, 1, &slot).unwrap();
+        }
+        device.flush().unwrap();
+
+        assert_open_refuses(device, Refusal::SuperblocksInvalid);
     }
 
     #[test]
