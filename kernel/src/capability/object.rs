@@ -22,7 +22,7 @@ use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::mm::user_access::{copy_from_user, copy_to_user};
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::sched::wait::{
-    block_current_thread_with_resume, wake_all, wake_one, BlockedResume, Deadline, WaitKey,
+    block_current_thread_with_resume, wake_all_registered, BlockedResume, Deadline, WaitKey,
 };
 use crate::sync::global_cell::GlobalCell;
 use crate::time::{monotonic_ns, tsc_hz};
@@ -109,7 +109,7 @@ impl ObjectRequestQueue {
         slot.len = len;
         slot.payload[..len].copy_from_slice(payload);
         self.slots[slot_index] = slot;
-        wake_all(OBJECT_SERVICE_WORK_KEY);
+        wake_all_registered(OBJECT_SERVICE_WORK_KEY);
         Ok(request_id)
     }
 
@@ -186,7 +186,7 @@ impl ObjectRequestQueue {
             }
         }
         if requeued > 0 {
-            wake_all(OBJECT_SERVICE_WORK_KEY);
+            wake_all_registered(OBJECT_SERVICE_WORK_KEY);
         }
         requeued
     }
@@ -211,13 +211,19 @@ impl ObjectRequestQueue {
         slot.status = status;
         slot.len = len;
         slot.payload[..len].copy_from_slice(payload);
-        wake_one(object_request_wait_key(request_id));
+        wake_all_registered(object_request_wait_key(request_id));
         Ok(())
     }
 }
 
 /// Wait key the client of `request_id` blocks on until the object service completes
 /// it (native `OBJECT_SUBOP_POLL` and the Linux `/tmp` projection).
+///
+/// Both object queue keys are woken with `wake_all_registered`: every consumer checks the
+/// queue and registers its waiter within one syscall, with interrupts masked on the single
+/// CPU, so a wake with no waiter has nothing to deliver. A recorded pending wake would never
+/// be consumed once the client's poll finds the request done, and request ids are never
+/// reused, so each completion would leak a slot of the bounded pending-wake table.
 pub(crate) fn object_request_wait_key(request_id: u64) -> WaitKey {
     WaitKey(0x46_u64 << 56 | (request_id & 0x00FF_FFFF_FFFF_FFFF))
 }
@@ -1095,6 +1101,47 @@ mod tests {
         queue.service_complete(request_id, 0, b"late").unwrap();
         assert_eq!(queue.poll(client, request_id, &mut out), Ok(4));
         assert_eq!(&out[..4], b"late");
+    }
+
+    /// Completions that land before the client polls must not fill the pending-wake table
+    /// that `NativeOutcome` waiters (the net service) rely on.
+    #[test]
+    fn completions_before_poll_leave_the_pending_wake_table_free() {
+        use crate::sched::wait::{
+            clear_wait_table_for_tests, consume_pending_wake_for_tests,
+            pending_wake_keys_for_tests, wake_all, MAX_WAITERS,
+        };
+        clear_wait_table_for_tests();
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(42);
+        let mut out = [0u8; 8];
+        for _ in 0..2 * MAX_WAITERS {
+            let request_id = queue.submit(client, OBJECT_OP_READ, 7, &[]).unwrap();
+            let request = queue.service_next().expect("pending");
+            queue
+                .service_complete(request.request_id, 0, b"ok")
+                .unwrap();
+            assert_eq!(queue.poll(client, request_id, &mut out), Ok(2));
+        }
+        assert_eq!(pending_wake_keys_for_tests(), [0; MAX_WAITERS]);
+
+        let native_key = WaitKey(0x54 << 56);
+        assert_eq!(wake_all(native_key), 0);
+        assert!(
+            consume_pending_wake_for_tests(native_key),
+            "a NativeOutcome waiter's wake was dropped"
+        );
+    }
+
+    #[test]
+    fn object_queue_code_never_records_pending_wakes() {
+        let code = include_str!("object.rs")
+            .split("mod tests {")
+            .next()
+            .unwrap();
+        for forbidden in ["wake_all(", "wake_one("] {
+            assert!(!code.contains(forbidden), "{forbidden}");
+        }
     }
 
     fn poll_frame(deadline: u64) -> SyscallContext {
