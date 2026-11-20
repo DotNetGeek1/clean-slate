@@ -872,7 +872,7 @@ The host crash-consistency contract is explicit:
 - writes become durable only after `flush` succeeds;
 - `clean-slate-store` commits by writing object data into the inactive copy-on-write arena, then `flush`, then the next-generation superblock into the inactive superblock slot, then `flush` (`store/tests/commit_order.rs` pins this order);
 - the exact commit point is the successful return from that final `flush`;
-- a 512-byte logical-sector write is assumed atomic on power loss; under that assumption no crash, the first `format` included, leaves a refused disk (`store/tests/fault_matrix.rs`, sector-atomic mode). A sub-sector tear of the first `format` is refused as `InterruptedFormat`, never formatted;
+- a 512-byte logical-sector write is assumed atomic on power loss; under that assumption no crash, the first `format` included, leaves a refused disk (`store/tests/fault_matrix.rs`, honest and sector-atomic modes). A sub-sector tear of the first `format` is refused as `InterruptedFormat`, never formatted;
 - recovery must choose either the last previously committed generation or the fully committed new generation, never a mixed/torn combination.
 
 Useful fast M5 host commands:

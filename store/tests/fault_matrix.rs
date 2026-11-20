@@ -27,9 +27,11 @@
 //! - once `format` is acknowledged on a device that keeps flushes and writes
 //!   in place, no crash or bit flip makes the image `Blank` again;
 //! - the store's device contract is that a logical-sector write is atomic on
-//!   power loss. On an honest device that keeps it (writes tear only at
-//!   logical-block boundaries), no crash, including one during the first
-//!   `format`, leaves the image refused;
+//!   power loss. On an honest device that keeps it, no crash, including one
+//!   during the first `format`, leaves the image refused. The honest mode
+//!   never tears; the sector-atomic mode tears at logical-block boundaries,
+//!   which splits multi-block payload writes but never a one-block
+//!   superblock;
 //! - as defence in depth, on an honest device whose writes tear at any byte,
 //!   an image is refused only when the first `format` was interrupted, and
 //!   then as `InterruptedFormat`. No format order avoids such refusals: the
