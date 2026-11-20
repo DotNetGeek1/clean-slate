@@ -272,6 +272,13 @@ fn check_audit_flood(segment: &str, state: State) -> Result<State, String> {
             state.init_pid, state.shell.pid
         ));
     }
+    // An eviction can leave none until the next poll; more than one means polls store records.
+    if number(hook, "reader")? != state.audit_pid || number(hook, "reader-reads")? > 1 {
+        return Err(format!(
+            "expected the log to hold at most one record of the audit service pid={}'s reads: {hook:?}",
+            state.audit_pid
+        ));
+    }
     let after = &segment[line_at(segment, hook)?..];
     let prefix = format!("[IPC ] console pid={}: [ADT ] ", state.audit_pid);
     let reported: Vec<&str> = kernel_lines(after, &prefix)
@@ -296,12 +303,12 @@ fn check_audit_flood(segment: &str, state: State) -> Result<State, String> {
         AUDIT_FLOOD_DENIALS - AUDIT_HOLDER_BUDGET
     );
     let mut want = vec![
-        format!("seq={witness} actor={} missing-right audit", state.init_pid),
+        format!("#{witness} {} noright audit", state.init_pid),
         lost_run.clone(),
     ];
     want.extend(
         (next - AUDIT_HOLDER_BUDGET..next)
-            .map(|seq| format!("seq={seq} actor={} missing-right audit", state.shell.pid)),
+            .map(|seq| format!("#{seq} {} noright audit", state.shell.pid)),
     );
     for line in &want {
         let count = reported.iter().filter(|got| *got == line).count();
@@ -313,7 +320,7 @@ fn check_audit_flood(segment: &str, state: State) -> Result<State, String> {
     }
     let flood = witness..next;
     for line in reported {
-        let about_flood = if let Some(rest) = line.strip_prefix("seq=") {
+        let about_flood = if let Some(rest) = line.strip_prefix('#') {
             let seq = rest.split(' ').next().and_then(|seq| seq.parse().ok());
             seq.is_some_and(|seq| flood.contains(&seq))
         } else if line.starts_with("lost ") {
@@ -985,15 +992,13 @@ mod tests {
     /// service had lost 150..=169 before the flood.
     fn flood() -> String {
         let mut text = format!(
-            "[HOOK] audit flood witness-holder={INIT} witness-seq=200 holder={SHELL} denials=100 first-seq=201 next-seq=301 allowed=0 held=16\n\
+            "[HOOK] audit flood witness-holder={INIT} witness-seq=200 holder={SHELL} denials=100 first-seq=201 next-seq=301 allowed=0 held=16 reader={AUDIT} reader-reads=1\n\
              [IPC ] console pid={AUDIT}: [ADT ] lost first=150 missing=20\n\
-             [IPC ] console pid={AUDIT}: [ADT ] seq=200 actor={INIT} missing-right audit\n\
+             [IPC ] console pid={AUDIT}: [ADT ] #200 {INIT} noright audit\n\
              [IPC ] console pid={AUDIT}: [ADT ] lost first=201 missing=84\n"
         );
         for seq in 285..301 {
-            text += &format!(
-                "[IPC ] console pid={AUDIT}: [ADT ] seq={seq} actor={SHELL} missing-right audit\n"
-            );
+            text += &format!("[IPC ] console pid={AUDIT}: [ADT ] #{seq} {SHELL} noright audit\n");
         }
         text += &format!(
             "# [IPC ] console pid={AUDIT}: [ADT ] drained through=302 records=40 lost=104\n"
@@ -1018,23 +1023,20 @@ mod tests {
         for (from, to) in [
             ("missing=84", "missing=85"),
             ("missing=84", "missing=83"),
-            ("[ADT ] seq=200 actor=1 missing-right audit\n", ""),
-            ("[ADT ] seq=290 ", "[ADT ] seq=29 "),
-            (
-                "[ADT ] seq=300 actor=4 missing-right audit",
-                "[ADT ] seq=300 actor=5 missing-right audit",
-            ),
+            ("[ADT ] #200 1 noright audit\n", ""),
+            ("[ADT ] #290 ", "[ADT ] #29 "),
+            ("[ADT ] #300 4 noright audit", "[ADT ] #300 5 noright audit"),
         ] {
             let error = flood_error(&flood().replace(from, to));
             assert!(error.contains("expected once"), "{to}: {error}");
         }
         let doubled = flood().replace(
-            "[ADT ] seq=290 actor=4 missing-right audit\n",
-            "[ADT ] seq=290 actor=4 missing-right audit\n[IPC ] console pid=2: [ADT ] seq=290 actor=4 missing-right audit\n",
+            "[ADT ] #290 4 noright audit\n",
+            "[ADT ] #290 4 noright audit\n[IPC ] console pid=2: [ADT ] #290 4 noright audit\n",
         );
         assert!(flood_error(&doubled).contains("2 times"));
         for extra in [
-            "seq=250 actor=4 missing-right audit",
+            "#250 4 noright audit",
             "lost first=190 missing=11",
             "lost first=300 missing=5",
         ] {
@@ -1068,6 +1070,19 @@ mod tests {
         assert!(
             flood_error(&flood().replace("[HOOK] audit flood", "[HOOK] flood")).contains("no line")
         );
+    }
+
+    #[test]
+    fn the_log_must_not_hold_a_record_per_poll_of_the_audit_service() {
+        let none_yet = flood().replace("reader-reads=1", "reader-reads=0");
+        assert_eq!(check_audit_flood(&none_yet, booted()), Ok(booted()));
+        for (from, to) in [
+            ("reader-reads=1", "reader-reads=2"),
+            (&format!("reader={AUDIT} ") as &str, "reader=9 "),
+        ] {
+            let error = flood_error(&flood().replace(from, to));
+            assert!(error.contains("at most one record"), "{to}: {error}");
+        }
     }
 
     #[test]

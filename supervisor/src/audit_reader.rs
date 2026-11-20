@@ -8,9 +8,11 @@
 //!
 //! Lines, each at most one console message, and ending in `~` where one had to be cut:
 //! - `[ADT ] lost first=S missing=N` for each lost run;
-//! - `[ADT ] seq=S actor=A OUTCOME [KIND] CLASS [subject=H]` for each denied or refused record,
-//!   naming `KIND` only when it is not `authorize`, and `subject=H` in place of the actor when
-//!   the kernel acted;
+//! - `[ADT ] #S WHO OUTCOME [KIND] CLASS` for each denied or refused record, where `WHO` is the
+//!   actor `A`, `A>H` when it acted on another holder `H`, or `kernel>H`; `KIND` is named only
+//!   when it is not an authorization; and the outcome, kind and class are fixed short names
+//!   (`noright`, `mismatch`, `deleg`, `process`, ...), so a record fits one message while its
+//!   numbers stay within [`RECORD_LINE_MAX_NUMBER`];
 //! - `[ADT ] drained through=S records=R lost=L`, which the service prints after its first
 //!   drain and after any drain that printed one of the above.
 
@@ -18,7 +20,8 @@ use core::fmt::{self, Write};
 use core::mem::offset_of;
 
 use clean_slate_capability::{
-    AuditEvent, AuditKind, AuditOutcome, HolderId, ResourceClass, AUDIT_EVENT_SIZE_BYTES,
+    AuditEvent, AuditKind, AuditOutcome, CapabilityError, HolderId, PolicyRefusal, ResourceClass,
+    AUDIT_EVENT_SIZE_BYTES,
 };
 
 /// The kernel returns at most this many records per read.
@@ -154,7 +157,7 @@ impl AuditDrain {
             );
         }
         let after = if record.is_lost() {
-            summary.lost += record.resource_id;
+            summary.lost = summary.lost.saturating_add(record.resource_id);
             emit_line(
                 emit,
                 format_args!(
@@ -164,7 +167,7 @@ impl AuditDrain {
             );
             record.sequence.saturating_add(record.resource_id)
         } else {
-            summary.records += 1;
+            summary.records = summary.records.saturating_add(1);
             match record.outcome.tag {
                 AuditOutcome::TAG_ALLOWED => {}
                 AuditOutcome::TAG_DENIED => {
@@ -196,32 +199,128 @@ pub fn format_drain_summary(summary: &DrainSummary, emit: &mut impl FnMut(&str))
     );
 }
 
+/// A record line fits one console message while its sequence, actor and subject are each
+/// below 10^10, which covers the whole `u32` range.
+pub const RECORD_LINE_MAX_NUMBER: u64 = 9_999_999_999;
+
 struct RecordLine<'a>(&'a AuditRecord);
 
 impl fmt::Display for RecordLine<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let record = self.0;
-        write!(f, "[ADT ] seq={} ", record.sequence)?;
-        let kernel_acted = record.actor == HolderId::KERNEL.0;
-        if kernel_acted {
-            write!(f, "subject={}", record.subject)?;
-        } else {
-            write!(f, "actor={}", record.actor)?;
+        write!(f, "[ADT ] #{} ", record.sequence)?;
+        let kernel = HolderId::KERNEL.0;
+        match (record.actor, record.subject) {
+            (actor, subject) if actor == kernel && subject == kernel => f.write_str("kernel")?,
+            (actor, subject) if actor == kernel => write!(f, "kernel>{subject}")?,
+            (actor, subject) if subject == actor => write!(f, "{actor}")?,
+            (actor, subject) => write!(f, "{actor}>{subject}")?,
         }
-        write!(f, " {}", record.outcome.error_name())?;
-        match AuditKind::from_u8(record.kind) {
-            Some(AuditKind::Authorize) => {}
-            Some(kind) => write!(f, " {}", kind.name())?,
-            None => write!(f, " kind{}", record.kind)?,
+        write!(f, " {}", Outcome(record.outcome))?;
+        if record.kind != AuditKind::Authorize as u8 {
+            write!(f, " {}", Kind(record.kind))?;
         }
-        match ResourceClass::from_u8(record.class) {
-            Some(class) => write!(f, " {}", class.name())?,
-            None => write!(f, " class{}", record.class)?,
+        write!(f, " {}", Class(record.class))
+    }
+}
+
+struct Outcome(AuditOutcome);
+
+impl fmt::Display for Outcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let code = self.0.error_code;
+        match self.0.tag {
+            AuditOutcome::TAG_ALLOWED => f.write_str("allowed"),
+            AuditOutcome::TAG_DENIED => match CapabilityError::from_u8(code) {
+                Some(error) => f.write_str(denial_name(error)),
+                None => write!(f, "deny{code}"),
+            },
+            AuditOutcome::TAG_REFUSED => match PolicyRefusal::from_u8(code) {
+                Some(refusal) => f.write_str(refusal_name(refusal)),
+                None => write!(f, "rfsd{code}"),
+            },
+            tag => write!(f, "tag{tag}"),
         }
-        if !kernel_acted && record.subject != record.actor {
-            write!(f, " subject={}", record.subject)?;
+    }
+}
+
+struct Kind(u8);
+
+impl fmt::Display for Kind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match AuditKind::from_u8(self.0) {
+            Some(kind) => f.write_str(kind_name(kind)),
+            None => write!(f, "k{}", self.0),
         }
-        Ok(())
+    }
+}
+
+struct Class(u8);
+
+impl fmt::Display for Class {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match ResourceClass::from_u8(self.0) {
+            Some(class) => f.write_str(class_name(class)),
+            None => write!(f, "c{}", self.0),
+        }
+    }
+}
+
+const fn denial_name(error: CapabilityError) -> &'static str {
+    match error {
+        CapabilityError::InvalidHandle => "invalid",
+        CapabilityError::StaleHandle => "stale",
+        CapabilityError::Revoked => "revoked",
+        CapabilityError::UnauthorizedHolder => "foreign",
+        CapabilityError::WrongResource => "wrongres",
+        CapabilityError::MissingRight => "noright",
+        CapabilityError::InvalidRights => "badright",
+        CapabilityError::RightsWidening => "widening",
+        CapabilityError::DelegationDepthExceeded => "depth",
+        CapabilityError::CapacityExhausted => "capacity",
+        CapabilityError::GenerationExhausted => "gen-out",
+        CapabilityError::NotDelegable => "nodeleg",
+        CapabilityError::QuotaExceeded => "quota",
+    }
+}
+
+const fn refusal_name(refusal: PolicyRefusal) -> &'static str {
+    match refusal {
+        PolicyRefusal::StaleTarget => "staletgt",
+        PolicyRefusal::SelfTerminate => "selfterm",
+        PolicyRefusal::TargetNotLive => "notlive",
+        PolicyRefusal::InvalidRequest => "badreq",
+        PolicyRefusal::AuthorityMismatch => "mismatch",
+        PolicyRefusal::Unavailable => "unavail",
+        PolicyRefusal::Busy => "busy",
+    }
+}
+
+const fn kind_name(kind: AuditKind) -> &'static str {
+    match kind {
+        AuditKind::Authorize => "auth",
+        AuditKind::Grant => "grant",
+        AuditKind::Delegate => "deleg",
+        AuditKind::Revoke => "revoke",
+        AuditKind::Drop => "drop",
+        AuditKind::Inherit => "fork",
+        AuditKind::Lost => "lost",
+    }
+}
+
+const fn class_name(class: ResourceClass) -> &'static str {
+    match class {
+        ResourceClass::PersistentObject => "object",
+        ResourceClass::ProcessControl => "process",
+        ResourceClass::IpcEndpoint => "ipc",
+        ResourceClass::BlockDevice => "block",
+        ResourceClass::LifecycleControl => "service",
+        ResourceClass::Audit => "audit",
+        ResourceClass::Network => "net",
+        ResourceClass::SharedBuffer => "buffer",
+        ResourceClass::Graphics => "gfx",
+        ResourceClass::Display => "display",
+        ResourceClass::Input => "input",
     }
 }
 
@@ -264,7 +363,7 @@ mod tests {
         CapabilityError, CapabilityHandle, PolicyRefusal, ResourceRef, Rights,
     };
     use std::collections::VecDeque;
-    use std::string::String;
+    use std::string::{String, ToString};
     use std::vec::Vec;
 
     const AUDIT: ResourceRef = ResourceRef {
@@ -429,10 +528,10 @@ mod tests {
             lines,
             [
                 "[ADT ] lost first=1 missing=2",
-                "[ADT ] seq=3 subject=5 authority-mismatch grant process-control",
-                "[ADT ] seq=4 actor=6 missing-right audit",
+                "[ADT ] #3 kernel>5 mismatch grant process",
+                "[ADT ] #4 6 noright audit",
                 "[ADT ] lost first=5 missing=84",
-                "[ADT ] seq=89 actor=6 missing-right audit",
+                "[ADT ] #89 6 noright audit",
             ]
         );
         assert_eq!(
@@ -500,26 +599,114 @@ mod tests {
         assert_eq!(reader.next_since, 3);
     }
 
+    fn record_line(record: &AuditRecord) -> String {
+        let mut lines = Vec::new();
+        emit_line(
+            &mut |line: &str| lines.push(String::from(line)),
+            format_args!("{}", RecordLine(record)),
+        );
+        lines.remove(0)
+    }
+
+    /// Longest outcome, kind and class names a record line may print, unknown values included:
+    /// with three 10-digit numbers they make a 64-byte line.
+    const OUTCOME_MAX_BYTES: usize = 8;
+    const KIND_MAX_BYTES: usize = 6;
+    const CLASS_MAX_BYTES: usize = 7;
+
     #[test]
-    fn every_line_fits_one_console_message() {
+    fn every_short_name_keeps_to_its_width_unknown_values_included() {
+        for byte in 0..=u8::MAX {
+            assert!(
+                Kind(byte).to_string().len() <= KIND_MAX_BYTES,
+                "kind {byte}"
+            );
+            assert!(
+                Class(byte).to_string().len() <= CLASS_MAX_BYTES,
+                "class {byte}"
+            );
+            for tag in 0..=u8::MAX {
+                let outcome = Outcome(AuditOutcome {
+                    tag,
+                    error_code: byte,
+                });
+                assert!(
+                    outcome.to_string().len() <= OUTCOME_MAX_BYTES,
+                    "{tag}/{byte}"
+                );
+            }
+        }
+    }
+
+    /// Every kind, class and outcome byte the kernel can write today plus an unknown one of each,
+    /// with every way of naming who acted, at the largest numbers the bound allows.
+    #[test]
+    fn every_record_fits_one_message_uncut_at_the_largest_numbers() {
+        let max = RECORD_LINE_MAX_NUMBER;
+        let kernel = HolderId::KERNEL.0;
+        let known_and_unknown = |known: fn(u8) -> bool| -> Vec<u8> {
+            assert!(!known(u8::MAX));
+            (0..=u8::MAX)
+                .filter(|&byte| known(byte) || byte == u8::MAX)
+                .collect()
+        };
+        let kinds = known_and_unknown(|byte| AuditKind::from_u8(byte).is_some());
+        let classes = known_and_unknown(|byte| ResourceClass::from_u8(byte).is_some());
+        let denials = known_and_unknown(|byte| CapabilityError::from_u8(byte).is_some());
+        let refusals = known_and_unknown(|byte| PolicyRefusal::from_u8(byte).is_some());
+        let mut outcomes = vec![AuditOutcome::allowed()];
+        for (tag, codes) in [
+            (AuditOutcome::TAG_DENIED, &denials),
+            (AuditOutcome::TAG_REFUSED, &refusals),
+            (u8::MAX, &vec![u8::MAX]),
+        ] {
+            outcomes.extend(
+                codes
+                    .iter()
+                    .map(|&error_code| AuditOutcome { tag, error_code }),
+            );
+        }
+        let parties = [(max, max), (max, max - 1), (kernel, max), (kernel, kernel)];
+        let mut longest = String::new();
+        for &kind in &kinds {
+            for &class in &classes {
+                for &outcome in &outcomes {
+                    for (actor, subject) in parties {
+                        let line = record_line(&AuditRecord {
+                            sequence: max,
+                            actor,
+                            subject,
+                            resource_id: max,
+                            class,
+                            kind,
+                            outcome,
+                        });
+                        assert!(!line.ends_with('~'), "{line}");
+                        if line.len() > longest.len() {
+                            longest = line;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(longest.len(), AUDIT_LINE_MAX_BYTES, "{longest}");
+    }
+
+    #[test]
+    fn a_record_past_the_bound_is_cut_and_marked() {
         let mut long = AuditEvent::new(
-            AuditKind::Inherit,
+            AuditKind::Delegate,
             HolderId(u64::MAX),
             ResourceRef::object(1),
             Rights::empty(),
         )
         .with_subject(HolderId(u64::MAX - 1))
         .with_result(Err(CapabilityError::GenerationExhausted));
-        long.sequence = 1;
-        let mut reader = AuditDrain::new();
-        let mut script = Script::new(vec![vec![long]]);
-        let (_, lines) = drain(&mut reader, &mut script);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].len(), AUDIT_LINE_MAX_BYTES);
-        assert!(
-            lines[0].starts_with("[ADT ] seq=1 actor=18446744073709551615 generation-exhausted")
-        );
-        assert!(lines[0].ends_with('~'));
+        long.sequence = u64::MAX;
+        let line = record_line(&AuditRecord::decode(&bytes_of(&long)));
+        assert_eq!(line.len(), AUDIT_LINE_MAX_BYTES);
+        assert!(line.starts_with("[ADT ] #18446744073709551615 18446744073709551615>"));
+        assert!(line.ends_with('~'));
     }
 
     #[test]
@@ -528,7 +715,7 @@ mod tests {
         bytes[offset_of!(AuditEvent, kind)] = 0xee;
         bytes[offset_of!(AuditEvent, class)] = 0xdd;
         let line = std::format!("{}", RecordLine(&AuditRecord::decode(&bytes)));
-        assert_eq!(line, "[ADT ] seq=1 actor=4 missing-right kind238 class221");
+        assert_eq!(line, "[ADT ] #1 4 noright k238 c221");
     }
 
     #[test]

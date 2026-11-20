@@ -55,7 +55,7 @@ pub(crate) unsafe fn audit_log_mut() -> &'static mut BoundedAuditLog<AUDIT_RING_
     unsafe { &mut *AUDIT_LOG.get() }
 }
 
-#[cfg_attr(not(feature = "m6-audit-self-test"), allow(dead_code))] // Launch-policy API; exercised by M6 self-tests and the M6.8 integration path.
+#[cfg_attr(not(feature = "m6-audit-self-test"), allow(dead_code))] // The audit service's ready report, the system-test hooks and M6 self-tests; builds without services never call it.
 pub(crate) fn with_audit_log<R>(f: impl FnOnce(&BoundedAuditLog<AUDIT_RING_CAPACITY>) -> R) -> R {
     f(unsafe { &*AUDIT_LOG.get() })
 }
@@ -126,7 +126,7 @@ pub(crate) fn record_kernel_revoke(subject: HolderId, resource: ResourceRef, cou
         .with_count(count),
     );
 }
-#[cfg_attr(not(feature = "m6-audit-self-test"), allow(dead_code))] // Launch-policy API; exercised by M6 self-tests and the M6.8 integration path.
+#[cfg_attr(not(feature = "m6-audit-self-test"), allow(dead_code))] // The audit service row's `AuditReader` grant and M6 self-tests; builds without services never call it.
 pub(crate) fn grant_audit_reader(holder: HolderId) -> Result<CapabilityHandle, CapabilityError> {
     grant_root(holder, AUDIT_RESOURCE, Rights::AUDIT_READ)
 }

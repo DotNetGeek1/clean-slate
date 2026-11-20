@@ -657,7 +657,8 @@ pub(crate) fn expected_audit_authority(pid: u64) -> String {
 /// The audit service holds exactly its row and reported ready after its first drain. That
 /// drain's summary line must account for every sequence up to where it ended (each is a record
 /// or inside a lost run), and the kernel's own read cursor, logged with the ready report, must
-/// be exactly there: the service read the log rather than only saying so.
+/// be exactly there: the service read the log rather than only saying so. Its lost count can be
+/// no more than the kernel's count of records dropped.
 pub(crate) fn check_audit_service(
     output: &str,
     pid: u64,
@@ -682,12 +683,17 @@ pub(crate) fn check_audit_service(
             "the audit service's first drain does not account for sequences 1..={through}: {drained:?}"
         ));
     }
-    let read_through = number(ready, "audit-read-through")?;
-    if read_through != through || number(ready, "audit-next")? <= through {
+    if number(ready, "audit-read-through")? != through {
         return Err(format!(
             "the kernel's audit read cursor is not where the service's first drain ended ({drained:?}): {ready:?}"
         ));
     }
+    if lost > number(ready, "audit-dropped")? {
+        return Err(format!(
+            "the audit service reported more sequences lost than the kernel dropped ({drained:?}): {ready:?}"
+        ));
+    }
+    // The service's own report, so a consistency check rather than evidence it read the log.
     if number(ready, "first-drain-records")? != records {
         return Err(format!(
             "the audit service's ready detail is not its first drain's record count: {ready:?}"
@@ -861,7 +867,7 @@ mod tests {
             ),
             ("audit-read-through=60", "audit-read-through=59"),
             ("audit-read-through=60", "audit-read-through=0"),
-            ("audit-next=61", "audit-next=60"),
+            ("audit-dropped=40", "audit-dropped=39"),
             ("records=20 lost=40", "records=20 lost=39"),
             ("first-drain-records=20", "first-drain-records=21"),
             ("[ADT ] drained", "[ADT ] skimmed"),
@@ -869,6 +875,12 @@ mod tests {
             let text = transcript(1, 9).replace(from, to);
             assert!(validate_boot(&text, Formatted::Yes).is_err(), "{to}");
         }
+        let overcounted = transcript(1, 9).replace("audit-dropped=40", "audit-dropped=39");
+        assert!(validate_boot(&overcounted, Formatted::Yes)
+            .unwrap_err()
+            .contains("more sequences lost than the kernel dropped"));
+        let dropped_since = transcript(1, 9).replace("audit-dropped=40", "audit-dropped=41");
+        assert!(validate_boot(&dropped_since, Formatted::Yes).is_ok());
         let drained = "[IPC ] console pid=7: [ADT ] drained through=60 records=20 lost=40\n";
         let late = format!("{}{drained}", transcript(1, 9).replace(drained, ""));
         assert!(validate_boot(&late, Formatted::Yes)

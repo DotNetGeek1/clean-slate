@@ -20,7 +20,8 @@
 //! records each refusal. Nothing else records in between, so which records survive is decided
 //! by the ring's per-holder budget alone: the witness and the shell's newest
 //! `AUDIT_HOLDER_BUDGET`. The hook logs the sequences it used and how many records the shell's
-//! holder keeps; the audit service must report exactly that, from its own reads.
+//! holder keeps; the audit service must report exactly that, from its own reads. It also logs
+//! how many records of the audit service's own reads the log holds, which polling must not grow.
 //!
 //! **Desktop evidence.** Three checks need a kernel-chosen moment and are lane evidence rather
 //! than system behaviour:
@@ -36,10 +37,11 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use clean_slate_capability::{HolderId, ResourceClass, ResourceRef, Rights};
+use clean_slate_capability::{AuditEvent, AuditKind, HolderId, ResourceClass, ResourceRef, Rights};
 use clean_slate_port::PortError;
 use clean_slate_service_fixtures::{
-    COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID, SYSTEM_SHELL_SERVICE_ID,
+    AUDIT_SERVICE_ID, COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
+    SYSTEM_SHELL_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::ServiceId;
 
@@ -164,10 +166,31 @@ fn audit_flood(denials: u32) {
     for _ in 0..denials {
         allowed += read_audit_log(shell);
     }
-    let (next_seq, held) =
-        with_audit_log(|log| (log.next_sequence(), log.held_by(HolderId(shell))));
+    let reader = unsafe { service_lifecycle_controller_mut() }
+        .live_pid(AUDIT_SERVICE_ID)
+        .unwrap_or(0);
+    let (next_seq, held, reader_reads) = with_audit_log(|log| {
+        let is_read_by_reader = |event: &AuditEvent| {
+            event.actor == HolderId(reader)
+                && event.kind == AuditKind::Authorize
+                && event.class == ResourceClass::Audit
+                && event.requested == Rights::AUDIT_READ
+                && event.is_allowed()
+        };
+        let reader_reads = log.oldest_sequence().map_or(0, |oldest| {
+            (oldest..log.next_sequence())
+                .filter_map(|sequence| log.get(sequence))
+                .filter(is_read_by_reader)
+                .count()
+        });
+        (
+            log.next_sequence(),
+            log.held_by(HolderId(shell)),
+            reader_reads,
+        )
+    });
     kernel_log_fmt(format_args!(
-        "[HOOK] audit flood witness-holder={init} witness-seq={witness_seq} holder={shell} denials={denials} first-seq={first_seq} next-seq={next_seq} allowed={allowed} held={held}\n"
+        "[HOOK] audit flood witness-holder={init} witness-seq={witness_seq} holder={shell} denials={denials} first-seq={first_seq} next-seq={next_seq} allowed={allowed} held={held} reader={reader} reader-reads={reader_reads}\n"
     ));
 }
 

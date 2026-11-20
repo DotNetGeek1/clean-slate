@@ -394,7 +394,7 @@ pub enum ManifestError {
     ConsoleInputWithoutConsole {
         row: usize,
     },
-    /// A second row holds `Grant::GraphicsPort` or `Grant::InputSeat`.
+    /// A second row holds `Grant::GraphicsPort`, `Grant::InputSeat` or `Grant::AuditReader`.
     DuplicateExclusiveGrant {
         row: usize,
     },
@@ -460,8 +460,10 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
             {
                 return Err(ManifestError::ConsoleInputWithoutConsole { row });
             }
-            if matches!(spec.grants[grant], Grant::GraphicsPort | Grant::InputSeat)
-                && earlier_row_grants(manifest, row, spec.grants[grant])
+            if matches!(
+                spec.grants[grant],
+                Grant::GraphicsPort | Grant::InputSeat | Grant::AuditReader
+            ) && earlier_row_grants(manifest, row, spec.grants[grant])
             {
                 return Err(ManifestError::DuplicateExclusiveGrant { row });
             }
@@ -1078,6 +1080,18 @@ mod tests {
             validate_manifest(&[COMPOSITOR_SERVICE_SPEC, second]),
             Ok(())
         );
+    }
+
+    #[test]
+    fn validation_allows_one_audit_reader() {
+        let mut second = AUDIT_SERVICE_SPEC;
+        second.id = ServiceId(0x5510);
+        assert_eq!(
+            validate_manifest(&[AUDIT_SERVICE_SPEC, second]),
+            Err(ManifestError::DuplicateExclusiveGrant { row: 1 })
+        );
+        second.grants = &[Grant::Console];
+        assert_eq!(validate_manifest(&[AUDIT_SERVICE_SPEC, second]), Ok(()));
     }
 
     #[test]
