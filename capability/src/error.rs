@@ -18,6 +18,8 @@ pub enum CapabilityError {
     /// Parent lacks `DELEGATE`, or requested rights include [`crate::rights::Rights::root_only_for`]
     /// bits that must not be delegated.
     NotDelegable = 11,
+    /// The receiving holder already occupies [`crate::HOLDER_SLOT_QUOTA`] slots.
+    QuotaExceeded = 12,
 }
 
 impl CapabilityError {
@@ -39,6 +41,7 @@ impl CapabilityError {
             9 => Some(Self::CapacityExhausted),
             10 => Some(Self::GenerationExhausted),
             11 => Some(Self::NotDelegable),
+            12 => Some(Self::QuotaExceeded),
             _ => None,
         }
     }
@@ -58,6 +61,7 @@ impl CapabilityError {
             Self::CapacityExhausted => "capacity",
             Self::GenerationExhausted => "generation-exhausted",
             Self::NotDelegable => "not-delegable",
+            Self::QuotaExceeded => "quota",
         }
     }
 
@@ -71,9 +75,10 @@ impl CapabilityError {
             | Self::MissingRight
             | Self::RightsWidening
             | Self::NotDelegable => SYSCALL_EACCES,
-            Self::CapacityExhausted | Self::GenerationExhausted | Self::DelegationDepthExceeded => {
-                SYSCALL_ENOSPC
-            }
+            Self::CapacityExhausted
+            | Self::GenerationExhausted
+            | Self::DelegationDepthExceeded
+            | Self::QuotaExceeded => SYSCALL_ENOSPC,
         }
     }
 }

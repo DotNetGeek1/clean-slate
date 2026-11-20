@@ -37,6 +37,7 @@ clean-slate-ui = { path = "../ui" }
 [dev-dependencies]
 clean-slate-graphics = { path = "../graphics", features = ["fake"] }
 clean-slate-port = { path = "../port", features = ["fake"] }
+clean-slate-service-fixtures = { path = "../service-fixtures" }
 
 [lints]
 workspace = true

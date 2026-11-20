@@ -25,6 +25,7 @@ pub(crate) mod port;
 pub(crate) mod port_syscall;
 pub(crate) mod service_ready;
 pub(crate) mod spawn;
+pub(crate) mod storage_refusal;
 pub(crate) mod system_init;
 #[cfg(clean_slate_system_init)]
 pub(crate) mod system_shell;

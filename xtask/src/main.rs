@@ -449,7 +449,7 @@ const M9_USERSPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(300);
 /// `wget-fixture-http` runs once per cycle (`USERSPACE_CYCLES` in
 /// `kernel/src/selftest/m9_userspace.rs`), each a `GET /` the fixture must receive.
 const M9_USERSPACE_HTTP_REQUESTS: u32 = 9;
-const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 19] = [
+const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 20] = [
     "[M9  ] creating",
     "[M9  ] busybox verified",
     "[M9  ] matrix commands=",
@@ -465,6 +465,7 @@ const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[M9  ] deny fs ok",
     "[M9  ] deny net ok",
     "[M9  ] timeout PASS",
+    "[M9  ] fanout PASS",
     "[M9  ] cycle=9",
     "[M9  ] busybox intact",
     "[M9  ] denial PASS",
@@ -683,26 +684,38 @@ const M7_NETWORK_NO_ENTROPY_MARKERS: [&str; 2] = [
     "[NET ] service started pid=",
     "[NET ] FAIL no hardware entropy: no RDSEED or RDRAND; network service failed closed and did not start",
 ];
-const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 8] = [
+const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[CAP ] delegate denied from=",
     "reason=rights-widening",
     "[CAP ] delegate from=",
     "rights=read",
     "depth=1",
+    "[CAP ] delegate denied from=1 to=1",
+    "reason=quota",
     "[CAP ] delegate denied from=",
     "reason=missing-right",
+    "[M6.5] quota holder=1 held=16 quota=16 table_slots=128 ",
     "[M6.5] PASS",
 ];
-/// The lane makes 124 records into the 64-slot ring (`kernel/src/selftest/m6_audit.rs`), so a
-/// reader starting at 1 must be told exactly 60 are lost. Seq 60 and 124 are the kernel's
-/// record-time echoes of the last lost record and the late read itself; the `reader told` line
-/// is what the CPL3 reader received.
-const M6_AUDIT_ACCEPTANCE_MARKERS: [&str; 6] = [
+/// `kernel/src/selftest/m6_audit.rs`: the auditor (pid 1) is granted the reader (seq 1),
+/// is denied once (seq 2) and polls 5 times (one record, seq 3, echoed again with each
+/// merged use). Then the intruder (pid 2) makes 100 denials (seq 4..=103), more than the
+/// 64-entry ring, but keeps only its 16-record budget, so its first 84 are the only loss.
+/// The auditor's late read merges into seq 3 (count=6) and must get its three records back
+/// intact; the `reader` lines are what the CPL3 reader received.
+const M6_AUDIT_ACCEPTANCE_MARKERS: [&str; 13] = [
     "[AUD ] seq=1 kind=grant ",
     "outcome=allowed",
-    "[AUD ] seq=60 kind=authorize ",
-    "[AUD ] seq=124 kind=authorize ",
-    "[M6.7] reader told lost first=1 missing=60 next=61 ",
+    "[AUD ] seq=2 kind=authorize actor=1 ",
+    "[AUD ] seq=3 kind=authorize actor=1 ",
+    " count=5 ",
+    "[AUD ] seq=4 kind=authorize actor=2 ",
+    "[AUD ] seq=103 kind=authorize actor=2 ",
+    "[AUD ] seq=3 kind=authorize actor=1 ",
+    " count=6 ",
+    "[M6.7] reader kept grant=1 denial=2 merged=3 count=6",
+    "[M6.7] reader told lost first=4 missing=84 next=88 records=8",
+    "[M6.7] budget holder=2 held=16 budget=16 ring=64 denials=100",
     "[M6.7] PASS",
 ];
 /// Workload progress=1 is logged before any fixture is spawned. The owner revokes
@@ -5960,6 +5973,11 @@ enum XtaskError {
         found: u16,
         expected: u16,
     },
+    /// A reused data disk is neither blank nor mountable; the storage service refuses it.
+    UnusableDataDisk {
+        path: PathBuf,
+        reason: String,
+    },
     M5PhaseFailed {
         phase: String,
         reason: String,
@@ -6019,6 +6037,12 @@ impl Display for XtaskError {
             } => write!(
                 f,
                 "data disk {} holds object-store format v{found}, but this build's storage service expects v{expected} and would refuse it; delete {} to start from a blank disk",
+                path.display(),
+                path.display()
+            ),
+            XtaskError::UnusableDataDisk { path, reason } => write!(
+                f,
+                "data disk {} is not blank and cannot be mounted: {reason}; the storage service refuses it rather than reformat it, so delete {} to start from a blank disk",
                 path.display(),
                 path.display()
             ),
@@ -7408,18 +7432,34 @@ mod tests {
         let _guard = m5_disk_test_guard();
         reset_m5_data_disk_image().expect("reset disk");
         let disk = m5_data_disk_path();
+        let past_superblocks = 2 * 512;
         let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&disk)
             .expect("open disk");
-        file.write_all(&[0x5a; 16]).expect("overwrite prefix");
-        file.flush().expect("flush disk prefix");
+        file.seek(SeekFrom::Start(past_superblocks))
+            .expect("seek past superblocks");
+        file.write_all(&[0x5a; 16]).expect("overwrite data blocks");
+        file.flush().expect("flush disk");
         prepare_m5_data_disk_image(true).expect("reuse should succeed");
         let mut file = fs::File::open(&disk).expect("open disk");
-        let mut prefix = [0u8; 16];
-        file.read_exact(&mut prefix).expect("read disk prefix");
-        assert_eq!(prefix, [0x5a; 16]);
+        let mut kept = [0u8; 16];
+        file.seek(SeekFrom::Start(past_superblocks))
+            .expect("seek past superblocks");
+        file.read_exact(&mut kept).expect("read data blocks");
+        assert_eq!(kept, [0x5a; 16]);
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&disk)
+            .expect("open disk");
+        file.write_all(&[0x5a; 16]).expect("overwrite superblock");
+        drop(file);
+        assert!(matches!(
+            prepare_m5_data_disk_image(true),
+            Err(XtaskError::UnusableDataDisk { .. })
+        ));
         remove_m5_data_disk_image().expect("cleanup after test");
     }
 

@@ -48,7 +48,8 @@ pub(crate) fn capability_error(error: CapabilityError) -> PortError {
         | CapabilityError::NotDelegable => PortError::Denied,
         CapabilityError::DelegationDepthExceeded
         | CapabilityError::CapacityExhausted
-        | CapabilityError::GenerationExhausted => PortError::NoSpace,
+        | CapabilityError::GenerationExhausted
+        | CapabilityError::QuotaExceeded => PortError::NoSpace,
     }
 }
 

@@ -2,7 +2,9 @@
 
 use crate::authorize;
 use crate::error::CapabilityError;
-use crate::handle::{CapabilityHandle, Generation};
+use crate::handle::{
+    CapabilityHandle, Generation, HOLDER_SLOT_QUOTA, MAX_SLOT_ALLOWANCE, MAX_SLOT_ALLOWANCES,
+};
 use crate::holder::HolderId;
 use crate::provenance::Provenance;
 use crate::record::CapabilityRecord;
@@ -11,9 +13,16 @@ use crate::rights::Rights;
 use crate::state::CapabilityState;
 
 /// Fixed-size capability table with per-slot generation bookkeeping.
+///
+/// Every occupied slot (`Live` or `Revoked`) is charged to the holder its record names, and no
+/// holder but [`HolderId::KERNEL`] may be charged for more than its quota: `holder_quota`, or the
+/// allowance the kernel set for it ([`Self::set_slot_allowance`]). The charge is counted from the
+/// slots themselves, so releasing a slot is what releases it.
 pub struct CapabilityTable<const N: usize> {
     slots: [CapabilityRecord; N],
     live_count: usize,
+    holder_quota: usize,
+    allowances: [Option<(HolderId, usize)>; MAX_SLOT_ALLOWANCES],
 }
 
 impl<const N: usize> Default for CapabilityTable<N> {
@@ -24,9 +33,80 @@ impl<const N: usize> Default for CapabilityTable<N> {
 
 impl<const N: usize> CapabilityTable<N> {
     pub const fn new() -> Self {
+        Self::with_holder_quota(HOLDER_SLOT_QUOTA)
+    }
+
+    pub const fn with_holder_quota(holder_quota: usize) -> Self {
         Self {
             slots: [CapabilityRecord::EMPTY; N],
             live_count: 0,
+            holder_quota,
+            allowances: [None; MAX_SLOT_ALLOWANCES],
+        }
+    }
+
+    /// The most slots `holder` may be charged for.
+    pub fn quota_for(&self, holder: HolderId) -> usize {
+        self.slot_allowance(holder).unwrap_or(self.holder_quota)
+    }
+
+    /// The allowance set for `holder`, if any.
+    pub fn slot_allowance(&self, holder: HolderId) -> Option<usize> {
+        self.allowances
+            .iter()
+            .flatten()
+            .find(|(owner, _)| *owner == holder)
+            .map(|&(_, allowance)| allowance)
+    }
+
+    /// Lets `holder` be charged for up to `allowance` slots instead of the default quota.
+    ///
+    /// Refused with [`CapabilityError::QuotaExceeded`] for the kernel, for an allowance not above
+    /// the default or above [`MAX_SLOT_ALLOWANCE`], when every allowance entry is in use, or when
+    /// the allowances together would exceed the table.
+    pub fn set_slot_allowance(
+        &mut self,
+        holder: HolderId,
+        allowance: usize,
+    ) -> Result<(), CapabilityError> {
+        if holder == HolderId::KERNEL
+            || allowance <= self.holder_quota
+            || allowance > MAX_SLOT_ALLOWANCE
+        {
+            return Err(CapabilityError::QuotaExceeded);
+        }
+        let others: usize = self
+            .allowances
+            .iter()
+            .flatten()
+            .filter(|(owner, _)| *owner != holder)
+            .map(|&(_, other)| other)
+            .sum();
+        if others + allowance > N {
+            return Err(CapabilityError::QuotaExceeded);
+        }
+        let entry = match self
+            .allowances
+            .iter()
+            .position(|entry| matches!(entry, Some((owner, _)) if *owner == holder))
+        {
+            Some(index) => index,
+            None => self
+                .allowances
+                .iter()
+                .position(Option::is_none)
+                .ok_or(CapabilityError::QuotaExceeded)?,
+        };
+        self.allowances[entry] = Some((holder, allowance));
+        Ok(())
+    }
+
+    /// Returns `holder` to the default quota (teardown).
+    pub fn clear_slot_allowance(&mut self, holder: HolderId) {
+        for entry in &mut self.allowances {
+            if matches!(entry, Some((owner, _)) if *owner == holder) {
+                *entry = None;
+            }
         }
     }
 
@@ -34,8 +114,28 @@ impl<const N: usize> CapabilityTable<N> {
         N
     }
 
+    pub const fn holder_quota(&self) -> usize {
+        self.holder_quota
+    }
+
     pub fn live_count(&self) -> usize {
         self.live_count
+    }
+
+    /// Occupied slots (`Live` or `Revoked`) whose record names `holder`.
+    pub fn charged_to(&self, holder: HolderId) -> usize {
+        self.slots
+            .iter()
+            .filter(|record| record.holder == holder && occupies_slot(record.state))
+            .count()
+    }
+
+    /// `Revoked` slots still charged to `holder` (released when it is torn down).
+    pub fn revoked_held_by(&self, holder: HolderId) -> usize {
+        self.slots
+            .iter()
+            .filter(|record| record.holder == holder && record.state == CapabilityState::Revoked)
+            .count()
     }
 
     pub fn grant(
@@ -46,6 +146,7 @@ impl<const N: usize> CapabilityTable<N> {
         provenance: Provenance,
     ) -> Result<CapabilityHandle, CapabilityError> {
         validate_rights(resource.class, rights)?;
+        self.ensure_quota(holder)?;
         let (slot, generation) = self.pick_empty_slot()?;
         let record = CapabilityRecord {
             state: CapabilityState::Live,
@@ -65,6 +166,7 @@ impl<const N: usize> CapabilityTable<N> {
         record: CapabilityRecord,
     ) -> Result<CapabilityHandle, CapabilityError> {
         validate_rights(record.resource.class, record.rights)?;
+        self.ensure_quota(record.holder)?;
         let (slot, generation) = self.pick_empty_slot()?;
         let installed = CapabilityRecord {
             state: CapabilityState::Live,
@@ -252,6 +354,26 @@ impl<const N: usize> CapabilityTable<N> {
         }
     }
 
+    /// Room for one more slot charged to `holder`. At quota, the holder's own `Revoked` slots
+    /// are released first: their handles already refuse, and keeping them would let whoever
+    /// revoked them hold the holder at its quota.
+    fn ensure_quota(&mut self, holder: HolderId) -> Result<(), CapabilityError> {
+        let quota = self.quota_for(holder);
+        if holder == HolderId::KERNEL || self.charged_to(holder) < quota {
+            return Ok(());
+        }
+        for slot in 0..N {
+            if self.slots[slot].holder == holder {
+                self.release_slot(slot);
+            }
+        }
+        if self.charged_to(holder) < quota {
+            Ok(())
+        } else {
+            Err(CapabilityError::QuotaExceeded)
+        }
+    }
+
     fn pick_empty_slot(&mut self) -> Result<(usize, u32), CapabilityError> {
         for slot in 0..N {
             if self.slots[slot].state != CapabilityState::Empty {
@@ -274,6 +396,10 @@ impl<const N: usize> CapabilityTable<N> {
             self.slots[slot].generation = generation;
         }
     }
+}
+
+const fn occupies_slot(state: CapabilityState) -> bool {
+    matches!(state, CapabilityState::Live | CapabilityState::Revoked)
 }
 
 fn validate_rights(class: ResourceClass, rights: Rights) -> Result<(), CapabilityError> {
@@ -307,7 +433,10 @@ mod tests {
     const H2: HolderId = HolderId(20);
     const OBJ: ResourceRef = ResourceRef::object(42);
 
-    fn grant_read(table: &mut CapabilityTable<4>, holder: HolderId) -> CapabilityHandle {
+    fn grant_read<const N: usize>(
+        table: &mut CapabilityTable<N>,
+        holder: HolderId,
+    ) -> CapabilityHandle {
         table
             .grant(holder, OBJ, Rights::READ, Provenance::root(holder))
             .expect("grant")
@@ -528,6 +657,138 @@ mod tests {
         assert!(table
             .authorize_class(H1, handle, ResourceClass::PersistentObject, Rights::READ)
             .is_ok());
+    }
+
+    #[test]
+    fn a_holder_at_quota_is_refused_and_others_are_not() {
+        let mut table = CapabilityTable::<8>::with_holder_quota(3);
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            handles.push(grant_read(&mut table, H1));
+        }
+        assert_eq!(
+            table.grant(H1, OBJ, Rights::READ, Provenance::root(H1)),
+            Err(CapabilityError::QuotaExceeded)
+        );
+        let record = *table.record_at(0);
+        assert_eq!(
+            table.install(record),
+            Err(CapabilityError::QuotaExceeded),
+            "install is charged to the record's holder"
+        );
+        assert_eq!((table.live_count(), table.charged_to(H1)), (3, 3));
+        for handle in handles {
+            assert!(table.authorize(H1, handle, OBJ, Rights::READ).is_ok());
+        }
+        grant_read(&mut table, H2);
+        assert_eq!(table.charged_to(H2), 1);
+    }
+
+    #[test]
+    fn the_kernel_holder_is_not_charged_against_a_quota() {
+        let mut table = CapabilityTable::<8>::with_holder_quota(1);
+        for _ in 0..4 {
+            grant_read(&mut table, HolderId::KERNEL);
+        }
+        assert_eq!(table.live_count(), 4);
+    }
+
+    #[test]
+    fn revoked_slots_are_charged_until_released_and_reclaimed_at_quota() {
+        let mut table = CapabilityTable::<8>::with_holder_quota(2);
+        let first = grant_read(&mut table, H1);
+        grant_read(&mut table, H1);
+        assert!(table.revoke(first).expect("revoke"));
+        assert_eq!(
+            (table.charged_to(H1), table.revoked_held_by(H1)),
+            (2, 1),
+            "a revoked slot still occupies the table"
+        );
+        let third = grant_read(&mut table, H1);
+        assert_eq!(table.revoked_held_by(H1), 0);
+        assert_eq!(table.charged_to(H1), 2);
+        assert_eq!(
+            table.authorize(H1, first, OBJ, Rights::READ),
+            Err(CapabilityError::StaleHandle)
+        );
+        assert!(table.authorize(H1, third, OBJ, Rights::READ).is_ok());
+        assert_eq!(
+            table.grant(H1, OBJ, Rights::READ, Provenance::root(H1)),
+            Err(CapabilityError::QuotaExceeded)
+        );
+    }
+
+    #[test]
+    fn revoking_a_holder_releases_its_whole_charge() {
+        let mut table = CapabilityTable::<8>::with_holder_quota(4);
+        let first = grant_read(&mut table, H1);
+        grant_read(&mut table, H1);
+        table.revoke(first).expect("revoke");
+        assert_eq!(table.charged_to(H1), 2);
+        crate::revoke_holder_tree(&mut table, H1);
+        assert_eq!(table.charged_to(H1), 0);
+    }
+
+    #[test]
+    fn an_allowance_raises_one_holders_quota_and_not_another() {
+        let mut table = CapabilityTable::<64>::new();
+        table.set_slot_allowance(H1, 20).expect("allowance");
+        assert_eq!(
+            (table.quota_for(H1), table.quota_for(H2)),
+            (20, HOLDER_SLOT_QUOTA)
+        );
+        for _ in 0..20 {
+            grant_read(&mut table, H1);
+        }
+        assert_eq!(
+            table.grant(H1, OBJ, Rights::READ, Provenance::root(H1)),
+            Err(CapabilityError::QuotaExceeded)
+        );
+        for _ in 0..HOLDER_SLOT_QUOTA {
+            grant_read(&mut table, H2);
+        }
+        assert_eq!(
+            table.grant(H2, OBJ, Rights::READ, Provenance::root(H2)),
+            Err(CapabilityError::QuotaExceeded)
+        );
+        table.clear_slot_allowance(H1);
+        assert_eq!(table.slot_allowance(H1), None);
+        assert_eq!(table.quota_for(H1), HOLDER_SLOT_QUOTA);
+    }
+
+    #[test]
+    fn allowances_are_bounded_per_holder_and_in_total() {
+        let mut table = CapabilityTable::<64>::new();
+        for refused in [0, HOLDER_SLOT_QUOTA, MAX_SLOT_ALLOWANCE + 1] {
+            assert_eq!(
+                table.set_slot_allowance(H1, refused),
+                Err(CapabilityError::QuotaExceeded),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            table.set_slot_allowance(HolderId::KERNEL, MAX_SLOT_ALLOWANCE),
+            Err(CapabilityError::QuotaExceeded)
+        );
+        table.set_slot_allowance(H1, MAX_SLOT_ALLOWANCE).unwrap();
+        table.set_slot_allowance(H2, MAX_SLOT_ALLOWANCE).unwrap();
+        assert_eq!(
+            table.set_slot_allowance(HolderId(3), HOLDER_SLOT_QUOTA + 1),
+            Err(CapabilityError::QuotaExceeded),
+            "the allowances together may not exceed the table"
+        );
+        table.set_slot_allowance(H2, 20).unwrap();
+        assert_eq!(table.slot_allowance(H2), Some(20), "setting again replaces");
+
+        let mut many = CapabilityTable::<1024>::new();
+        for holder in 1..=MAX_SLOT_ALLOWANCES as u64 {
+            many.set_slot_allowance(HolderId(holder), 17).unwrap();
+        }
+        assert_eq!(
+            many.set_slot_allowance(HolderId(99), 17),
+            Err(CapabilityError::QuotaExceeded),
+            "no free allowance entry"
+        );
     }
 
     #[test]

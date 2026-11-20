@@ -11,6 +11,10 @@ use crate::{
     NETWORK_SERVICE_MODE_ACCEPTANCE, PLAYGROUND_SERVICE_ID, STORAGE_SERVICE_ID,
     STORAGE_SERVICE_MODE_OBJECT_SERVICE, SYSTEM_SHELL_SERVICE_ID,
 };
+use clean_slate_capability::{
+    HOLDER_SLOT_QUOTA, MAX_SLOTS, MAX_SLOT_ALLOWANCE, MAX_SLOT_ALLOWANCES,
+};
+use clean_slate_graphics::limits::MAX_REGISTERED_BUFFERS;
 use clean_slate_service_lifecycle::ServiceId;
 
 /// Built-in image a row runs. Every variant names an ELF or payload the kernel already embeds for
@@ -152,6 +156,11 @@ pub struct ServiceSpec {
     pub restart: RestartSpec,
     /// Rows that must be running before this one starts; each must appear earlier in the manifest.
     pub depends_on: &'static [ServiceId],
+    /// Capability slots each instance may be charged for in place of `HOLDER_SLOT_QUOTA`. The
+    /// kernel sets it for the instance's pid when it starts the row and clears it at teardown;
+    /// nothing the process does can raise it, and its forks and delegates get the default.
+    /// `None` for the default; otherwise above it and at most `MAX_SLOT_ALLOWANCE`.
+    pub slot_allowance: Option<usize>,
 }
 
 impl ServiceSpec {
@@ -184,6 +193,7 @@ pub const STORAGE_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     grants: &[Grant::BlockDevice, Grant::ObjectServiceRole],
     restart: SYSTEM_RESTART,
     depends_on: &[],
+    slot_allowance: None,
 };
 
 /// `NETWORK_SERVICE_MODE_ACCEPTANCE` is the network image's request-serving loop. Init starts it
@@ -195,6 +205,7 @@ pub const NETWORK_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     grants: &[Grant::NetworkService],
     restart: SYSTEM_RESTART,
     depends_on: &[STORAGE_SERVICE_ID],
+    slot_allowance: None,
 };
 
 /// Provisional (#218 S5): a shell that exits (`exit`, Ctrl-D) is started again 0.5 s later. At
@@ -221,6 +232,7 @@ pub const SYSTEM_SHELL_SPEC: ServiceSpec = ServiceSpec {
     ],
     restart: SHELL_RESTART,
     depends_on: &[STORAGE_SERVICE_ID],
+    slot_allowance: None,
 };
 
 pub const SYSTEM_MANIFEST: &[ServiceSpec] = &[
@@ -249,7 +261,23 @@ pub const COMPOSITOR_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     ],
     restart: DESKTOP_RESTART,
     depends_on: &[],
+    slot_allowance: Some(COMPOSITOR_SLOT_ALLOWANCE),
 };
+
+/// The compositor's launch grants, one capability record each.
+const COMPOSITOR_LAUNCH_RECORDS: usize = 4;
+
+/// Shared-buffer records the port may install for the compositor beyond the registered limit:
+/// registrations a client sends while the compositor is at `MAX_REGISTERED_BUFFERS` arrive with
+/// their record before the compositor refuses them and drops it.
+const COMPOSITOR_SLOT_MARGIN: usize = 4;
+
+/// The compositor's slot allowance: its launch records, one transferred record per registered
+/// client buffer (`graphics::limits::MAX_REGISTERED_BUFFERS`), and [`COMPOSITOR_SLOT_MARGIN`].
+pub const COMPOSITOR_SLOT_ALLOWANCE: usize =
+    COMPOSITOR_LAUNCH_RECORDS + MAX_REGISTERED_BUFFERS + COMPOSITOR_SLOT_MARGIN;
+
+const _: () = assert!(COMPOSITOR_SERVICE_SPEC.grants.len() == COMPOSITOR_LAUNCH_RECORDS);
 
 /// The panel and background. Ready is both surfaces committed.
 pub const DESKTOP_SHELL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
@@ -259,6 +287,7 @@ pub const DESKTOP_SHELL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     grants: &[Grant::Console, Grant::GraphicsShellRole],
     restart: DESKTOP_RESTART,
     depends_on: &[COMPOSITOR_SERVICE_ID],
+    slot_allowance: None,
 };
 
 /// The playground app. It depends on the shell so the panel is mapped before the app's first
@@ -270,6 +299,7 @@ pub const PLAYGROUND_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     grants: &[Grant::Console, Grant::GraphicsAppRole],
     restart: DESKTOP_RESTART,
     depends_on: &[COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID],
+    slot_allowance: None,
 };
 
 /// The desktop profile: the three system rows followed by the three desktop rows.
@@ -351,16 +381,38 @@ pub enum ManifestError {
     GraphicsRoleWithoutPortDependency {
         row: usize,
     },
+    /// `slot_allowance` is not above `HOLDER_SLOT_QUOTA` or is above `MAX_SLOT_ALLOWANCE`.
+    SlotAllowanceOutOfRange {
+        row: usize,
+    },
+    /// With this row, the allowances add up to more than the `MAX_SLOTS` table.
+    SlotAllowancesExceedTable {
+        row: usize,
+    },
 }
+
+/// Allowances within the table's total also fit the table's allowance entries, since each is
+/// above the default quota.
+const _: () = assert!(MAX_SLOTS / (HOLDER_SLOT_QUOTA + 1) <= MAX_SLOT_ALLOWANCES);
 
 /// Checks the invariants the kernel and init rely on. Kernel scenario manifests call this in a
 /// `const` assertion so a malformed row fails the build.
 pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestError> {
+    let mut allowance_total = 0;
     let mut row = 0;
     while row < manifest.len() {
         let spec = &manifest[row];
         if spec.id.0 == 0 {
             return Err(ManifestError::ZeroServiceId { row });
+        }
+        if let Some(allowance) = spec.slot_allowance {
+            if allowance <= HOLDER_SLOT_QUOTA || allowance > MAX_SLOT_ALLOWANCE {
+                return Err(ManifestError::SlotAllowanceOutOfRange { row });
+            }
+            allowance_total += allowance;
+            if allowance_total > MAX_SLOTS {
+                return Err(ManifestError::SlotAllowancesExceedTable { row });
+            }
         }
         let mut earlier = 0;
         while earlier < row {
@@ -513,7 +565,53 @@ mod tests {
             grants,
             restart: RestartSpec::Never,
             depends_on: &[],
+            slot_allowance: None,
         }
+    }
+
+    #[test]
+    fn only_the_compositor_row_carries_a_slot_allowance() {
+        for spec in SYSTEM_DESKTOP_MANIFEST {
+            let expected = (spec.id == COMPOSITOR_SERVICE_ID).then_some(24);
+            assert_eq!(spec.slot_allowance, expected, "{:?}", spec.id);
+        }
+        assert_eq!(
+            COMPOSITOR_SLOT_ALLOWANCE,
+            COMPOSITOR_SERVICE_SPEC.grants.len() + MAX_REGISTERED_BUFFERS + 4
+        );
+    }
+
+    #[test]
+    fn validation_bounds_each_slot_allowance() {
+        for refused in [0, HOLDER_SLOT_QUOTA, MAX_SLOT_ALLOWANCE + 1] {
+            let mut spec = row(7, ServiceImage::ImmediateExit, &[]);
+            spec.slot_allowance = Some(refused);
+            assert_eq!(
+                validate_manifest(&[spec]),
+                Err(ManifestError::SlotAllowanceOutOfRange { row: 0 }),
+                "{refused}"
+            );
+        }
+        let mut spec = row(7, ServiceImage::ImmediateExit, &[]);
+        spec.slot_allowance = Some(MAX_SLOT_ALLOWANCE);
+        assert_eq!(validate_manifest(&[spec]), Ok(()));
+    }
+
+    #[test]
+    fn validation_bounds_the_allowances_together() {
+        let rows: Vec<ServiceSpec> = (1..=5)
+            .map(|id| {
+                let mut spec = row(id, ServiceImage::ImmediateExit, &[]);
+                spec.slot_allowance = Some(MAX_SLOT_ALLOWANCE);
+                spec
+            })
+            .collect();
+        assert_eq!(validate_manifest(&rows[..4]), Ok(()));
+        assert_eq!(
+            validate_manifest(&rows),
+            Err(ManifestError::SlotAllowancesExceedTable { row: 4 }),
+            "five rows of 32 exceed the 128-slot table"
+        );
     }
 
     #[test]

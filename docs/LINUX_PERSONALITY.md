@@ -162,8 +162,11 @@ installs a child record with the same rights. It does not call `delegate` and
 does not require `Rights::DELEGATE` (`kernel/src/capability/mod.rs`), but it
 withholds a record carrying any `Rights::root_only_for` bit of its class
 (`fork_inheritable`), as delegation would refuse it, and audits each withheld
-record as `NotDelegable` (#203). `fork`
-returns `EAGAIN` when `LINUX_MAX_PROC_ENTRIES` (6) is full. Fault exits publish
+record as `NotDelegable` (#203). Each copy is charged to the child, which is its own holder
+with its own 16-slot quota (#220); a copy the child has no room for fails the fork with `EAGAIN`
+and every copy already installed is revoked and released. `fork` also
+returns `EAGAIN` when `LINUX_MAX_PROC_ENTRIES` (14) is full, when the parent already has 12
+unreaped children, or when the scheduler or process registry (16 each) is full. Fault exits publish
 a signalled wait status (`SIGSEGV` for page fault and general protection,
 `SIGILL` for invalid opcode) through `linux_proc/fault.rs` before teardown.
 With `m9-rootfs`, `exec_resolve::resolve_executable` calls
@@ -566,7 +569,7 @@ The default image compiles the Linux socket layer (#105) with cfg `clean_slate_l
 - at launch, if a network instance is live (`[CAP ] net client entitlement holder=<pid> service=20992 instance-generation=<g>`, or `instance-generation=none`);
 - for every process holding an entitlement each time a network instance registers with the lifecycle controller (`[CAP ] net client reissued holder=<pid> generation=<g>`).
 
-Issuing revokes and releases the holder's earlier instance-bound client records first, so a holder has at most one, and an instance going away (exit, fault, restart or terminate) revokes and releases them all (`[CAP ] net client revoked count=<n> reason=instance-gone`). The table therefore holds at most two records per entitled process whatever the number of restarts; the capability table is fixed at 64 slots. With no instance live the shell still launches and runs, and `socket(2)` fails with `EACCES` (`[NET ] denied`), so `nslookup` and `wget` report an ordinary error.
+Issuing revokes and releases the holder's earlier instance-bound client records first, so a holder has at most one, and an instance going away (exit, fault, restart or terminate) revokes and releases them all (`[CAP ] net client revoked count=<n> reason=instance-gone`). The table therefore holds at most two records per entitled process whatever the number of restarts; the capability table has 128 slots, at most 16 per holder (#220). With no instance live the shell still launches and runs, and `socket(2)` fails with `EACCES` (`[NET ] denied`), so `nslookup` and `wget` report an ordinary error.
 
 **Children across a restart.** A child forked before the network restarts holds the inherited entitlement and a derived copy of the parent's client capability. The instance going away revokes that copy with the parent's. On the new instance's registration the child, as an entitlement holder, gets its own client capability for the new generation, independent of the parent's. A child forked afterwards inherits the parent's current one.
 

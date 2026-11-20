@@ -512,7 +512,7 @@ cargo test -p clean-slate-kernel capability::delegation
 cargo xtask test-m6-delegation
 ```
 
-`test-m6-delegation` builds the M6 fixture userspace image and requires ordered `[CAP ] delegate denied` (`rights-widening`), successful `[CAP ] delegate` (`rights=read`, `depth=1`), reader re-delegate denied (`missing-right`), then `[M6.5] PASS` (90s timeout). Aliases: `m6-delegation`, `m6.5`.
+`test-m6-delegation` builds the M6 fixture userspace image and requires ordered `[CAP ] delegate denied` (`rights-widening`), successful `[CAP ] delegate` (`rights=read`, `depth=1`), the owner's self-delegation flood (a fixture `REPEAT` step, more attempts than the table has slots) refused at its 16-record quota (`[CAP ] delegate denied from=1 to=1 reason=quota`), reader re-delegate denied (`missing-right`), `[M6.5] quota holder=1 held=16 quota=16 table_slots=128` (the kernel checked the owner's charge and that its refusals in the audit ring are all `quota`; the reader was still granted after the flood), then `[M6.5] PASS` (90s timeout). Aliases: `m6-delegation`, `m6.5`.
 
 For M6.6 revocation and teardown acceptance (constituent QEMU boot):
 
@@ -532,7 +532,7 @@ cargo test -p clean-slate-kernel capability
 cargo xtask test-m6-audit
 ```
 
-`test-m6-audit` builds the M6 fixture userspace image. The auditor reads from sequence 1, makes 59 denied reads, waits for the intruder (62 denied reads) to exit, and reads from sequence 1 again: 124 records have gone into the 64-record ring, so the reader must be told exactly 60 are lost. The lane requires, in order, the record-time echo `[AUD ] seq=1 kind=grant`, `outcome=allowed`, the echoes of `seq=60` (the last lost record) and `seq=124` (the late read), `[M6.7] reader told lost first=1 missing=60 next=61` (what the CPL3 reader received), then `[M6.7] PASS` (90s timeout). Aliases: `m6-audit`, `m6.7`.
+`test-m6-audit` builds the M6 fixture userspace image. The auditor (pid 1, granted the reader at seq 1) makes one denied read (seq 2) and five reads from past the end of the log, which are handed nothing and so merge into one record (seq 3); then it hands the harness turn to the intruder (pid 2), which makes 100 denied reads (seq 4..=103), more than the 64-record ring holds. The intruder keeps only its 16-record budget, so its first 84 records are the only loss. The auditor's late read from sequence 1 merges into seq 3 and must return the grant, the denial and seq 3 with `count=6`, then a lost record for exactly 84 from seq 4, then the intruder's seq 88. The lane requires, in order, the record-time echoes `[AUD ] seq=1 kind=grant` (`outcome=allowed`), seq 2, seq 3 echoed with ` count=5 `, seq 4 and 103 from actor 2, seq 3 again with ` count=6 `, `[M6.7] reader kept grant=1 denial=2 merged=3 count=6` and `[M6.7] reader told lost first=4 missing=84 next=88 records=8` (what the CPL3 reader received), `[M6.7] budget holder=2 held=16 budget=16 ring=64 denials=100`, then `[M6.7] PASS` (90s timeout). Aliases: `m6-audit`, `m6.7`.
 
 For M6.8 capability convergence acceptance (constituent QEMU boot):
 

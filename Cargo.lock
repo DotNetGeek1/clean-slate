@@ -125,6 +125,7 @@ dependencies = [
  "clean-slate-native-abi",
  "clean-slate-port",
  "clean-slate-raster",
+ "clean-slate-service-fixtures",
  "clean-slate-ui",
 ]
 
@@ -248,6 +249,7 @@ version = "0.0.1"
 dependencies = [
  "clean-slate-block",
  "clean-slate-capability",
+ "clean-slate-graphics",
  "clean-slate-network",
  "clean-slate-service-lifecycle",
 ]

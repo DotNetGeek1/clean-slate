@@ -26,7 +26,7 @@ use clean_slate_service_fixtures::{
     STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE, STORAGE_SERVICE_RESULT_ERROR,
     STORAGE_SERVICE_RESULT_OK, STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
 };
-use clean_slate_store::{IncompatibleFormatError, ObjectStore, StoreError};
+use clean_slate_store::{ObjectStore, OpenError, Opened, StoreError};
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -123,6 +123,7 @@ pub extern "C" fn _start() -> ! {
     bootstrap.mounted_beta_len = 0;
     bootstrap.mounted_beta_checksum = 0;
     bootstrap.malformed_mount_error = 0;
+    bootstrap.refusal = 0;
 
     bootstrap.result_code = match run(bootstrap) {
         Ok(code) => code,
@@ -163,15 +164,8 @@ fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u6
     if role_handle == 0 {
         return Err(0);
     }
-    let (mut store, formatted) = match ObjectStore::mount(SyscallBlockDevice::attach(bootstrap)?) {
-        Ok(store) => (store, false),
-        Err(StoreError::Incompatible(IncompatibleFormatError::BadMagic)) => (
-            ObjectStore::format(SyscallBlockDevice::attach(bootstrap)?)
-                .map_err(store_error_code)?,
-            true,
-        ),
-        Err(error) => return Err(store_error_code(error)),
-    };
+    let (mut store, opened) = open_store(bootstrap)?;
+    let formatted = opened == Opened::Formatted;
     bootstrap.mounted_generation = store.committed_generation();
     // Ready once the store is mounted or formatted. A refusal (no supervised instance, or
     // already reported) changes nothing in the kernel, so the service serves either way.
@@ -334,14 +328,7 @@ fn run_unauthorized_probe() -> Result<u64, u64> {
 }
 
 fn run_integration_initial(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> {
-    let mut store = match ObjectStore::mount(SyscallBlockDevice::attach(bootstrap)?) {
-        Ok(store) => store,
-        Err(StoreError::Incompatible(IncompatibleFormatError::BadMagic)) => {
-            bootstrap.formatted = 1;
-            ObjectStore::format(SyscallBlockDevice::attach(bootstrap)?).map_err(store_error_code)?
-        }
-        Err(error) => return Err(store_error_code(error)),
-    };
+    let (mut store, _) = open_store(bootstrap)?;
     bootstrap.mounted_generation = store.committed_generation();
     store
         .write_object(OBJECT_ALPHA_ID, OBJECT_ALPHA_NAME, OBJECT_ALPHA_V1)
@@ -423,8 +410,9 @@ fn run_integration_restart(bootstrap: &mut StorageServiceBootstrap) -> Result<u6
 }
 
 fn run_persistence(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> {
-    match ObjectStore::mount(SyscallBlockDevice::attach(bootstrap)?) {
-        Ok(mut store) => match store.committed_generation() {
+    let (mut store, opened) = open_store(bootstrap)?;
+    match opened {
+        Opened::Mounted => match store.committed_generation() {
             1 => {
                 bootstrap.mounted_generation = 1;
                 verify_and_record(&mut store, bootstrap, &PERSISTENCE_ALPHA_V1, OBJECT_BETA_V1)?;
@@ -454,10 +442,7 @@ fn run_persistence(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> 
             2 => Err(0),
             _ => Err(0),
         },
-        Err(StoreError::Incompatible(IncompatibleFormatError::BadMagic)) => {
-            let mut store = ObjectStore::format(SyscallBlockDevice::attach(bootstrap)?)
-                .map_err(store_error_code)?;
-            bootstrap.formatted = 1;
+        Opened::Formatted => {
             bootstrap.mounted_generation = 0;
             store
                 .write_object(OBJECT_ALPHA_ID, OBJECT_ALPHA_NAME, &PERSISTENCE_ALPHA_V1)
@@ -477,7 +462,26 @@ fn run_persistence(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> 
             bootstrap.capability_handle = store.into_inner().capability_handle();
             Ok(STORAGE_SERVICE_RESULT_OK)
         }
-        Err(error) => Err(store_error_code(error)),
+    }
+}
+
+/// Opens the data disk's store. A refused disk is left untouched and its reason recorded in
+/// the bootstrap page, which the kernel reports when the service exits.
+fn open_store(
+    bootstrap: &mut StorageServiceBootstrap,
+) -> Result<(ObjectStore<SyscallBlockDevice>, Opened), u64> {
+    match ObjectStore::open(SyscallBlockDevice::attach(bootstrap)?) {
+        Ok((store, opened)) => {
+            if opened == Opened::Formatted {
+                bootstrap.formatted = 1;
+            }
+            Ok((store, opened))
+        }
+        Err(OpenError::Refused(refusal)) => {
+            bootstrap.refusal = refusal.encode();
+            Err(DISK_REFUSED_CODE)
+        }
+        Err(OpenError::Store(error)) => Err(store_error_code(error)),
     }
 }
 
@@ -802,3 +806,5 @@ fn store_error_code(error: StoreError) -> u64 {
         StoreError::Corrupt(_) => 20,
     }
 }
+
+const DISK_REFUSED_CODE: u64 = 21;

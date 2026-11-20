@@ -934,6 +934,18 @@ mod tests {
             .expect("grant console");
         crate::service::net_bridge::net_bridge_mut().register_service_instance(pid, pid, 1);
         assert_eq!(input::bind_consumer(HolderId(pid)), Ok(()));
+        // A record another holder revoked keeps its slot, and the pid's quota charge, until
+        // teardown releases it.
+        let revoked = crate::capability::grant_root(
+            HolderId(pid),
+            clean_slate_capability::ResourceRef::object(0x151),
+            clean_slate_capability::Rights::READ,
+        )
+        .expect("grant object");
+        assert_eq!(
+            unsafe { crate::capability::capability_space_mut() }.revoke(revoked),
+            Ok(true)
+        );
 
         let held = HeldAuthority::of(pid);
         assert_eq!(
@@ -943,8 +955,9 @@ mod tests {
                 held.console,
                 held.outside.raw_network_link,
                 held.outside.input_consumer,
+                held.revoked_records,
             ),
-            (1, 1, 1, 1, 1),
+            (1, 1, 1, 1, 1, 1),
             "{held}"
         );
 
@@ -978,6 +991,11 @@ mod tests {
         };
         assert_eq!(held, expected, "teardown left authority behind: {held}");
         assert_eq!(remaining_owned_resource_count(pid), 0);
+        assert_eq!(
+            crate::capability::with_capability_space(|table| table.charged_to(HolderId(pid))),
+            0,
+            "teardown left slots charged to the pid's quota"
+        );
     }
 
     #[test]
@@ -1147,6 +1165,31 @@ mod tests {
             "revoke_holder_tree_visiting",
         ),
         // Grant tests on bare holders that never registered a process.
+        (
+            "capability/mod.rs",
+            "a_fork_child_is_charged_for_what_it_inherits",
+            "revoke_for_holder",
+        ),
+        (
+            "capability/mod.rs",
+            "a_fork_over_the_child_quota_is_refused_and_releases_what_it_installed",
+            "revoke_for_holder",
+        ),
+        (
+            "capability/mod.rs",
+            "one_holder_cannot_take_more_than_its_quota_of_the_global_table",
+            "revoke_for_holder",
+        ),
+        (
+            "capability/mod.rs",
+            "a_slot_allowance_lasts_until_teardown",
+            "revoke_for_holder",
+        ),
+        (
+            "capability/mod.rs",
+            "a_fork_child_does_not_inherit_its_parents_slot_allowance",
+            "revoke_for_holder",
+        ),
         (
             "capability/graphics.rs",
             "grants_land_on_one_holder_and_teardown_revokes_them",

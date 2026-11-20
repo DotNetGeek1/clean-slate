@@ -17,7 +17,8 @@ use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
 use crate::selftest::m6_fixture::{
-    fixture_service, set_report_handler, spawn_fixture, wait_exit_step, FixtureReportAction,
+    end_turn_step, fixture_service, set_report_handler, spawn_fixture, wait_exit_step,
+    wait_turn_step, FixtureReportAction,
 };
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
@@ -26,6 +27,7 @@ use clean_slate_capability::syscall_abi::{
 };
 use clean_slate_capability::{
     AuditEvent, AuditKind, AuditOutcome, HolderId, ResourceClass, AUDIT_EVENT_SIZE_BYTES,
+    AUDIT_HOLDER_BUDGET,
 };
 use clean_slate_service_fixtures::m6_fixture::{
     M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF, FIXTURE_STATUS_MISMATCH,
@@ -42,12 +44,23 @@ const AUDIT_READ_EVENTS: u64 = 8;
 const AUDIT_DATA_BYTES: usize = AUDIT_EVENT_SIZE_BYTES * AUDIT_READ_EVENTS as usize;
 const PREDICTED_INTRUDER_PID: u64 = 2;
 
-/// Fixture steps hold 64 entries; the denied reads fill what the others leave.
-const AUDITOR_DENIED_READS: usize = 59;
-const INTRUDER_DENIED_READS: usize = 62;
-/// Every record the lane makes: the reader grant, the auditor's two reads, and the denials.
-const LANE_RECORDS: u64 = 1 + 2 + (AUDITOR_DENIED_READS + INTRUDER_DENIED_READS) as u64;
-const EXPECTED_MISSING: u64 = LANE_RECORDS - AUDIT_RING_CAPACITY as u64;
+/// Reads from past the end of the log: each is an allowed use handed nothing, so the ring
+/// merges them all into one record.
+const AUDITOR_POLLS: u64 = 5;
+const POLL_SINCE: u64 = 1 << 40;
+/// More denials than the ring holds: without the per-holder budget they would push out
+/// every earlier record.
+const INTRUDER_DENIALS: u64 = AUDIT_RING_CAPACITY as u64 + 36;
+
+/// The auditor's records, made before the intruder runs: the kernel's grant to it, its
+/// denied read, and its polls. The late read's own use merges into the polls' record.
+const GRANT_SEQUENCE: u64 = 1;
+const DENIAL_SEQUENCE: u64 = 2;
+const MERGED_SEQUENCE: u64 = 3;
+const MERGED_USES: u32 = AUDITOR_POLLS as u32 + 1;
+/// The intruder keeps its newest `AUDIT_HOLDER_BUDGET` denials; the rest are lost.
+const FIRST_LOST: u64 = MERGED_SEQUENCE + 1;
+const EXPECTED_MISSING: u64 = INTRUDER_DENIALS - AUDIT_HOLDER_BUDGET as u64;
 
 struct AuditSelfTestState {
     auditor_pid: u64,
@@ -82,8 +95,8 @@ fn read_step(handle: u64, out_offset: usize) -> M6FixtureStep {
     )
 }
 
-/// Reads from sequence 1 before and after the ring overflows; the second read lands at
-/// `AUDIT_DATA_BYTES` and must open with the record of what it missed.
+/// One denied read and [`AUDITOR_POLLS`] empty reads, then (turn 0 over) waits out the
+/// intruder's flood and reads from sequence 1 into `AUDIT_DATA_BYTES`.
 fn build_auditor_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     let claim = program
@@ -93,12 +106,22 @@ fn build_auditor_program() -> M6FixtureBootstrap {
         )
         .unwrap();
     let handle = arg_result(claim);
-    program.push(read_step(handle, 0).expect_ne(0)).unwrap();
-    for _ in 0..AUDITOR_DENIED_READS {
-        program
-            .push(read_step(0, 0).expect_eq(SYSCALL_EINVAL))
-            .unwrap();
-    }
+    program
+        .push(read_step(0, 0).expect_eq(SYSCALL_EINVAL))
+        .unwrap();
+    let poll = program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_AUDIT_READ,
+                [handle, POLL_SINCE, arg_data(0), AUDIT_READ_EVENTS, 0, 0],
+            )
+            .expect_eq(0),
+        )
+        .unwrap();
+    program
+        .push(M6FixtureStep::repeat(poll as u64, AUDITOR_POLLS))
+        .unwrap();
+    program.push(end_turn_step(0)).unwrap();
     program
         .push(wait_exit_step(PREDICTED_INTRUDER_PID))
         .unwrap();
@@ -109,14 +132,16 @@ fn build_auditor_program() -> M6FixtureBootstrap {
     program
 }
 
+/// Waits for the auditor to finish, then makes [`INTRUDER_DENIALS`] denied reads.
 fn build_intruder_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
-    program
+    program.push(wait_turn_step(1)).unwrap();
+    let denial = program
         .push(read_step(0, 0).expect_eq(SYSCALL_EINVAL))
         .unwrap();
-    for _ in 1..INTRUDER_DENIED_READS {
-        program.push(read_step(1 << 16, 0).expect_ne(0)).unwrap();
-    }
+    program
+        .push(M6FixtureStep::repeat(denial as u64, INTRUDER_DENIALS))
+        .unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
@@ -158,30 +183,49 @@ fn validate_auditor_report(report: &M6FixtureBootstrap) -> Result<(), &'static s
     if report.status == FIXTURE_STATUS_MISMATCH {
         return Err("auditor fixture step mismatch");
     }
-    let events = populated_events(report.data_at(0, AUDIT_DATA_BYTES)?)?;
-    if events.is_empty() {
-        return Err("auditor read no audit events");
-    }
-    if !sequences_monotonic(events) {
-        return Err("auditor event sequences not monotonic");
+    if !populated_events(report.data_at(0, AUDIT_DATA_BYTES)?)?.is_empty() {
+        return Err("auditor's polls past the end of the log returned records");
     }
     let late = parse_events(report.data_at(AUDIT_DATA_BYTES, AUDIT_DATA_BYTES)?)?;
-    let (lost, retained) = late
-        .split_first()
-        .ok_or("auditor's late read returned nothing")?;
-    if lost.kind != AuditKind::Lost {
-        return Err("auditor's late read did not open with a lost record");
-    }
-    let missing = lost.resource_id;
-    let next = retained.first().map_or(0, |event| event.sequence);
+    let [grant, denial, merged, lost, retained, ..] = late else {
+        return Err("auditor's late read returned too few records");
+    };
+    let auditor = HolderId(state_mut().auditor_pid);
     // What the CPL3 reader received, for the lane to compare with the record-time echo.
     kernel_log_fmt(format_args!(
-        "[M6.7] reader told lost first={} missing={missing} next={next} records={}\n",
+        "[M6.7] reader kept grant={} denial={} merged={} count={}\n",
+        grant.sequence, denial.sequence, merged.sequence, merged.count
+    ));
+    kernel_log_fmt(format_args!(
+        "[M6.7] reader told lost first={} missing={} next={} records={}\n",
         lost.sequence,
+        lost.resource_id,
+        retained.sequence,
         late.len()
     ));
-    if lost.sequence != 1 || missing != EXPECTED_MISSING || next != 1 + missing {
-        return Err("auditor's lost record does not match the overwritten records");
+    if grant.sequence != GRANT_SEQUENCE
+        || grant.kind != AuditKind::Grant
+        || grant.subject != auditor
+    {
+        return Err("auditor's grant record was not kept");
+    }
+    if denial.sequence != DENIAL_SEQUENCE || denial.actor != auditor || denial.is_allowed() {
+        return Err("auditor's denial was not kept");
+    }
+    if merged.sequence != MERGED_SEQUENCE
+        || merged.actor != auditor
+        || !merged.is_allowed()
+        || merged.count != MERGED_USES
+    {
+        return Err("auditor's repeated reads were not merged into one exact record");
+    }
+    if lost.kind != AuditKind::Lost
+        || lost.sequence != FIRST_LOST
+        || lost.resource_id != EXPECTED_MISSING
+        || retained.sequence != FIRST_LOST + EXPECTED_MISSING
+        || retained.actor != HolderId(PREDICTED_INTRUDER_PID)
+    {
+        return Err("auditor's lost record does not match the intruder's displaced records");
     }
     if !sequences_monotonic(late) {
         return Err("auditor's late read sequences not monotonic");
@@ -234,6 +278,14 @@ fn audit_report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReportA
         }
         if !log_contains_denied_intruder(state.intruder_pid) {
             return FixtureReportAction::Fail("missing denied audit event for intruder");
+        }
+        let intruder_held = with_audit_log(|log| log.held_by(HolderId(state.intruder_pid)));
+        kernel_log_fmt(format_args!(
+            "[M6.7] budget holder={} held={intruder_held} budget={AUDIT_HOLDER_BUDGET} ring={AUDIT_RING_CAPACITY} denials={INTRUDER_DENIALS}\n",
+            state.intruder_pid
+        ));
+        if intruder_held != AUDIT_HOLDER_BUDGET {
+            return FixtureReportAction::Fail("intruder holds more of the ring than its budget");
         }
         return FixtureReportAction::PassAndExit(PASS_MARKER);
     }
