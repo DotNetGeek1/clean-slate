@@ -113,6 +113,9 @@ pub(crate) fn check_data_disk_store_format(path: &Path) -> Result<(), XtaskError
             found,
             expected: STORE_VERSION,
         }),
+        Probe::Refused(Refusal::InterruptedFormat) => Err(XtaskError::InterruptedFormatDataDisk {
+            path: path.to_path_buf(),
+        }),
         Probe::Refused(refusal) => Err(XtaskError::UnusableDataDisk {
             path: path.to_path_buf(),
             reason: refusal.to_string(),
@@ -1006,6 +1009,23 @@ mod tests {
         }
         disk_with_header(&path, &header);
         let error = ensure_data_disk(&path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(": corrupt (both superblock slots invalid);"),
+            "a version field whose checksum fails is corruption, not a stale disk: {error}"
+        );
+
+        for slot in header.chunks_exact_mut(DATA_DISK_BLOCK_BYTES) {
+            let byte_sum = slot
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !(8..12).contains(index))
+                .fold(0u32, |sum, (_, byte)| sum.wrapping_add(u32::from(*byte)));
+            slot[8..12].copy_from_slice(&byte_sum.to_le_bytes());
+        }
+        disk_with_header(&path, &header);
+        let error = ensure_data_disk(&path).unwrap_err();
         assert!(matches!(
             error,
             XtaskError::StaleDataDisk {
@@ -1048,6 +1068,39 @@ mod tests {
         assert!(validate_refused_boot(&formatted).is_err());
         let started = format!("{text}[SVC ] launch service=20992 pid=9 gen=1\n");
         assert!(validate_refused_boot(&started).is_err());
+    }
+
+    #[test]
+    fn a_reused_disk_with_a_torn_first_format_is_refused_as_interrupted_or_corrupt() {
+        let dir = std::env::temp_dir().join(format!("cs-system-torn-{}", std::process::id()));
+        let path = dir.join("d.img");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        current_format_disk(&path);
+        let mut fresh = vec![0u8; DATA_DISK_BLOCK_BYTES];
+        fs::File::open(&path)
+            .unwrap()
+            .read_exact(&mut fresh)
+            .unwrap();
+        let mut header = vec![0u8; 2 * DATA_DISK_BLOCK_BYTES];
+        header[..20].copy_from_slice(&fresh[..20]);
+        disk_with_header(&path, &header);
+        let before = fs::read(&path).unwrap();
+
+        let error = ensure_data_disk(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            XtaskError::InterruptedFormatDataDisk { .. }
+        ));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "data disk {0} holds an interrupted first format, or is corrupt (its superblock slots hold only part of a fresh format); the storage service refuses it rather than reformat it, so delete {0} to start from a blank disk",
+                path.display()
+            )
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

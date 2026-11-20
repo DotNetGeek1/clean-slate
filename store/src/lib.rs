@@ -33,6 +33,16 @@
 //! written to the alternate metadata slot and flushed. The first flush keeps a
 //! write-back cache from persisting the superblock ahead of the payload it
 //! references.
+//!
+//! The device is assumed to write one logical block (512 bytes on today's
+//! disks) atomically on power loss. Each superblock is one block, so a slot
+//! holds either a whole superblock or its previous bytes, and no crash,
+//! including one during the first [`ObjectStore::format`], leaves a device that
+//! is neither blank nor mountable. A device that tears inside a block can
+//! interrupt the first
+//! format with a slot holding only a byte prefix of the new superblock;
+//! [`probe`] refuses that as [`Refusal::InterruptedFormat`] rather than treat
+//! it as blank, because damage to a real store can leave the same bytes.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -85,6 +95,25 @@ pub enum Probe {
 /// unsupported geometry: a device that cannot be read gives no basis for any decision.
 pub fn probe<D: BlockDevice>(device: &mut D) -> Result<Probe, StoreError> {
     let geometry = validate_geometry(device.geometry())?;
+    Ok(match classify(device, geometry)? {
+        Classified::Blank => Probe::Blank,
+        Classified::Mountable(_) => Probe::Mountable,
+        Classified::Refused(refusal) => Probe::Refused(refusal),
+    })
+}
+
+type CommittedState = (u64, Superblock, Vec<StoredObject>);
+
+enum Classified {
+    Blank,
+    Mountable(CommittedState),
+    Refused(Refusal),
+}
+
+fn classify<D: BlockDevice>(
+    device: &mut D,
+    geometry: BlockGeometry,
+) -> Result<Classified, StoreError> {
     let mut slots = [
         vec![0; block_size_bytes(geometry)],
         vec![0; block_size_bytes(geometry)],
@@ -96,35 +125,72 @@ pub fn probe<D: BlockDevice>(device: &mut D) -> Result<Probe, StoreError> {
         .iter()
         .all(|bytes| bytes.iter().all(|&byte| byte == 0))
     {
-        return Ok(Probe::Blank);
+        return Ok(Classified::Blank);
     }
 
     match select_committed_state(device, geometry) {
-        Ok(_) => return Ok(Probe::Mountable),
+        Ok(state) => return Ok(Classified::Mountable(state)),
         Err(StoreError::Block(error)) => return Err(StoreError::Block(error)),
         Err(_) => {}
     }
 
     // A slot that still decodes makes this a damaged store of this version, whatever the other
-    // slot holds. Version 0 was never written, so a slot claiming it is damaged, not foreign.
-    let versions = slots.iter().map(|bytes| superblock_format_version(bytes));
+    // slot holds. Only a slot whose checksum holds names another format: a damaged version field
+    // must not make a corrupt store look like a foreign one. Version 0 was never written, so a
+    // slot claiming it is damaged, not foreign.
     let refusal = if (0..SUPERBLOCK_SLOTS)
         .zip(slots.iter())
         .any(|(slot, bytes)| decode_superblock(geometry, slot, bytes).is_ok())
     {
         Refusal::PayloadInvalid
-    } else if let Some(version) = versions
-        .clone()
-        .flatten()
-        .find(|&version| version != STORE_VERSION && version != 0)
+    } else if let Some(version) = slots
+        .iter()
+        .filter_map(|bytes| checksummed_format_version(bytes))
+        .find(|&version| version != 0 && version != STORE_VERSION)
     {
         Refusal::UnsupportedVersion(version)
-    } else if versions.clone().all(|version| version.is_none()) {
+    } else if holds_interrupted_first_format(geometry, &slots)? {
+        Refusal::InterruptedFormat
+    } else if slots
+        .iter()
+        .all(|bytes| superblock_format_version(bytes).is_none())
+    {
         Refusal::NotAStore
     } else {
         Refusal::SuperblocksInvalid
     };
-    Ok(Probe::Refused(refusal))
+    Ok(Classified::Refused(refusal))
+}
+
+/// Each slot is blank or the superblock [`ObjectStore::format`] writes on this geometry, cut
+/// after some byte and zero-filled. Called only on an unmountable, non-blank device, so at least
+/// one slot is a strict prefix: a whole copy would have mounted.
+fn holds_interrupted_first_format(
+    geometry: BlockGeometry,
+    slots: &[Vec<u8>],
+) -> Result<bool, StoreError> {
+    let fresh = encode_superblock(geometry, &Superblock::fresh())?;
+    Ok(slots.iter().all(|slot| {
+        let written = slot
+            .iter()
+            .rposition(|&byte| byte != 0)
+            .map_or(0, |last| last + 1);
+        slot[..written] == fresh[..written]
+    }))
+}
+
+/// Format version of a superblock block carrying the store magic and a checksum that holds under
+/// that version's rules: an additive byte sum in version 1, CRC-32C since, each computed with the
+/// checksum field (bytes 8..12) zeroed. A later version that moves or changes the checksum reads
+/// as corrupt here, not as foreign.
+fn checksummed_format_version(block: &[u8]) -> Option<u16> {
+    let version = superblock_format_version(block)?;
+    let stored = read_u32(block, CHECKSUM_RANGE.start);
+    let computed = match version {
+        1 => version_one_checksum(block),
+        _ => superblock_checksum(block),
+    };
+    (computed == stored).then_some(version)
 }
 
 /// How [`ObjectStore::open`] obtained its store.
@@ -240,11 +306,7 @@ pub struct ObjectStore<D> {
 impl<D: BlockDevice> ObjectStore<D> {
     pub fn format(mut device: D) -> Result<Self, StoreError> {
         let geometry = validate_geometry(device.geometry())?;
-        let superblock = Superblock {
-            generation: 0,
-            object_count: 0,
-            objects: Vec::new(),
-        };
+        let superblock = Superblock::fresh();
 
         write_superblock(&mut device, geometry, 0, &superblock)?;
         write_superblock(&mut device, geometry, 1, &superblock)?;
@@ -261,23 +323,34 @@ impl<D: BlockDevice> ObjectStore<D> {
 
     pub fn mount(mut device: D) -> Result<Self, StoreError> {
         let geometry = validate_geometry(device.geometry())?;
-        let (active_slot, superblock, objects) = select_committed_state(&mut device, geometry)?;
+        let state = select_committed_state(&mut device, geometry)?;
+        Ok(Self::with_committed_state(device, geometry, state))
+    }
 
-        Ok(Self {
+    /// Mounts the store on `device`, formatting it only when [`probe`] finds it blank.
+    pub fn open(mut device: D) -> Result<(Self, Opened), OpenError> {
+        let geometry = validate_geometry(device.geometry())?;
+        match classify(&mut device, geometry)? {
+            Classified::Blank => Ok((Self::format(device)?, Opened::Formatted)),
+            Classified::Mountable(state) => Ok((
+                Self::with_committed_state(device, geometry, state),
+                Opened::Mounted,
+            )),
+            Classified::Refused(refusal) => Err(OpenError::Refused(refusal)),
+        }
+    }
+
+    fn with_committed_state(
+        device: D,
+        geometry: BlockGeometry,
+        (active_slot, superblock, objects): CommittedState,
+    ) -> Self {
+        Self {
             device,
             geometry,
             generation: superblock.generation,
             active_slot,
             objects,
-        })
-    }
-
-    /// Mounts the store on `device`, formatting it only when [`probe`] finds it blank.
-    pub fn open(mut device: D) -> Result<(Self, Opened), OpenError> {
-        match probe(&mut device)? {
-            Probe::Blank => Ok((Self::format(device)?, Opened::Formatted)),
-            Probe::Mountable => Ok((Self::mount(device)?, Opened::Mounted)),
-            Probe::Refused(refusal) => Err(OpenError::Refused(refusal)),
         }
     }
 
@@ -403,6 +476,17 @@ struct Superblock {
     objects: Vec<ObjectLayout>,
 }
 
+impl Superblock {
+    /// What [`ObjectStore::format`] writes to both slots.
+    fn fresh() -> Self {
+        Self {
+            generation: 0,
+            object_count: 0,
+            objects: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlotDecodeError {
     Incompatible(IncompatibleFormatError),
@@ -458,7 +542,7 @@ fn block_size_bytes(geometry: BlockGeometry) -> usize {
 fn select_committed_state<D: BlockDevice>(
     device: &mut D,
     geometry: BlockGeometry,
-) -> Result<(u64, Superblock, Vec<StoredObject>), StoreError> {
+) -> Result<CommittedState, StoreError> {
     let slot0 = read_superblock_slot(device, geometry, 0);
     let slot1 = read_superblock_slot(device, geometry, 1);
 
@@ -920,6 +1004,15 @@ fn superblock_checksum(bytes: &[u8]) -> u32 {
     crc.finish()
 }
 
+/// Format version 1's superblock checksum: an additive byte sum skipping the checksum field.
+fn version_one_checksum(bytes: &[u8]) -> u32 {
+    bytes
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !CHECKSUM_RANGE.contains(index))
+        .fold(0u32, |sum, (_, byte)| sum.wrapping_add(u32::from(*byte)))
+}
+
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(bytes[offset..offset + 2].try_into().expect("slice"))
 }
@@ -949,6 +1042,8 @@ mod tests {
     use super::*;
     use clean_slate_block::fake::FakeBlockDevice;
     use clean_slate_block::{BlockDeviceId, BlockGeometry};
+
+    const GENERATION_BYTE: usize = 12;
 
     fn geometry() -> BlockGeometry {
         BlockGeometry::new(BlockDeviceId::new(11), 512, 32, 2, false).unwrap()
@@ -1179,12 +1274,15 @@ mod tests {
     /// an additive byte sum over the block with the checksum field skipped.
     fn downgrade_to_version_one(slot: &mut [u8]) {
         slot[4..6].copy_from_slice(&1u16.to_le_bytes());
-        let byte_sum = slot
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !CHECKSUM_RANGE.contains(index))
-            .fold(0u32, |sum, (_, byte)| sum.wrapping_add(u32::from(*byte)));
+        let byte_sum = version_one_checksum(slot);
         slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&byte_sum.to_le_bytes());
+    }
+
+    /// Rewrite a superblock as a later format version would, keeping a valid CRC-32C.
+    fn set_version_with_valid_crc(slot: &mut [u8], version: u16) {
+        slot[4..6].copy_from_slice(&version.to_le_bytes());
+        let crc = superblock_checksum(slot);
+        slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&crc.to_le_bytes());
     }
 
     #[test]
@@ -1214,14 +1312,185 @@ mod tests {
         store.into_inner()
     }
 
+    /// Counts the writes and flushes that reach `inner`; clones share the counter.
+    #[derive(Clone, Debug)]
+    struct CountingDevice {
+        inner: FakeBlockDevice,
+        mutations: std::rc::Rc<core::cell::Cell<usize>>,
+    }
+
+    impl BlockDevice for CountingDevice {
+        fn geometry(&self) -> BlockGeometry {
+            self.inner.geometry()
+        }
+
+        fn read_blocks(
+            &mut self,
+            lba: u64,
+            blocks: u32,
+            buffer: &mut [u8],
+        ) -> Result<(), BlockIoError> {
+            self.inner.read_blocks(lba, blocks, buffer)
+        }
+
+        fn write_blocks(
+            &mut self,
+            lba: u64,
+            blocks: u32,
+            buffer: &[u8],
+        ) -> Result<(), BlockIoError> {
+            self.mutations.set(self.mutations.get() + 1);
+            self.inner.write_blocks(lba, blocks, buffer)
+        }
+
+        fn flush(&mut self) -> Result<(), BlockIoError> {
+            self.mutations.set(self.mutations.get() + 1);
+            self.inner.flush()
+        }
+    }
+
     fn assert_open_refuses(mut device: FakeBlockDevice, expected: Refusal) {
-        let before = device.durable_bytes().to_vec();
         assert_eq!(probe(&mut device), Ok(Probe::Refused(expected)));
+        let counting = CountingDevice {
+            inner: device,
+            mutations: Default::default(),
+        };
         assert_eq!(
-            ObjectStore::open(device.clone()).unwrap_err(),
+            ObjectStore::open(counting.clone()).unwrap_err(),
             OpenError::Refused(expected)
         );
-        assert_eq!(device.durable_bytes(), before.as_slice());
+        assert_eq!(
+            counting.mutations.get(),
+            0,
+            "open wrote to a refused device"
+        );
+    }
+
+    #[test]
+    fn open_on_a_blank_device_is_the_only_open_that_writes() {
+        let counting = CountingDevice {
+            inner: FakeBlockDevice::new(geometry()).unwrap(),
+            mutations: Default::default(),
+        };
+        let (_, opened) = ObjectStore::open(counting.clone()).unwrap();
+        assert_eq!(opened, Opened::Formatted);
+        assert!(counting.mutations.get() > 0);
+
+        let counting = CountingDevice {
+            inner: device_holding_one_object(),
+            mutations: Default::default(),
+        };
+        let (store, opened) = ObjectStore::open(counting.clone()).unwrap();
+        assert_eq!(opened, Opened::Mounted);
+        assert_eq!(store.read_object_by_id(1).unwrap(), b"keep me");
+        assert_eq!(counting.mutations.get(), 0);
+    }
+
+    fn fresh_superblock_prefix(bytes: usize) -> Vec<u8> {
+        let mut slot = encode_superblock(geometry(), &Superblock::fresh()).unwrap();
+        slot[bytes..].fill(0);
+        slot
+    }
+
+    fn device_with_slots(slot_a: &[u8], slot_b: &[u8]) -> FakeBlockDevice {
+        let mut device = FakeBlockDevice::new(geometry()).unwrap();
+        device.write_blocks(0, 1, slot_a).unwrap();
+        device.write_blocks(1, 1, slot_b).unwrap();
+        device.flush().unwrap();
+        device
+    }
+
+    #[test]
+    fn a_torn_first_format_is_refused_as_interrupted_not_formatted() {
+        let blank = vec![0; 512];
+        for bytes in [1, 3, 4, 9, 40] {
+            assert_open_refuses(
+                device_with_slots(&fresh_superblock_prefix(bytes), &blank),
+                Refusal::InterruptedFormat,
+            );
+            assert_open_refuses(
+                device_with_slots(&blank, &fresh_superblock_prefix(bytes)),
+                Refusal::InterruptedFormat,
+            );
+        }
+        assert_open_refuses(
+            device_with_slots(&fresh_superblock_prefix(12), &fresh_superblock_prefix(30)),
+            Refusal::InterruptedFormat,
+        );
+    }
+
+    #[test]
+    fn a_slot_that_departs_from_the_fresh_superblock_is_not_an_interrupted_format() {
+        let blank = vec![0; 512];
+        let mut slot = fresh_superblock_prefix(20);
+        slot[16] ^= 0x01;
+        assert_open_refuses(
+            device_with_slots(&slot, &blank),
+            Refusal::SuperblocksInvalid,
+        );
+
+        let mut device = device_holding_one_object();
+        let mut generation_one = durable_slot(&mut device, 1);
+        generation_one[60..].fill(0);
+        device.write_blocks(0, 1, &blank).unwrap();
+        device.write_blocks(1, 1, &generation_one).unwrap();
+        device.flush().unwrap();
+        assert_open_refuses(device, Refusal::SuperblocksInvalid);
+    }
+
+    #[test]
+    fn a_damaged_version_field_is_corruption_not_another_format() {
+        let mut device = device_holding_one_object();
+        let mut slot_a = durable_slot(&mut device, 0);
+        slot_a[4] ^= 0x01;
+        let mut slot_b = durable_slot(&mut device, 1);
+        slot_b[GENERATION_BYTE] ^= 0x01;
+        device.write_blocks(0, 1, &slot_a).unwrap();
+        device.write_blocks(1, 1, &slot_b).unwrap();
+        device.flush().unwrap();
+        assert_eq!(superblock_format_version(&slot_a), Some(3));
+
+        assert_open_refuses(device, Refusal::SuperblocksInvalid);
+    }
+
+    #[test]
+    fn an_old_version_field_without_its_checksum_is_corruption() {
+        let mut device = device_holding_one_object();
+        for slot_lba in 0..SUPERBLOCK_SLOTS {
+            let mut slot = durable_slot(&mut device, slot_lba);
+            slot[4..6].copy_from_slice(&1u16.to_le_bytes());
+            device.write_blocks(slot_lba, 1, &slot).unwrap();
+        }
+        device.flush().unwrap();
+
+        assert_open_refuses(device, Refusal::SuperblocksInvalid);
+    }
+
+    #[test]
+    fn a_later_version_with_a_valid_checksum_is_another_format() {
+        let mut device = device_holding_one_object();
+        let mut slot_a = durable_slot(&mut device, 0);
+        set_version_with_valid_crc(&mut slot_a, STORE_VERSION + 1);
+        let mut slot_b = durable_slot(&mut device, 1);
+        slot_b[GENERATION_BYTE] ^= 0x01;
+        device.write_blocks(0, 1, &slot_a).unwrap();
+        device.write_blocks(1, 1, &slot_b).unwrap();
+        device.flush().unwrap();
+
+        assert_open_refuses(device, Refusal::UnsupportedVersion(STORE_VERSION + 1));
+    }
+
+    #[test]
+    fn version_zero_with_a_valid_checksum_is_corruption() {
+        let mut device = device_holding_one_object();
+        for slot_lba in 0..SUPERBLOCK_SLOTS {
+            let mut slot = durable_slot(&mut device, slot_lba);
+            set_version_with_valid_crc(&mut slot, 0);
+            device.write_blocks(slot_lba, 1, &slot).unwrap();
+        }
+        device.flush().unwrap();
+
+        assert_open_refuses(device, Refusal::SuperblocksInvalid);
     }
 
     #[test]
