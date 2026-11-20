@@ -15,9 +15,13 @@ use crate::arch::x86_64::context_switch::restore_task_context;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::arch::x86_64::context_switch::task_stack_top;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
+use crate::capability::object::object_request_is_pending;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::capability::object::register_pending_bootstrap_grant;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::diagnostics::log::kernel_log_fmt;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+use crate::diagnostics::log::kernel_log_line;
 #[cfg(any(
     clean_slate_userspace_selftest = "m6-object",
     all(
@@ -62,8 +66,8 @@ use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::selftest::m6_fixture::{
-    end_turn_step, fixture_service, set_report_handler, spawn_fixture, wait_exit_step,
-    wait_turn_step, FixtureReportAction,
+    end_turn_step, fixture_service, lane_check_step, lane_query_step, set_lane_check_handler,
+    set_report_handler, spawn_fixture, wait_exit_step, wait_turn_step, FixtureReportAction,
 };
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::service::control::ServiceLifecycleController;
@@ -74,9 +78,13 @@ use crate::syscall::install_service_lifecycle_syscall_allocator;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
+use crate::time::monotonic_ns;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_NR_CAP_OBJECT};
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 use clean_slate_capability::{HolderId, Rights};
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+use clean_slate_native_abi::status::STATUS_ETIMEDOUT;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 use clean_slate_service_fixtures::m6_fixture::{
     M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF, FIXTURE_STATUS_DONE,
@@ -109,6 +117,8 @@ const FIXTURE_OWNER: u64 = 1;
 const FIXTURE_UNRELATED: u64 = 2;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 const FIXTURE_READONLY: u64 = 3;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const FIXTURE_DEADLINE: u64 = 4;
 
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 const FIXTURE_SPAWN_INDEX_LEAKER: usize = 0;
@@ -118,6 +128,27 @@ const FIXTURE_SPAWN_INDEX_OWNER: usize = 1;
 const FIXTURE_SPAWN_INDEX_READONLY: usize = 2;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 const FIXTURE_SPAWN_INDEX_UNRELATED: usize = 3;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const FIXTURE_SPAWN_INDEX_DEADLINE: usize = 4;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const FIXTURE_COUNT: usize = 5;
+
+/// Lane checks of the poll-deadline fixture (`FIXTURE_SUBOP_LANE_CHECK`).
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const CHECK_STOP_STORAGE: u64 = 0;
+/// Returns the absolute deadline `arg` nanoseconds from now and records it.
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const CHECK_DEADLINE_AFTER: u64 = 1;
+/// `arg` = request id: 0 iff the clock has reached the recorded deadline and the request
+/// is still queued.
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const CHECK_DEADLINE_HONORED: u64 = 2;
+/// Long enough that a poll returning before its deadline is visible, short enough to keep
+/// the lane quick.
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const POLL_WAIT_NS: u64 = 50_000_000;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const DEADLINE_MARKER: &str = "[M6.3] object poll deadline honored request=";
 
 #[cfg(any(
     clean_slate_userspace_selftest = "m6-object",
@@ -139,11 +170,21 @@ struct ObjectSelfTestState {
     #[cfg(clean_slate_userspace_selftest = "m6-object")]
     readonly_pid: u64,
     #[cfg(clean_slate_userspace_selftest = "m6-object")]
+    deadline_pid: u64,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
     owner_reported: bool,
     #[cfg(clean_slate_userspace_selftest = "m6-object")]
     unrelated_reported: bool,
     #[cfg(clean_slate_userspace_selftest = "m6-object")]
     readonly_reported: bool,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
+    deadline_reported: bool,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
+    lifecycle_capability: u64,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
+    poll_deadline_ns: Option<u64>,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
+    is_deadline_honored: bool,
 }
 
 #[cfg(any(
@@ -320,6 +361,8 @@ fn build_owner_program() -> M6FixtureBootstrap {
 const TURN_READONLY_DENY: u64 = 0;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 const TURN_UNRELATED_DENY: u64 = 1;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const TURN_DEADLINE: u64 = 2;
 
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn build_unrelated_program() -> M6FixtureBootstrap {
@@ -334,8 +377,139 @@ fn build_unrelated_program() -> M6FixtureBootstrap {
             .expect_eq(SYSCALL_EINVAL),
         )
         .unwrap();
+    program.push(end_turn_step(TURN_UNRELATED_DENY)).unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
+}
+
+/// Runs last, after the owner's storage round trips: the harness stops the storage service,
+/// so this fixture's read stays pending. A poll with a passed deadline returns `ETIMEDOUT`
+/// at once; a poll with a future deadline blocks until it, then returns `ETIMEDOUT`. The
+/// harness, not the poll, then confirms the clock reached the deadline and the request is
+/// still queued.
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+fn build_deadline_program(owner_pid: u64) -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    program.push(wait_exit_step(owner_pid)).unwrap();
+    program.push(wait_turn_step(TURN_DEADLINE)).unwrap();
+    program
+        .push(lane_check_step(CHECK_STOP_STORAGE, 0))
+        .unwrap();
+    let claim = program.push(claim_object_grant_step()).unwrap();
+    let submit = program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_OBJECT,
+                [
+                    OBJECT_SUBOP_SUBMIT,
+                    arg_result(claim),
+                    OBJECT_OP_READ,
+                    TEST_OBJECT_ID,
+                    0,
+                    0,
+                ],
+            )
+            .expect_ne(SYSCALL_EINVAL),
+        )
+        .unwrap();
+    program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_OBJECT,
+                [OBJECT_SUBOP_POLL, arg_result(submit), 0, 0, 1, 0],
+            )
+            .expect_eq(STATUS_ETIMEDOUT),
+        )
+        .unwrap();
+    let deadline = program
+        .push(lane_query_step(CHECK_DEADLINE_AFTER, POLL_WAIT_NS))
+        .unwrap();
+    program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_OBJECT,
+                [
+                    OBJECT_SUBOP_POLL,
+                    arg_result(submit),
+                    0,
+                    0,
+                    arg_result(deadline),
+                    0,
+                ],
+            )
+            .expect_eq(STATUS_ETIMEDOUT),
+        )
+        .unwrap();
+    program
+        .push(lane_check_step(CHECK_DEADLINE_HONORED, arg_result(submit)))
+        .unwrap();
+    program.push(M6FixtureStep::report()).unwrap();
+    program
+}
+
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+fn stop_storage_service(lifecycle_capability: u64) -> Result<(), &'static str> {
+    let allocator = service_lifecycle_syscall_allocator_mut()
+        .as_mut()
+        .ok_or("m6 object self-test allocator missing")?;
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    controller
+        .handle_control_message(
+            allocator,
+            SUPERVISOR_TEST_PID,
+            lifecycle_capability,
+            &LifecycleMessage::ControlRequest(ControlRequest::new(
+                STORAGE_SERVICE_ID,
+                ControlRequestKind::Stop,
+            ))
+            .encode(),
+        )
+        .map_err(|_| "m6 object storage service stop failed")?;
+    kernel_log_line("[M6.3] storage service stopped for the poll deadline check");
+    Ok(())
+}
+
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+fn object_lane_check(pid: u64, check: u64, arg: u64) -> u64 {
+    let state = state_mut();
+    if pid != state.deadline_pid {
+        return SYSCALL_EINVAL;
+    }
+    match check {
+        CHECK_STOP_STORAGE => match stop_storage_service(state.lifecycle_capability) {
+            Ok(()) => 0,
+            Err(message) => fatal_kernel_error(message),
+        },
+        CHECK_DEADLINE_AFTER => {
+            let deadline_ns = monotonic_ns().saturating_add(arg);
+            state.poll_deadline_ns = Some(deadline_ns);
+            deadline_ns
+        }
+        CHECK_DEADLINE_HONORED => {
+            let Some(deadline_ns) = state.poll_deadline_ns else {
+                return SYSCALL_EINVAL;
+            };
+            let now_ns = monotonic_ns();
+            if now_ns < deadline_ns {
+                kernel_log_fmt(format_args!(
+                    "[FAIL] object poll returned {} ns before its deadline\n",
+                    deadline_ns - now_ns
+                ));
+                return SYSCALL_EINVAL;
+            }
+            if !object_request_is_pending(arg) {
+                kernel_log_line("[FAIL] object poll timeout dropped the pending request");
+                return SYSCALL_EINVAL;
+            }
+            kernel_log_fmt(format_args!(
+                "{DEADLINE_MARKER}{arg} past_deadline_ns={}\n",
+                now_ns - deadline_ns
+            ));
+            state.is_deadline_honored = true;
+            0
+        }
+        _ => SYSCALL_EINVAL,
+    }
 }
 
 /// Runs once the leaker's fault teardown has logged its queue reclaim (acceptance
@@ -416,6 +590,11 @@ fn object_report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReport
             return FixtureReportAction::Fail(message);
         }
         state.readonly_reported = true;
+    } else if pid == state.deadline_pid {
+        if report.status != FIXTURE_STATUS_DONE || !state.is_deadline_honored {
+            return FixtureReportAction::Fail("object poll deadline fixture did not complete");
+        }
+        state.deadline_reported = true;
     } else {
         return FixtureReportAction::Fail("unexpected fixture report pid");
     }
@@ -423,6 +602,7 @@ fn object_report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReport
         && state.owner_reported
         && state.unrelated_reported
         && state.readonly_reported
+        && state.deadline_reported
     {
         return FixtureReportAction::PassAndExit(PASS_MARKER);
     }
@@ -475,6 +655,7 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
             .unwrap_or_else(|message| fatal_kernel_error(message))
     };
     set_report_handler(object_report_handler);
+    set_lane_check_handler(object_lane_check);
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("m6 object self-test allocator missing"));
@@ -486,15 +667,17 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
         fixture_service(FIXTURE_OWNER),
         fixture_service(FIXTURE_READONLY),
         fixture_service(FIXTURE_UNRELATED),
+        fixture_service(FIXTURE_DEADLINE),
     ];
-    let mut pids = [0u64; 4];
-    for index in 0..4 {
+    let mut pids = [0u64; FIXTURE_COUNT];
+    for index in 0..FIXTURE_COUNT {
         let program = match index {
             FIXTURE_SPAWN_INDEX_LEAKER => build_leaker_program(),
             FIXTURE_SPAWN_INDEX_OWNER => build_owner_program(),
             FIXTURE_SPAWN_INDEX_READONLY => {
                 build_readonly_program(pids[FIXTURE_SPAWN_INDEX_LEAKER])
             }
+            FIXTURE_SPAWN_INDEX_DEADLINE => build_deadline_program(pids[FIXTURE_SPAWN_INDEX_OWNER]),
             _ => build_unrelated_program(),
         };
         let stack_top = unsafe { task_stack_top(&(*task_stacks_mut())[index + 1]) };
@@ -519,6 +702,9 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
         } else if index == FIXTURE_SPAWN_INDEX_LEAKER {
             register_pending_bootstrap_grant(holder, TEST_OBJECT_ID, Rights::READ)
                 .unwrap_or_else(|_| fatal_kernel_error("leaker bootstrap grant failed"));
+        } else if index == FIXTURE_SPAWN_INDEX_DEADLINE {
+            register_pending_bootstrap_grant(holder, TEST_OBJECT_ID, Rights::READ)
+                .unwrap_or_else(|_| fatal_kernel_error("deadline bootstrap grant failed"));
         }
     }
     unsafe {
@@ -527,9 +713,14 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
             owner_pid: pids[FIXTURE_SPAWN_INDEX_OWNER],
             readonly_pid: pids[FIXTURE_SPAWN_INDEX_READONLY],
             unrelated_pid: pids[FIXTURE_SPAWN_INDEX_UNRELATED],
+            deadline_pid: pids[FIXTURE_SPAWN_INDEX_DEADLINE],
             owner_reported: false,
             unrelated_reported: false,
             readonly_reported: false,
+            deadline_reported: false,
+            lifecycle_capability,
+            poll_deadline_ns: None,
+            is_deadline_honored: false,
         });
     }
     initialize_timer();

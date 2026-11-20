@@ -7,11 +7,13 @@ use clean_slate_capability::{
     CapabilityError, CapabilityHandle, CapabilityState, HolderId, ResourceClass, ResourceRef,
     Rights,
 };
+use clean_slate_native_abi::status::STATUS_ETIMEDOUT;
 use clean_slate_service_fixtures::{
     ObjectServiceRequest, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_READ, OBJECT_OP_WRITE,
-    OBJECT_REQUEST_SLOTS, OBJECT_SERVICE_REQUEST_BYTES, OBJECT_SERVICE_ROLE_ID,
-    OBJECT_STATUS_PENDING, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, OBJECT_SUBOP_POLL,
-    OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT, OBJECT_SUBOP_SUBMIT,
+    OBJECT_POLL_NO_DEADLINE, OBJECT_REQUEST_SLOTS, OBJECT_SERVICE_REQUEST_BYTES,
+    OBJECT_SERVICE_ROLE_ID, OBJECT_STATUS_PENDING, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT,
+    OBJECT_SUBOP_POLL, OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT,
+    OBJECT_SUBOP_SUBMIT,
 };
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
@@ -20,9 +22,10 @@ use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::mm::user_access::{copy_from_user, copy_to_user};
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::sched::wait::{
-    block_current_thread_with_resume, wake_all, wake_one, BlockedResume, WaitKey,
+    block_current_thread_with_resume, wake_all, wake_one, BlockedResume, Deadline, WaitKey,
 };
 use crate::sync::global_cell::GlobalCell;
+use crate::time::{monotonic_ns, tsc_hz};
 
 use super::{
     authorize_current, authorize_current_class, capability_space_mut, current_holder, grant_root,
@@ -265,6 +268,14 @@ pub(crate) fn object_queue_occupied_slots() -> usize {
         .iter()
         .filter(|slot| slot.state != SlotState::Free)
         .count()
+}
+
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+pub(crate) fn object_request_is_pending(request_id: u64) -> bool {
+    queue_mut()
+        .slots
+        .iter()
+        .any(|slot| slot.request_id == request_id && slot.state == SlotState::Pending)
 }
 
 #[cfg(clean_slate_linux_rootfs)]
@@ -568,6 +579,13 @@ fn handle_poll(frame: &mut SyscallContext) {
         frame.rax = SYSCALL_EINVAL;
         return;
     }
+    let deadline_ns = match decode_poll_deadline(frame.r8, tsc_hz().is_some()) {
+        Ok(deadline_ns) => deadline_ns,
+        Err(status) => {
+            frame.rax = status;
+            return;
+        }
+    };
     let holder = match current_holder() {
         Ok(holder) => holder,
         Err(_) => {
@@ -578,7 +596,13 @@ fn handle_poll(frame: &mut SyscallContext) {
     let mut scratch = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
     let out = &mut scratch[..len.min(OBJECT_MAX_PAYLOAD_BYTES)];
     match queue_mut().poll(holder, request_id, out) {
-        Ok(OBJECT_STATUS_PENDING) => block_until_request_completes(frame, request_id),
+        Ok(OBJECT_STATUS_PENDING) => {
+            if deadline_passed(deadline_ns, monotonic_ns) {
+                frame.rax = STATUS_ETIMEDOUT;
+            } else {
+                block_until_request_completes(frame, request_id, deadline_ns);
+            }
+        }
         Ok(written) => {
             let copied = &out[..(written as usize).min(out.len())];
             frame.rax = if copied.is_empty() || copy_to_user(frame.r10, copied).is_ok() {
@@ -591,18 +615,40 @@ fn handle_poll(frame: &mut SyscallContext) {
     }
 }
 
+/// `r8` of `OBJECT_SUBOP_POLL`. A deadline is only meaningful on a calibrated clock.
+fn decode_poll_deadline(raw: u64, is_clock_calibrated: bool) -> Result<Option<u64>, u64> {
+    if raw == OBJECT_POLL_NO_DEADLINE {
+        return Ok(None);
+    }
+    if !is_clock_calibrated {
+        return Err(SYSCALL_EINVAL);
+    }
+    Ok(Some(raw))
+}
+
+/// The deadline is compared, never added to, so a far-future value cannot wrap early.
+fn deadline_passed(deadline_ns: Option<u64>, now_ns: impl FnOnce() -> u64) -> bool {
+    deadline_ns.is_some_and(|deadline_ns| now_ns() >= deadline_ns)
+}
+
 /// A poll of a pending request blocks until `service_complete` wakes the request's
-/// key; the restarted syscall then polls again with the caller's original arguments.
-/// Syscalls run with interrupts masked, so the completion cannot slip in between
-/// the pending check and the block.
-fn block_until_request_completes(frame: &mut SyscallContext, request_id: u64) {
+/// key or the caller's deadline passes (`ETIMEDOUT`; the request stays queued). A wake
+/// restarts the syscall, which polls again with the caller's original arguments; the
+/// deadline is absolute, so it survives the restart unchanged. Syscalls run with
+/// interrupts masked, so the completion cannot slip in between the pending check and
+/// the block.
+fn block_until_request_completes(
+    frame: &mut SyscallContext,
+    request_id: u64,
+    deadline_ns: Option<u64>,
+) {
     match block_current_thread_with_resume(
         frame as *mut SyscallContext,
         object_request_wait_key(request_id),
-        None,
+        deadline_ns.map(Deadline::MonotonicNs),
         BlockedResume::RestartSyscall {
             nr: SYSCALL_NR_CAP_OBJECT,
-            timeout_rax: 0,
+            timeout_rax: STATUS_ETIMEDOUT,
         },
     ) {
         Ok(_) => handle_poll(frame),
@@ -1003,6 +1049,90 @@ mod tests {
         assert_eq!(queue.requeue_in_service(), 1);
         let second = queue.service_next().expect("requeued dequeue");
         assert_eq!(first.request_id, second.request_id);
+    }
+
+    #[test]
+    fn poll_deadline_zero_means_none_and_others_are_absolute() {
+        assert_eq!(
+            decode_poll_deadline(OBJECT_POLL_NO_DEADLINE, true),
+            Ok(None)
+        );
+        assert_eq!(
+            decode_poll_deadline(OBJECT_POLL_NO_DEADLINE, false),
+            Ok(None)
+        );
+        for deadline in [1, 5_000_000, u64::MAX] {
+            assert_eq!(decode_poll_deadline(deadline, true), Ok(Some(deadline)));
+            assert_eq!(decode_poll_deadline(deadline, false), Err(SYSCALL_EINVAL));
+        }
+    }
+
+    #[test]
+    fn poll_deadline_expires_at_or_after_the_deadline_only() {
+        let no_clock = || -> u64 { panic!("the clock must not be read without a deadline") };
+        assert!(!deadline_passed(None, no_clock));
+        assert!(deadline_passed(Some(1), || 500));
+        assert!(deadline_passed(Some(500), || 500));
+        assert!(!deadline_passed(Some(501), || 500));
+        assert!(!deadline_passed(Some(u64::MAX), || u64::MAX - 1));
+        assert!(deadline_passed(Some(u64::MAX), || u64::MAX));
+    }
+
+    #[test]
+    fn poll_timeout_leaves_the_request_queued_for_a_later_poll() {
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(40);
+        let request_id = queue.submit(client, OBJECT_OP_READ, 7, &[]).unwrap();
+        let mut out = [0u8; 8];
+        assert_eq!(
+            queue.poll(client, request_id, &mut out),
+            Ok(OBJECT_STATUS_PENDING)
+        );
+        let request = queue
+            .service_next()
+            .expect("still pending after the timeout");
+        assert_eq!(request.request_id, request_id);
+        queue.service_complete(request_id, 0, b"late").unwrap();
+        assert_eq!(queue.poll(client, request_id, &mut out), Ok(4));
+        assert_eq!(&out[..4], b"late");
+    }
+
+    fn poll_frame(deadline: u64) -> SyscallContext {
+        SyscallContext {
+            rax: SYSCALL_NR_CAP_OBJECT,
+            rdx: 0,
+            rbx: 0,
+            rbp: 0,
+            rsi: 1,
+            rdi: OBJECT_SUBOP_POLL,
+            r8: deadline,
+            r9: 0,
+            r10: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            user_rip: 0x40_1002,
+            user_rflags: 0x202,
+            user_rsp: 0x7fff_0000,
+        }
+    }
+
+    #[test]
+    fn poll_handler_refuses_a_deadline_without_a_calibrated_clock() {
+        crate::time::set_test_monotonic_tsc(0, 0);
+        let mut frame = poll_frame(100);
+        handle_syscall(&mut frame);
+        assert_eq!(frame.rax, SYSCALL_EINVAL);
+
+        crate::time::set_test_monotonic_tsc(1_000_000_000, 0);
+        let mut frame = poll_frame(100);
+        handle_syscall(&mut frame);
+        assert_eq!(frame.rax, SYSCALL_EACCES);
+        let mut frame = poll_frame(OBJECT_POLL_NO_DEADLINE);
+        crate::time::set_test_monotonic_tsc(0, 0);
+        handle_syscall(&mut frame);
+        assert_eq!(frame.rax, SYSCALL_EACCES);
     }
 
     #[test]

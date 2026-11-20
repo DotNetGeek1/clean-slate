@@ -493,7 +493,7 @@ cargo test -p clean-slate-kernel capability::object
 cargo xtask test-m6-object
 ```
 
-`test-m6-object` resets the M5 data disk, builds storage and M6 fixture userspace images, and requires ordered `[CAP ] object grant`, `[CAP ] object allowed`, `[CAP ] deny` (`missing-right` and `no-authority`), then `[M6.3] PASS` (90s timeout). Aliases: `m6-object`, `m6.3`.
+`test-m6-object` resets the M5 data disk, builds storage and M6 fixture userspace images, and requires ordered `[CAP ] object grant`, `[CAP ] object allowed`, `[CAP ] deny` (`missing-right` and `no-authority`), then the poll-deadline check (the harness stops the storage service; a fixture's read stays pending, `OBJECT_SUBOP_POLL` returns `ETIMEDOUT` for a passed deadline at once and for a 50 ms deadline after blocking, and the harness logs `[M6.3] object poll deadline honored` only if its own clock reached the deadline and the request is still queued), then `[M6.3] PASS` (90s timeout). Aliases: `m6-object`, `m6.3`.
 
 For M6.4 process-control acceptance (constituent QEMU boot):
 

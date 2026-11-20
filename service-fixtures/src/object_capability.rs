@@ -1,6 +1,10 @@
 //! M6.3 object-capability request/response protocol shared by kernel, storage service, and clients.
 
 pub const OBJECT_SUBOP_SUBMIT: u64 = 1;
+/// `rsi` = request id, `rdx` = output capacity, `r10` = output pointer, `r8` = deadline
+/// (absolute `WORK_SET` `NOW` nanoseconds, [`OBJECT_POLL_NO_DEADLINE`] = wait until
+/// completion). A pending request whose deadline has passed returns `ETIMEDOUT` and stays
+/// queued, so the caller may poll it again.
 pub const OBJECT_SUBOP_POLL: u64 = 2;
 pub const OBJECT_SUBOP_SERVICE_NEXT: u64 = 3;
 pub const OBJECT_SUBOP_SERVICE_COMPLETE: u64 = 4;
@@ -11,6 +15,8 @@ pub const OBJECT_OP_WRITE: u64 = 2;
 
 pub const OBJECT_MAX_PAYLOAD_BYTES: usize = 512;
 pub const OBJECT_REQUEST_SLOTS: usize = 4;
+
+pub const OBJECT_POLL_NO_DEADLINE: u64 = 0;
 
 pub const OBJECT_STATUS_PENDING: u64 = u64::MAX - 200;
 pub const OBJECT_STATUS_OK: u64 = 0;
