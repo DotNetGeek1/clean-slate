@@ -33,6 +33,15 @@
 //! written to the alternate metadata slot and flushed. The first flush keeps a
 //! write-back cache from persisting the superblock ahead of the payload it
 //! references.
+//!
+//! The device is assumed to write a 512-byte logical sector atomically on power
+//! loss. Each superblock is one sector, so a slot holds either a whole
+//! superblock or its previous bytes, and no crash, including one during the
+//! first [`ObjectStore::format`], leaves a device that is neither blank nor
+//! mountable. A device that tears inside a sector can interrupt the first
+//! format with a slot holding only a byte prefix of the new superblock;
+//! [`probe`] refuses that as [`Refusal::InterruptedFormat`] rather than treat
+//! it as blank, because damage to a real store can leave the same bytes.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -138,6 +147,8 @@ fn classify<D: BlockDevice>(
         .find(|&version| version != STORE_VERSION)
     {
         Refusal::UnsupportedVersion(version)
+    } else if holds_interrupted_first_format(geometry, &slots)? {
+        Refusal::InterruptedFormat
     } else if slots
         .iter()
         .all(|bytes| superblock_format_version(bytes).is_none())
@@ -147,6 +158,23 @@ fn classify<D: BlockDevice>(
         Refusal::SuperblocksInvalid
     };
     Ok(Classified::Refused(refusal))
+}
+
+/// Each slot is blank or the superblock [`ObjectStore::format`] writes on this geometry, cut
+/// after some byte and zero-filled. Called only on an unmountable, non-blank device, so at least
+/// one slot is a strict prefix: a whole copy would have mounted.
+fn holds_interrupted_first_format(
+    geometry: BlockGeometry,
+    slots: &[Vec<u8>],
+) -> Result<bool, StoreError> {
+    let fresh = encode_superblock(geometry, &Superblock::fresh())?;
+    Ok(slots.iter().all(|slot| {
+        let written = slot
+            .iter()
+            .rposition(|&byte| byte != 0)
+            .map_or(0, |last| last + 1);
+        slot[..written] == fresh[..written]
+    }))
 }
 
 /// Format version of a superblock block carrying the store magic and a checksum that holds under
@@ -276,11 +304,7 @@ pub struct ObjectStore<D> {
 impl<D: BlockDevice> ObjectStore<D> {
     pub fn format(mut device: D) -> Result<Self, StoreError> {
         let geometry = validate_geometry(device.geometry())?;
-        let superblock = Superblock {
-            generation: 0,
-            object_count: 0,
-            objects: Vec::new(),
-        };
+        let superblock = Superblock::fresh();
 
         write_superblock(&mut device, geometry, 0, &superblock)?;
         write_superblock(&mut device, geometry, 1, &superblock)?;
@@ -448,6 +472,17 @@ struct Superblock {
     generation: u64,
     object_count: u32,
     objects: Vec<ObjectLayout>,
+}
+
+impl Superblock {
+    /// What [`ObjectStore::format`] writes to both slots.
+    fn fresh() -> Self {
+        Self {
+            generation: 0,
+            object_count: 0,
+            objects: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1347,6 +1382,58 @@ mod tests {
         assert_eq!(opened, Opened::Mounted);
         assert_eq!(store.read_object_by_id(1).unwrap(), b"keep me");
         assert_eq!(counting.mutations.get(), 0);
+    }
+
+    fn fresh_superblock_prefix(bytes: usize) -> Vec<u8> {
+        let mut slot = encode_superblock(geometry(), &Superblock::fresh()).unwrap();
+        slot[bytes..].fill(0);
+        slot
+    }
+
+    fn device_with_slots(slot_a: &[u8], slot_b: &[u8]) -> FakeBlockDevice {
+        let mut device = FakeBlockDevice::new(geometry()).unwrap();
+        device.write_blocks(0, 1, slot_a).unwrap();
+        device.write_blocks(1, 1, slot_b).unwrap();
+        device.flush().unwrap();
+        device
+    }
+
+    #[test]
+    fn a_torn_first_format_is_refused_as_interrupted_not_formatted() {
+        let blank = vec![0; 512];
+        for bytes in [1, 3, 4, 9, 40] {
+            assert_open_refuses(
+                device_with_slots(&fresh_superblock_prefix(bytes), &blank),
+                Refusal::InterruptedFormat,
+            );
+            assert_open_refuses(
+                device_with_slots(&blank, &fresh_superblock_prefix(bytes)),
+                Refusal::InterruptedFormat,
+            );
+        }
+        assert_open_refuses(
+            device_with_slots(&fresh_superblock_prefix(12), &fresh_superblock_prefix(30)),
+            Refusal::InterruptedFormat,
+        );
+    }
+
+    #[test]
+    fn a_slot_that_departs_from_the_fresh_superblock_is_not_an_interrupted_format() {
+        let blank = vec![0; 512];
+        let mut slot = fresh_superblock_prefix(20);
+        slot[16] ^= 0x01;
+        assert_open_refuses(
+            device_with_slots(&slot, &blank),
+            Refusal::SuperblocksInvalid,
+        );
+
+        let mut device = device_holding_one_object();
+        let mut generation_one = durable_slot(&mut device, 1);
+        generation_one[60..].fill(0);
+        device.write_blocks(0, 1, &blank).unwrap();
+        device.write_blocks(1, 1, &generation_one).unwrap();
+        device.flush().unwrap();
+        assert_open_refuses(device, Refusal::SuperblocksInvalid);
     }
 
     #[test]

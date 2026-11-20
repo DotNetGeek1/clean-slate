@@ -11,9 +11,11 @@
 //! alone, unless both superblock slots are all zero; only then is it `Blank`.
 //! `ObjectStore::open` must reach the same decision, and write nothing unless
 //! it formats a blank image. A refusal must name the damage on disk: a payload
-//! when some slot holds an intact superblock, "not a store" when neither slot
-//! holds the magic, and corrupt superblocks otherwise; never another format
-//! version, since no fault here produces a foreign slot with a valid checksum.
+//! when some slot holds an intact superblock, an interrupted first format when
+//! each slot is blank or a zero-filled byte prefix of the block `format` wrote,
+//! "not a store" when neither slot holds the magic, and corrupt superblocks
+//! otherwise; never another format version, since no fault here produces a
+//! foreign slot with a valid checksum.
 //!
 //! Stronger checks where the device allows them:
 //! - unless writes are misdirected, every superblock on disk sits in the slot
@@ -24,15 +26,17 @@
 //!   must mount, and never one older than the last acknowledged commit;
 //! - once `format` is acknowledged on a device that keeps flushes and writes
 //!   in place, no crash or bit flip makes the image `Blank` again;
-//! - on an honest device whose writes tear only at logical-block boundaries,
-//!   no crash, including one during the first `format`, leaves the image
-//!   refused;
-//! - on an honest device whose writes tear at any byte, an image is refused
-//!   only when the first `format` was interrupted, and then each superblock
-//!   slot is blank or a zero-filled byte prefix of the block `format` wrote.
-//!   No format order avoids this: the first write to make a slot non-zero can
-//!   tear just after its first non-zero byte, which leaves a slot that is
-//!   neither blank nor a superblock.
+//! - the store's device contract is that a logical-sector write is atomic on
+//!   power loss. On an honest device that keeps it (writes tear only at
+//!   logical-block boundaries), no crash, including one during the first
+//!   `format`, leaves the image refused;
+//! - as defence in depth, on an honest device whose writes tear at any byte,
+//!   an image is refused only when the first `format` was interrupted, and
+//!   then as `InterruptedFormat`. No format order avoids such refusals: the
+//!   first write to make a slot non-zero can tear just after its first
+//!   non-zero byte, which leaves a slot that is neither blank nor a superblock;
+//! - `InterruptedFormat` never names damage to a store whose `format` was
+//!   acknowledged, on a device that keeps flushes and writes in place.
 //!
 //! The run is bounded for `cargo test`; set `CLEAN_SLATE_STORE_FAULT_SCALE=N`
 //! to run N times as many seeded workloads.
@@ -364,7 +368,7 @@ enum Outcome {
     /// Unmountable, so the storage service refuses the disk and leaves it as is.
     Refused(Refusal),
     /// Refused, and `format` was never acknowledged: the crash interrupted the first format.
-    InterruptedFormat(Refusal),
+    RefusedBeforeFormatAck(Refusal),
     /// Unmountable with both superblock slots still all zero: no format or
     /// commit reached them, so the service formats a disk that holds nothing.
     Blank,
@@ -467,18 +471,31 @@ fn check(mode: Mode, run: &Run, image: &[u8]) -> Result<Outcome, String> {
                  {refusal:?}"
             ));
         }
-        if mode == Mode::Torn && (run.last_acked.is_some() || !torn_first_format(run, image)) {
+        if mode == Mode::Torn
+            && (refusal != Refusal::InterruptedFormat
+                || run.last_acked.is_some()
+                || !torn_first_format(run, image))
+        {
             return Err(format!(
                 "honest device refused as {refusal:?}, and not because a tear interrupted the \
                  first format"
             ));
+        }
+        if refusal == Refusal::InterruptedFormat
+            && run.last_acked.is_some()
+            && mode.persists_acknowledged_writes()
+        {
+            return Err(
+                "a store whose format was acknowledged is refused as an interrupted first format"
+                    .to_owned(),
+            );
         }
     }
     check_open(image, probed, &mounted)?;
 
     Ok(match (generation, run.last_acked) {
         (None, None) => match probed {
-            Probe::Refused(refusal) => Outcome::InterruptedFormat(refusal),
+            Probe::Refused(refusal) => Outcome::RefusedBeforeFormatAck(refusal),
             _ => Outcome::Blank,
         },
         (None, Some(_)) => match probed {
@@ -511,6 +528,8 @@ fn expected_refusal(run: &Run, image: &[u8]) -> Option<Refusal> {
         .any(|(_, bytes)| writes.iter().any(|write| write.bytes == *bytes))
     {
         None
+    } else if torn_first_format(run, image) {
+        Some(Refusal::InterruptedFormat)
     } else if slots
         .iter()
         .all(|(_, bytes)| bytes[..4] != STORE_MAGIC.to_le_bytes())
@@ -898,21 +917,27 @@ fn sector_atomic_tear_at_every_prefix_never_leaves_a_refused_disk() {
     assert!(report.outcomes.contains_key("Blank"));
 }
 
-/// A sub-sector tear during the first `format` can leave a refused disk
-/// (`InterruptedFormat`); once `format` is acknowledged, no tear does.
+/// Outside the sector-atomic contract: a sub-sector tear during the first
+/// `format` can leave a disk refused as `InterruptedFormat`, and nothing else
+/// is ever refused.
 #[test]
 fn torn_write_at_every_prefix_never_mixes_generations() {
     let report = crash_matrix(Mode::Torn);
     assert_holds(&report);
     assert!(report.outcomes.contains_key("InFlight") && report.outcomes.contains_key("LastAcked"));
-    assert!(!has_outcome(&report, "Refused"));
+    let refused = report
+        .outcomes
+        .keys()
+        .filter(|key| key.starts_with("Refused"))
+        .collect::<Vec<_>>();
+    assert_eq!(refused, ["RefusedBeforeFormatAck(InterruptedFormat)"]);
 }
 
 #[test]
 fn dropped_flush_at_every_prefix_never_mixes_generations() {
     let report = crash_matrix(Mode::DroppedFlush);
     assert_holds(&report);
-    assert!(report.outcomes.contains_key("RolledBack") || has_outcome(&report, "Refused"));
+    assert!(report.outcomes.contains_key("RolledBack") || has_outcome(&report, "Refused("));
 }
 
 #[test]
@@ -921,7 +946,7 @@ fn bit_flip_at_every_prefix_never_mixes_generations() {
     assert_holds(&report);
     assert!(report
         .outcomes
-        .contains_key("InterruptedFormat(SuperblocksInvalid)"));
+        .contains_key("RefusedBeforeFormatAck(SuperblocksInvalid)"));
 }
 
 /// Holds before checksums bind object id and location (stage E of #224): a

@@ -63,12 +63,18 @@ pub enum DiskRefusal {
     SuperblocksInvalid,
     /// A superblock is valid, but no committed generation's payload passes its checksum.
     PayloadInvalid,
+    /// Each superblock slot is blank or a zero-filled byte prefix of the superblock a fresh
+    /// format writes, and they are not both blank: what a write torn inside a sector leaves of
+    /// an interrupted first format. Damage to a real store can leave the same bytes, so this is
+    /// refused, not formatted.
+    InterruptedFormat,
 }
 
 const REFUSAL_NOT_A_STORE: u64 = 1;
 const REFUSAL_UNSUPPORTED_VERSION: u64 = 2;
 const REFUSAL_SUPERBLOCKS_INVALID: u64 = 3;
 const REFUSAL_PAYLOAD_INVALID: u64 = 4;
+const REFUSAL_INTERRUPTED_FORMAT: u64 = 5;
 const REFUSAL_KIND_MASK: u64 = 0xff;
 const REFUSAL_VERSION_SHIFT: u32 = 8;
 
@@ -82,6 +88,7 @@ impl DiskRefusal {
             }
             Self::SuperblocksInvalid => REFUSAL_SUPERBLOCKS_INVALID,
             Self::PayloadInvalid => REFUSAL_PAYLOAD_INVALID,
+            Self::InterruptedFormat => REFUSAL_INTERRUPTED_FORMAT,
         }
     }
 
@@ -94,6 +101,7 @@ impl DiskRefusal {
             }
             REFUSAL_SUPERBLOCKS_INVALID if detail == 0 => Some(Self::SuperblocksInvalid),
             REFUSAL_PAYLOAD_INVALID if detail == 0 => Some(Self::PayloadInvalid),
+            REFUSAL_INTERRUPTED_FORMAT if detail == 0 => Some(Self::InterruptedFormat),
             _ => None,
         }
     }
@@ -110,6 +118,10 @@ impl core::fmt::Display for DiskRefusal {
             Self::PayloadInvalid => {
                 f.write_str("corrupt (no committed generation passes its payload checksum)")
             }
+            Self::InterruptedFormat => f.write_str(
+                "interrupted first format, or corrupt (the superblock slots hold only part of a \
+                 fresh format); the disk image can be deleted to start fresh",
+            ),
         }
     }
 }
@@ -156,12 +168,17 @@ mod tests {
             DiskRefusal::UnsupportedVersion(u16::MAX),
             DiskRefusal::SuperblocksInvalid,
             DiskRefusal::PayloadInvalid,
+            DiskRefusal::InterruptedFormat,
         ] {
             assert_ne!(refusal.encode(), 0);
             assert_eq!(DiskRefusal::decode(refusal.encode()), Some(refusal));
         }
         assert_eq!(DiskRefusal::decode(0), None);
-        assert_eq!(DiskRefusal::decode(5), None);
+        assert_eq!(DiskRefusal::decode(6), None);
+        assert_eq!(
+            DiskRefusal::decode(REFUSAL_INTERRUPTED_FORMAT | 1 << 8),
+            None
+        );
         assert_eq!(DiskRefusal::decode(REFUSAL_NOT_A_STORE | 1 << 8), None);
     }
 
@@ -175,5 +192,8 @@ mod tests {
             std::format!("{}", DiskRefusal::UnsupportedVersion(1)),
             "incompatible format v1"
         );
+        let interrupted = std::format!("{}", DiskRefusal::InterruptedFormat);
+        assert!(interrupted.starts_with("interrupted first format, or corrupt"));
+        assert!(interrupted.ends_with("the disk image can be deleted to start fresh"));
     }
 }

@@ -5870,6 +5870,11 @@ enum XtaskError {
         path: PathBuf,
         reason: String,
     },
+    /// A reused data disk's superblock slots hold only part of a fresh format: an interrupted
+    /// first format, or damage that left the same bytes. The storage service refuses it.
+    InterruptedFormatDataDisk {
+        path: PathBuf,
+    },
     M5PhaseFailed {
         phase: String,
         reason: String,
@@ -5935,6 +5940,12 @@ impl Display for XtaskError {
             XtaskError::UnusableDataDisk { path, reason } => write!(
                 f,
                 "data disk {} is not blank and cannot be mounted: {reason}; the storage service refuses it rather than reformat it, so delete {} to start from a blank disk",
+                path.display(),
+                path.display()
+            ),
+            XtaskError::InterruptedFormatDataDisk { path } => write!(
+                f,
+                "data disk {} holds an interrupted first format, or is corrupt (its superblock slots hold only part of a fresh format); the storage service refuses it rather than reformat it, so delete {} to start from a blank disk",
                 path.display(),
                 path.display()
             ),
