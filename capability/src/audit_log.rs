@@ -39,8 +39,11 @@ pub struct BoundedAuditLog<const N: usize> {
     len: usize,
     next_sequence: u64,
     dropped: u64,
+    /// Of [Self::dropped], the records a full log aged out (rather than a holder's own oldest).
+    aged_out: u64,
     holder_budget: usize,
-    /// Highest sequence handed to a reader; records at or below it are never merged into.
+    /// Highest sequence handed to a reader; records at or below it are merged into only by a
+    /// repeat of a read of this log (see `is_log_read`).
     read_through: u64,
 }
 
@@ -55,6 +58,7 @@ impl<const N: usize> BoundedAuditLog<N> {
             len: 0,
             next_sequence: 1,
             dropped: 0,
+            aged_out: 0,
             holder_budget,
             read_through: 0,
         }
@@ -106,6 +110,7 @@ impl<const N: usize> BoundedAuditLog<N> {
                 .expect("a holder at its budget has a record");
             self.evict(oldest_of_holder);
         } else if self.len == N {
+            self.aged_out += 1;
             self.evict(0);
         }
         self.events[self.len] = event;
@@ -157,6 +162,12 @@ impl<const N: usize> BoundedAuditLog<N> {
 
     pub fn dropped(&self) -> u64 {
         self.dropped
+    }
+
+    /// Records a full log dropped as the oldest overall. Only these can be the records of a
+    /// holder below its budget.
+    pub fn aged_out(&self) -> u64 {
+        self.aged_out
     }
 
     pub fn oldest_sequence(&self) -> Option<u64> {
@@ -224,6 +235,10 @@ impl<const N: usize> BoundedAuditLog<N> {
 /// A reader's use of its `AUDIT_READ` capability. A reader that has been handed its own read
 /// record already knows of that read, so later identical reads may still merge into it;
 /// otherwise every idle poll would store a record for the next poll to read.
+///
+/// Assumes one live reader: `read_through` is shared, so with a second reader a record handed
+/// only to one could still change under it. The kernel grants `AUDIT_READ` without `DELEGATE`
+/// and the manifest lets one row hold the grant, which keeps it so.
 fn is_log_read(event: &AuditEvent) -> bool {
     event.class == ResourceClass::Audit && event.requested == Rights::AUDIT_READ
 }
@@ -334,6 +349,7 @@ mod tests {
         assert_eq!(log.held_by(HolderId(1)), 1);
         assert_eq!(log.held_by(HolderId(2)), 3);
         assert_eq!(log.dropped(), 7);
+        assert_eq!(log.aged_out(), 0, "holder 2 only displaced its own records");
         assert_eq!(log.next_sequence(), 12);
         // Holder 1's record survives; holder 2's first seven are a lost run behind it.
         assert_eq!(sequences(&log), [1, u64::MAX - 7, 9, 10, 11]);
@@ -346,6 +362,7 @@ mod tests {
             log.record(use_event(actor));
         }
         assert_eq!(log.dropped(), 2);
+        assert_eq!(log.aged_out(), 2);
         assert_eq!(sequences(&log), [u64::MAX - 2, 3, 4, 5, 6]);
     }
 

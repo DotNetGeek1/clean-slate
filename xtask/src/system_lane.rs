@@ -275,10 +275,15 @@ fn check_audit_flood(segment: &str, state: State) -> Result<State, String> {
             state.init_pid, state.shell.pid
         ));
     }
-    // An eviction can leave none until the next poll; more than one means polls store records.
-    if number(hook, "reader")? != state.audit_pid || number(hook, "reader-reads")? > 1 {
+    // More than one means polls store records; none, that reads went unrecorded, unless a full
+    // log aged the record out before the next poll.
+    let reader_reads = number(hook, "reader-reads")?;
+    let may_be_aged_out = number(hook, "aged-out")? > 0;
+    if number(hook, "reader")? != state.audit_pid
+        || !(reader_reads == 1 || (reader_reads == 0 && may_be_aged_out))
+    {
         return Err(format!(
-            "expected the log to hold at most one record of the audit service pid={}'s reads: {hook:?}",
+            "expected the log to hold exactly one record of the audit service pid={}'s reads (or none, once a full log aged records out): {hook:?}",
             state.audit_pid
         ));
     }
@@ -996,7 +1001,7 @@ mod tests {
     /// service had lost 150..=169 before the flood.
     fn flood() -> String {
         let mut text = format!(
-            "[HOOK] audit flood witness-holder={INIT} witness-seq=200 holder={SHELL} denials=100 first-seq=201 next-seq=301 allowed=0 held=16 reader={AUDIT} reader-reads=1\n\
+            "[HOOK] audit flood witness-holder={INIT} witness-seq=200 holder={SHELL} denials=100 first-seq=201 next-seq=301 allowed=0 held=16 reader={AUDIT} reader-reads=1 aged-out=0\n\
              [IPC ] console pid={AUDIT}: [ADT ] lost first=150 missing=20\n\
              [IPC ] console pid={AUDIT}: [ADT ] #200 {INIT} noright audit\n\
              [IPC ] console pid={AUDIT}: [ADT ] lost first=201 missing=84\n"
@@ -1077,15 +1082,19 @@ mod tests {
     }
 
     #[test]
-    fn the_log_must_not_hold_a_record_per_poll_of_the_audit_service() {
-        let none_yet = flood().replace("reader-reads=1", "reader-reads=0");
-        assert_eq!(check_audit_flood(&none_yet, booted()), Ok(booted()));
+    fn the_log_holds_exactly_one_record_of_the_audit_services_reads() {
+        let aged_out = flood().replace("reader-reads=1 aged-out=0", "reader-reads=0 aged-out=3");
+        assert_eq!(check_audit_flood(&aged_out, booted()), Ok(booted()));
+        let one_after_aging = flood().replace("aged-out=0", "aged-out=3");
+        assert_eq!(check_audit_flood(&one_after_aging, booted()), Ok(booted()));
         for (from, to) in [
+            ("reader-reads=1", "reader-reads=0"),
             ("reader-reads=1", "reader-reads=2"),
+            ("reader-reads=1 aged-out=0", "reader-reads=2 aged-out=3"),
             (&format!("reader={AUDIT} ") as &str, "reader=9 "),
         ] {
             let error = flood_error(&flood().replace(from, to));
-            assert!(error.contains("at most one record"), "{to}: {error}");
+            assert!(error.contains("exactly one record"), "{to}: {error}");
         }
     }
 

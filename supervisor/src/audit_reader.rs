@@ -9,10 +9,11 @@
 //! Lines, each at most one console message, and ending in `~` where one had to be cut:
 //! - `[ADT ] lost first=S missing=N` for each lost run;
 //! - `[ADT ] #S WHO OUTCOME [KIND] CLASS` for each denied or refused record, where `WHO` is the
-//!   actor `A`, `A>H` when it acted on another holder `H`, or `kernel>H`; `KIND` is named only
+//!   actor `A`, `A>H` when it acted on another holder `H`, `A>kernel` when that holder is the
+//!   kernel, `kernel>H` when the kernel acted on `H`, or `kernel` alone; `KIND` is named only
 //!   when it is not an authorization; and the outcome, kind and class are fixed short names
-//!   (`noright`, `mismatch`, `deleg`, `process`, ...), so a record fits one message while its
-//!   numbers stay within [`RECORD_LINE_MAX_NUMBER`];
+//!   (`noright`, `mismatch`, `deleg`, `process`, ...; see docs/ARCHITECTURE.md), so a record
+//!   fits one message while its numbers stay within [`RECORD_LINE_MAX_NUMBER`];
 //! - `[ADT ] drained through=S records=R lost=L`, which the service prints after its first
 //!   drain and after any drain that printed one of the above.
 
@@ -96,7 +97,7 @@ pub struct DrainSummary {
 impl DrainSummary {
     /// Whether the drain printed a line for a record, a lost run or a gap.
     pub fn printed_anything(&self) -> bool {
-        self.denied + self.refused + self.lost + self.unreported_gaps > 0
+        self.denied > 0 || self.refused > 0 || self.lost > 0 || self.unreported_gaps > 0
     }
 }
 
@@ -213,6 +214,7 @@ impl fmt::Display for RecordLine<'_> {
         match (record.actor, record.subject) {
             (actor, subject) if actor == kernel && subject == kernel => f.write_str("kernel")?,
             (actor, subject) if actor == kernel => write!(f, "kernel>{subject}")?,
+            (actor, subject) if subject == kernel => write!(f, "{actor}>kernel")?,
             (actor, subject) if subject == actor => write!(f, "{actor}")?,
             (actor, subject) => write!(f, "{actor}>{subject}")?,
         }
@@ -271,14 +273,14 @@ const fn denial_name(error: CapabilityError) -> &'static str {
         CapabilityError::InvalidHandle => "invalid",
         CapabilityError::StaleHandle => "stale",
         CapabilityError::Revoked => "revoked",
-        CapabilityError::UnauthorizedHolder => "foreign",
+        CapabilityError::UnauthorizedHolder => "wronghld",
         CapabilityError::WrongResource => "wrongres",
         CapabilityError::MissingRight => "noright",
         CapabilityError::InvalidRights => "badright",
         CapabilityError::RightsWidening => "widening",
         CapabilityError::DelegationDepthExceeded => "depth",
         CapabilityError::CapacityExhausted => "capacity",
-        CapabilityError::GenerationExhausted => "gen-out",
+        CapabilityError::GenerationExhausted => "genexh",
         CapabilityError::NotDelegable => "nodeleg",
         CapabilityError::QuotaExceeded => "quota",
     }
@@ -314,7 +316,7 @@ const fn class_name(class: ResourceClass) -> &'static str {
         ResourceClass::ProcessControl => "process",
         ResourceClass::IpcEndpoint => "ipc",
         ResourceClass::BlockDevice => "block",
-        ResourceClass::LifecycleControl => "service",
+        ResourceClass::LifecycleControl => "svcctl",
         ResourceClass::Audit => "audit",
         ResourceClass::Network => "net",
         ResourceClass::SharedBuffer => "buffer",
@@ -639,7 +641,7 @@ mod tests {
     }
 
     /// Every kind, class and outcome byte the kernel can write today plus an unknown one of each,
-    /// with every way of naming who acted, at the largest numbers the bound allows.
+    /// with each of the five ways of naming who acted, at the largest numbers the bound allows.
     #[test]
     fn every_record_fits_one_message_uncut_at_the_largest_numbers() {
         let max = RECORD_LINE_MAX_NUMBER;
@@ -666,7 +668,13 @@ mod tests {
                     .map(|&error_code| AuditOutcome { tag, error_code }),
             );
         }
-        let parties = [(max, max), (max, max - 1), (kernel, max), (kernel, kernel)];
+        let parties = [
+            (max, max),
+            (max, max - 1),
+            (max, kernel),
+            (kernel, max),
+            (kernel, kernel),
+        ];
         let mut longest = String::new();
         for &kind in &kinds {
             for &class in &classes {
@@ -707,6 +715,20 @@ mod tests {
         assert_eq!(line.len(), AUDIT_LINE_MAX_BYTES);
         assert!(line.starts_with("[ADT ] #18446744073709551615 18446744073709551615>"));
         assert!(line.ends_with('~'));
+    }
+
+    #[test]
+    fn who_acted_on_whom_is_named_in_each_of_five_forms() {
+        let line = |actor: u64, subject: u64| {
+            let mut event = denied(7, actor).with_subject(HolderId(subject));
+            event.sequence = 7;
+            record_line(&AuditRecord::decode(&bytes_of(&event)))
+        };
+        assert_eq!(line(4, 4), "[ADT ] #7 4 noright audit");
+        assert_eq!(line(4, 9), "[ADT ] #7 4>9 noright audit");
+        assert_eq!(line(4, 0), "[ADT ] #7 4>kernel noright audit");
+        assert_eq!(line(0, 9), "[ADT ] #7 kernel>9 noright audit");
+        assert_eq!(line(0, 0), "[ADT ] #7 kernel noright audit");
     }
 
     #[test]
