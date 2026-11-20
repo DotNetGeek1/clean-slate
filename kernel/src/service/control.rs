@@ -675,6 +675,26 @@ impl ServiceLifecycleController {
             DomainId(spawned.domain_id),
         );
         let kernel_root_frame = self.kernel_root_frame;
+        if let Some(allowance) = context.spec.and_then(|spec| spec.slot_allowance) {
+            let holder = clean_slate_capability::HolderId(spawned.pid);
+            if crate::capability::set_slot_allowance(holder, allowance).is_err() {
+                kernel_log_fmt(format_args!(
+                    "[FAIL] service={} pid={} slot allowance={allowance} refused\n",
+                    service_id.0, spawned.pid
+                ));
+                teardown_process_by_id(
+                    allocator,
+                    kernel_root_frame,
+                    spawned.pid,
+                    SERVICE_TERMINATE_STATUS,
+                    false,
+                )
+                .map_err(LifecycleControlError::SpawnFailed)?;
+                return Err(LifecycleControlError::SpawnFailed(
+                    "service slot allowance refused",
+                ));
+            }
+        }
         self.apply_instance_grants_with_rollback(
             spawned.pid,
             service_id,
@@ -1648,6 +1668,7 @@ mod tests {
             grants: &[Grant::BlockDevice],
             restart: RestartSpec::Never,
             depends_on: &[],
+            slot_allowance: None,
         }];
 
         let mut controller = ServiceLifecycleController::new();

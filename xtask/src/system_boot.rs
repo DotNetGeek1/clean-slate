@@ -544,7 +544,7 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     check_no_desktop_rows(output, launched)?;
     let authority = only_line(output, "[KERN] init authority pid=")?;
     let expected_authority = format!(
-        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1"
+        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1"
     );
     if authority != expected_authority {
         return Err(format!("init authority line {authority:?}"));
@@ -660,7 +660,7 @@ fn check_shell(
     ready: &str,
 ) -> Result<(), String> {
     let expected_audit = format!(
-        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
+        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
     );
     if audit != expected_audit {
         return Err(format!("shell authority {audit:?}"));
@@ -690,21 +690,21 @@ mod tests {
              [KERN] serial console input on vector=49\n\
              [KERN] boot profile=base\n\
              [KERN] init launched pid=3 slot=0 declared-services=3\n\
-             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1\n\
+             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1\n\
              [IPC ] console pid=3: [INIT] boot profile=base\n\
              [IPC ] console pid=3: [INIT] started pid=3 services=3\n\
              [IPC ] console pid=3: [INIT] SERVICE_READY from init refused: not a service\n\
              [IPC ] console pid=3: [INIT] starting service=20736\n\
-             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
+             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20736 pid=4 gen=1\n\
              [SVC ] ready service=20736 pid=4 gen=1 source=live-instance kernel-observed block-write-requests={writes} service-reported formatted={formatted} store-generation=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=20992\n\
-             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
+             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20992 pid=5 gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=21504\n\
              [SVC ] shell process pid=6 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
-             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
+             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
              [SVC ] launch service=21504 pid=6 gen=1\n\
              [SVC ] ready service=20992 pid=5 gen=1 source=live-instance kernel-observed raw-backend=virtio service-reported link-up=1\n\
              [IPC ] console pid=3: [INIT] service=20992 ready gen=1\n\

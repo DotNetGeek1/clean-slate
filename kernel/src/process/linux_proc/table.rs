@@ -6,9 +6,11 @@ use clean_slate_linux_abi::{w_exitcode, LinuxErrno};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-/// Self-test feature: sh + two pipe children + parent + headroom (#107 convergence).
-pub(crate) const LINUX_MAX_PROC_ENTRIES: usize = 6;
-pub(crate) const LINUX_PROC_MAX_CHILDREN_PER_PARENT: usize = 4;
+/// A shell and twelve live children (the M9.8 `fanout` probe), plus one spare. The scheduler
+/// and process registry (`limits.rs`, sixteen each) also hold the services, so this is not
+/// what bounds a fork bomb; whichever fills first returns `EAGAIN`.
+pub(crate) const LINUX_MAX_PROC_ENTRIES: usize = 14;
+pub(crate) const LINUX_PROC_MAX_CHILDREN_PER_PARENT: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ProcId {

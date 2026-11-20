@@ -215,11 +215,21 @@ pub(crate) fn revoke_for_holder(holder: HolderId) -> usize {
             revoked_buffers.note(resource)
         });
     revoked_buffers.reconcile();
+    unsafe { capability_space_mut() }.clear_slot_allowance(holder);
     if revoked > 0 {
         // Names the process whose whole capability tree went, not one of its resources.
         audit::record_kernel_revoke(holder, ResourceRef::process(holder.0, 0), revoked);
     }
     revoked
+}
+
+/// Gives the instance `holder` of a manifest row the row's slot allowance. Only the service
+/// launch path calls this, before the row's grants; [`revoke_for_holder`] (teardown) clears it.
+pub(crate) fn set_slot_allowance(
+    holder: HolderId,
+    allowance: usize,
+) -> Result<(), CapabilityError> {
+    unsafe { capability_space_mut() }.set_slot_allowance(holder, allowance)
 }
 
 /// Returns whether `holder` holds any live capability for `resource` with `required` rights.
@@ -332,11 +342,15 @@ fn copy_capabilities_for_fork(parent: HolderId, child: HolderId) -> Result<usize
     Ok(count)
 }
 
+/// Revokes and releases the copies a failed fork installed, so the table and the child's
+/// quota charge are as they were before the fork (#212).
 #[cfg(clean_slate_linux_proc)]
 fn rollback_fork_inherited(handles: &[Option<CapabilityHandle>]) {
     let table = unsafe { capability_space_mut() };
     for handle in handles.iter().flatten() {
-        let _ = table.revoke(*handle);
+        if table.revoke(*handle).is_ok() {
+            table.release_slot(usize::from(handle.slot));
+        }
     }
 }
 
@@ -374,7 +388,108 @@ pub(crate) fn revoke_for_process_resource(process_id: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clean_slate_capability::CapabilityTable;
+    use clean_slate_capability::{CapabilityTable, HOLDER_SLOT_QUOTA};
+
+    #[cfg(clean_slate_linux_proc)]
+    fn grant_objects(holder: HolderId, first_id: u64, count: u64) {
+        for id in first_id..first_id + count {
+            grant_root(holder, ResourceRef::object(id), Rights::READ).expect("grant");
+        }
+    }
+
+    #[cfg(clean_slate_linux_proc)]
+    fn charge_of(holder: HolderId) -> (usize, usize) {
+        with_capability_space(|table| (table.charged_to(holder), table.revoked_held_by(holder)))
+    }
+
+    #[cfg(clean_slate_linux_proc)]
+    #[test]
+    fn a_fork_child_is_charged_for_what_it_inherits() {
+        let (parent, child) = (HolderId(0x7a01), HolderId(0x7a02));
+        grant_objects(parent, 0x7a00, 10);
+        assert_eq!(inherit_capabilities_for_fork(parent, child), Ok(()));
+        assert_eq!(charge_of(child), (10, 0));
+        assert_eq!(charge_of(parent), (10, 0));
+        revoke_for_holder(parent);
+        revoke_for_holder(child);
+        assert_eq!((charge_of(parent), charge_of(child)), ((0, 0), (0, 0)));
+    }
+
+    #[cfg(clean_slate_linux_proc)]
+    #[test]
+    fn a_fork_over_the_child_quota_is_refused_and_releases_what_it_installed() {
+        let (parent, child) = (HolderId(0x7b01), HolderId(0x7b02));
+        grant_objects(parent, 0x7b00, 10);
+        grant_objects(child, 0x7c00, 10);
+        assert_eq!(
+            inherit_capabilities_for_fork(parent, child),
+            Err(CapabilityError::QuotaExceeded)
+        );
+        assert_eq!(
+            charge_of(child),
+            (10, 0),
+            "the six copies installed before the refusal must be released, not only revoked"
+        );
+        revoke_for_holder(parent);
+        revoke_for_holder(child);
+    }
+
+    #[test]
+    fn one_holder_cannot_take_more_than_its_quota_of_the_global_table() {
+        let holder = HolderId(0x7d01);
+        let mut granted = 0;
+        let refusal = loop {
+            match grant_root(holder, ResourceRef::object(0x7d00), Rights::READ) {
+                Ok(_) => granted += 1,
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(
+            (granted, refusal),
+            (HOLDER_SLOT_QUOTA, CapabilityError::QuotaExceeded)
+        );
+        assert_eq!(revoke_for_holder(holder), HOLDER_SLOT_QUOTA);
+    }
+
+    #[test]
+    fn a_slot_allowance_lasts_until_teardown() {
+        let holder = HolderId(0x7e01);
+        assert_eq!(set_slot_allowance(holder, 24), Ok(()));
+        let mut granted = 0;
+        while grant_root(holder, ResourceRef::object(0x7e00), Rights::READ).is_ok() {
+            granted += 1;
+        }
+        assert_eq!(granted, 24);
+        assert_eq!(revoke_for_holder(holder), 24);
+        assert_eq!(
+            with_capability_space(|table| table.slot_allowance(holder)),
+            None,
+            "teardown returns the pid to the default quota"
+        );
+        assert_eq!(
+            set_slot_allowance(holder, clean_slate_capability::MAX_SLOT_ALLOWANCE + 1),
+            Err(CapabilityError::QuotaExceeded)
+        );
+    }
+
+    #[cfg(clean_slate_linux_proc)]
+    #[test]
+    fn a_fork_child_does_not_inherit_its_parents_slot_allowance() {
+        let (parent, child) = (HolderId(0x7f01), HolderId(0x7f02));
+        assert_eq!(set_slot_allowance(parent, 24), Ok(()));
+        grant_objects(parent, 0x7f00, 20);
+        assert_eq!(
+            inherit_capabilities_for_fork(parent, child),
+            Err(CapabilityError::QuotaExceeded)
+        );
+        assert_eq!(charge_of(child), (0, 0));
+        assert_eq!(
+            with_capability_space(|table| table.slot_allowance(child)),
+            None
+        );
+        revoke_for_holder(parent);
+        revoke_for_holder(child);
+    }
 
     #[test]
     fn authorize_decoded_maps_decode_and_authorize_errors() {

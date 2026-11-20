@@ -447,7 +447,7 @@ const M9_USERSPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(300);
 /// `wget-fixture-http` runs once per cycle (`USERSPACE_CYCLES` in
 /// `kernel/src/selftest/m9_userspace.rs`), each a `GET /` the fixture must receive.
 const M9_USERSPACE_HTTP_REQUESTS: u32 = 9;
-const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 19] = [
+const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 20] = [
     "[M9  ] creating",
     "[M9  ] busybox verified",
     "[M9  ] matrix commands=",
@@ -463,6 +463,7 @@ const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[M9  ] deny fs ok",
     "[M9  ] deny net ok",
     "[M9  ] timeout PASS",
+    "[M9  ] fanout PASS",
     "[M9  ] cycle=9",
     "[M9  ] busybox intact",
     "[M9  ] denial PASS",
@@ -675,14 +676,17 @@ const M7_NETWORK_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[NET ] capacity baseline ok",
     "[M7.8] PASS",
 ];
-const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 8] = [
+const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[CAP ] delegate denied from=",
     "reason=rights-widening",
     "[CAP ] delegate from=",
     "rights=read",
     "depth=1",
+    "[CAP ] delegate denied from=1 to=1",
+    "reason=quota",
     "[CAP ] delegate denied from=",
     "reason=missing-right",
+    "[M6.5] quota holder=1 held=16 quota=16 table_slots=128 ",
     "[M6.5] PASS",
 ];
 /// The lane makes 124 records into the 64-slot ring (`kernel/src/selftest/m6_audit.rs`), so a

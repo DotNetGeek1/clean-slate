@@ -119,6 +119,14 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
     ("capability/mod.rs", "authorize_current_class", Records),
     ("capability/mod.rs", "grant_root", Records),
     ("capability/mod.rs", "revoke_for_holder", Records),
+    (
+        "capability/mod.rs",
+        "set_slot_allowance",
+        NoDecision(
+            "sets a launched instance's quota from its manifest row; the launch record \
+             (`audit_service_authority`) carries the allowance",
+        ),
+    ),
     ("capability/mod.rs", "holder_has_resource_rights", Records),
     (
         "capability/mod.rs",

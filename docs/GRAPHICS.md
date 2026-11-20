@@ -142,7 +142,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 
 ## Capability classes and rights
 
-The kernel gains exactly four capability classes. Surfaces, windows and client buffer registrations are **not** kernel capabilities: they are compositor-minted, connection-scoped protocol objects (see [Identities](#identities-and-generations)). This keeps window policy out of the kernel and keeps per-frame objects out of the single global 64-slot capability table.
+The kernel gains exactly four capability classes. Surfaces, windows and client buffer registrations are **not** kernel capabilities: they are compositor-minted, connection-scoped protocol objects (see [Identities](#identities-and-generations)). This keeps window policy out of the kernel and keeps per-frame objects out of the single global 128-slot capability table, of which each process may hold 16. The compositor holds one transferred record per registered client buffer, so its manifest row gives it a slot allowance of 24, computed from `MAX_REGISTERED_BUFFERS` (see [ARCHITECTURE](ARCHITECTURE.md), manifest slot allowances).
 
 Authoritative source: `capability/src/{resource,rights,authorize,error}.rs`.
 

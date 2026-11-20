@@ -7,7 +7,7 @@ use clean_slate_service_fixtures::m6_fixture::{
     pattern_byte, resolve_arg, M6FixtureBootstrap, M6FixtureStep, EXPECT_EQ, EXPECT_IGNORE,
     EXPECT_NE, FIXTURE_STATUS_DONE, FIXTURE_STATUS_MISMATCH, FIXTURE_STATUS_RUNNING,
     M6_FIXTURE_BOOTSTRAP_ADDRESS, STEP_KIND_END, STEP_KIND_EXEC, STEP_KIND_FAULT, STEP_KIND_FILL,
-    STEP_KIND_REPORT, STEP_KIND_SYSCALL, STEP_KIND_VERIFY,
+    STEP_KIND_REPEAT, STEP_KIND_REPORT, STEP_KIND_SYSCALL, STEP_KIND_VERIFY,
 };
 
 fn bootstrap() -> &'static mut M6FixtureBootstrap {
@@ -118,7 +118,10 @@ fn run_fill_or_verify(header: &mut M6FixtureBootstrap, index: usize, verify: boo
 fn run_steps(header: &mut M6FixtureBootstrap) {
     header.status = FIXTURE_STATUS_RUNNING;
     let count = header.step_count as usize;
-    for index in 0..count {
+    let mut next = 0;
+    while next < count {
+        let index = next;
+        next += 1;
         let kind = header.steps[index].kind;
         match kind {
             STEP_KIND_END => break,
@@ -163,6 +166,21 @@ fn run_steps(header: &mut M6FixtureBootstrap) {
                 header.status = FIXTURE_STATUS_MISMATCH;
                 header.failed_step = index as u64;
                 report_to_kernel();
+            }
+            STEP_KIND_REPEAT => {
+                let [body_start, passes, ..] = header.steps[index].args;
+                if body_start >= index as u64 {
+                    header.status = FIXTURE_STATUS_MISMATCH;
+                    header.failed_step = index as u64;
+                    report_to_kernel();
+                }
+                let done = header.steps[index].result.saturating_add(1);
+                header.steps[index].result = done;
+                if done < passes {
+                    next = body_start as usize;
+                } else {
+                    header.progress = header.progress.saturating_add(1);
+                }
             }
             STEP_KIND_REPORT => {
                 header.status = FIXTURE_STATUS_DONE;

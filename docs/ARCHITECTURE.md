@@ -511,6 +511,22 @@ Implementation lives in `capability/src/revocation.rs` (generic graph) and `kern
 
 **Revoke-then-lazy-release:** `revoke_subtree` only marks slots `Revoked`; `release_revoked` returns them to `Empty` and bumps generation. `grant_root` calls `release_revoked` once on `CapacityExhausted` and retries so stale holders still see `Revoked` until the kernel needs the slot.
 
+**Per-holder quota (#220):** the table has `MAX_SLOTS` (128) slots and no holder may occupy more than `HOLDER_SLOT_QUOTA` (16) of them; `HolderId::KERNEL` is exempt. The holder a record names is charged for it: a delegated record is charged to the receiver, a fork child to itself. A `Revoked` slot is charged until it is released, so at the quota the table first releases that holder's own revoked slots and, if it is still at the quota, refuses with `CapabilityError::QuotaExceeded` (`ENOSPC`; a fork refused for it fails with `EAGAIN`), audited like any other denial. The charge is not a separate counter: `CapabilityTable::charged_to` counts the holder's `Live` and `Revoked` slots, so teardown's `revoke_for_holder` (which releases the holder's revoked slots) returns the whole charge, and `HeldAuthority::revoked_records` lets the S8a teardown guard see any that remain. A fork that fails after copying records revokes and releases every copy (#212).
+
+**Manifest slot allowances (#220):** a row of init's launch manifest may carry `slot_allowance`, a larger quota for each instance of that row. The kernel sets it for the instance's pid when it starts the row, before the row's grants (`CapabilityTable::set_slot_allowance`), and teardown's `revoke_for_holder` clears it. No syscall sets or raises one, and a fork child or a delegate is charged against its own default quota. An allowance must be above `HOLDER_SLOT_QUOTA` and at most `MAX_SLOT_ALLOWANCE` (32), and a manifest's allowances together may not exceed `MAX_SLOTS`. `validate_manifest` refuses either, in a `const` assertion for every built-in manifest and again in `launch_init`, which fails boot. The table refuses the same cases. The `[SVC ] authority` line shows `allowance=<n>` (0 for the default), the launch audit record (a `grant` from the kernel naming the launched process) carries it in `count`, and the instance's authority must match its row. Only the compositor has one:
+
+| Service | Worst case charged to the pid | Allowance |
+|---|---|---|
+| init | console endpoint record (lifecycle control is in its own table): 1 | default (16) |
+| storage | object-service role (the block device is in the lifecycle table): 1 | default |
+| network | network-service record: 1 | default |
+| serial shell (Linux) and each fork | console endpoint, network-client entitlement and client, `LINUX_TMP_MAX_FILES` (4) `/tmp` objects: 7 | default |
+| compositor | 4 launch records, `MAX_REGISTERED_BUFFERS` (16) transferred buffer records, 4 registrations in flight past that limit: 24 | `COMPOSITOR_SLOT_ALLOWANCE` = 24 |
+| desktop shell | console, `GFX_SHELL` role, `MAX_SHARED_BUFFERS_PER_OWNER` (8) owned buffers: 10 | default |
+| playground app | console, `GFX_CONNECT` role, 8 owned buffers: 10 | default |
+
+`COMPOSITOR_SLOT_ALLOWANCE` is computed from `graphics::limits::MAX_REGISTERED_BUFFERS` and the compositor row's grant count, so a change to either moves it.
+
 **Who may revoke:** the holder of the target capability, or any holder of an ancestor capability (walk `provenance.parent` via `authorize_revoke`). Userspace uses `SYSCALL_NR_CAP_REVOKE` op `REVOKE` (subtree revoke); unauthorized attempts log `[CAP ] revoke denied`.
 
 **PROBE:** `SYSCALL_NR_CAP_REVOKE` op `PROBE` runs the same `authorize_current_class` path as production operations (handle → record class → rights check). Used by fixtures and audit tests as a generic authority probe.

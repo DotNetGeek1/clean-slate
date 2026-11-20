@@ -139,6 +139,13 @@ impl FakePort {
         }
     }
 
+    /// Gives the server the slot allowance a manifest row would (the kernel sets it at launch).
+    pub fn set_server_slot_allowance(&mut self, allowance: usize) -> Result<(), u64> {
+        self.table
+            .set_slot_allowance(FAKE_SERVER.holder, allowance)
+            .map_err(|_| STATUS_ENOSPC)
+    }
+
     pub fn add_client(&mut self, holder: HolderId) -> Result<u64, u64> {
         self.add_client_with_rights(holder, Rights::GFX_CONNECT)
     }

@@ -512,7 +512,7 @@ cargo test -p clean-slate-kernel capability::delegation
 cargo xtask test-m6-delegation
 ```
 
-`test-m6-delegation` builds the M6 fixture userspace image and requires ordered `[CAP ] delegate denied` (`rights-widening`), successful `[CAP ] delegate` (`rights=read`, `depth=1`), reader re-delegate denied (`missing-right`), then `[M6.5] PASS` (90s timeout). Aliases: `m6-delegation`, `m6.5`.
+`test-m6-delegation` builds the M6 fixture userspace image and requires ordered `[CAP ] delegate denied` (`rights-widening`), successful `[CAP ] delegate` (`rights=read`, `depth=1`), the owner's self-delegation flood (a fixture `REPEAT` step, more attempts than the table has slots) refused at its 16-record quota (`[CAP ] delegate denied from=1 to=1 reason=quota`), reader re-delegate denied (`missing-right`), `[M6.5] quota holder=1 held=16 quota=16 table_slots=128` (the kernel checked the owner's charge and that its refusals in the audit ring are all `quota`; the reader was still granted after the flood), then `[M6.5] PASS` (90s timeout). Aliases: `m6-delegation`, `m6.5`.
 
 For M6.6 revocation and teardown acceptance (constituent QEMU boot):
 

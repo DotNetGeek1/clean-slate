@@ -52,7 +52,20 @@ const PROBES: &[ProbeSpec] = &[
         tmp: true,
         status: 1,
     },
+    ProbeSpec {
+        name: "fanout",
+        net: true,
+        tmp: true,
+        status: 0,
+    },
 ];
+
+/// Linux processes the `fanout` probe must hold alive at once (its shell, three inner
+/// shells, nine `sleep`s).
+const FANOUT_LINUX_PROCS: u64 = 13;
+/// The capability table's size before per-holder quotas (#220); `fanout` must hold more
+/// live records than this.
+const PRE_QUOTA_TABLE_SLOTS: u64 = 64;
 
 /// Resource fields that must equal the baseline after every cycle.
 const REUSABLE_RESOURCES: &[&str] = &[
@@ -451,6 +464,16 @@ fn validate_probes(lines: &[&str], launches: &[Launch], cycles: u64) -> Result<(
                 if !has("Operation timed out") {
                     return Err(format!(
                         "{name}@{cycle}: connect did not fail with ETIMEDOUT"
+                    ));
+                }
+            }
+            "fanout" => {
+                let procs = field_u64(payload, "linux_procs_peak")?;
+                let capabilities = field_u64(payload, "capabilities_peak")?;
+                if procs < FANOUT_LINUX_PROCS || capabilities <= PRE_QUOTA_TABLE_SLOTS {
+                    return Err(format!(
+                        "{name}@{cycle}: linux_procs_peak={procs} capabilities_peak={capabilities}, \
+                         expected >= {FANOUT_LINUX_PROCS} and > {PRE_QUOTA_TABLE_SLOTS}"
                     ));
                 }
             }

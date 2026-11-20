@@ -113,6 +113,12 @@ pub(crate) struct HeldAuthority {
     /// endpoint capability there; those are counted as `console_records`.
     pub(crate) console_records: usize,
     pub(crate) other: usize,
+    /// Revoked capability-space records still occupying a slot charged to the pid's quota
+    /// (the live ones are counted by class above).
+    pub(crate) revoked_records: usize,
+    /// The slot allowance the kernel set for the pid from its manifest row; 0 for the default
+    /// quota.
+    pub(crate) slot_allowance: usize,
     pub(crate) outside: OutsideCapabilitySpace,
 }
 
@@ -204,6 +210,8 @@ impl HeldAuthority {
         input: 0,
         console_records: 1,
         other: 0,
+        revoked_records: 0,
+        slot_allowance: 0,
         outside: OutsideCapabilitySpace {
             owned_endpoints: 0,
             ports_served: 0,
@@ -260,8 +268,9 @@ impl HeldAuthority {
 
     /// [`Self::for_grants`] for `spec`; a service without a row must hold nothing.
     fn for_row(spec: Option<&ServiceSpec>, network_instance_live: bool) -> Self {
-        spec.map_or_else(Self::default, |spec| {
-            Self::for_grants(spec.image, spec.grants, network_instance_live)
+        spec.map_or_else(Self::default, |spec| Self {
+            slot_allowance: spec.slot_allowance.unwrap_or(0),
+            ..Self::for_grants(spec.image, spec.grants, network_instance_live)
         })
     }
 
@@ -319,6 +328,8 @@ impl HeldAuthority {
                 };
                 *count += 1;
             }
+            held.revoked_records = table.revoked_held_by(HolderId(pid));
+            held.slot_allowance = table.slot_allowance(HolderId(pid)).unwrap_or(0);
         });
         held
     }
@@ -329,7 +340,7 @@ impl fmt::Display for HeldAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "lifecycle-control={} console={} block-device={} object-service={} network={} net-client={} net-client-entitlement={} tmp-objects={} gfx-serve={} gfx-shell={} gfx-client={} display={} input={} other={} {}",
+            "lifecycle-control={} console={} block-device={} object-service={} network={} net-client={} net-client-entitlement={} tmp-objects={} gfx-serve={} gfx-shell={} gfx-client={} display={} input={} other={} revoked={} allowance={} {}",
             self.lifecycle_control,
             self.console,
             self.block_device,
@@ -344,6 +355,8 @@ impl fmt::Display for HeldAuthority {
             self.display,
             self.input,
             self.other + self.console_records.saturating_sub(self.console),
+            self.revoked_records,
+            self.slot_allowance,
             self.outside,
         )
     }
@@ -376,7 +389,8 @@ pub(crate) fn audit_service_authority(
         ResourceRef::process(pid, 0),
         Rights::empty(),
     )
-    .with_subject(HolderId(pid));
+    .with_subject(HolderId(pid))
+    .with_count(held.slot_allowance);
     if matches {
         crate::capability::audit::record(launch);
         return Ok(());
@@ -454,7 +468,7 @@ pub(crate) fn launch_init(
     allocator: &mut crate::mm::frame_allocator::PageAllocator,
 ) -> Result<u64, &'static str> {
     use clean_slate_service_fixtures::init_bootstrap::InitBootstrap;
-    use clean_slate_service_fixtures::manifest::manifest_for;
+    use clean_slate_service_fixtures::manifest::{manifest_for, validate_manifest};
 
     const INIT_SCHEDULER_SLOT: usize = 0;
 
@@ -462,6 +476,10 @@ pub(crate) fn launch_init(
     crate::boot::boot_options::log_boot_option(&option);
     let desktop_mode = effective_desktop_mode(option.mode.word(), InstalledDisplay::active());
     let manifest = manifest_for(desktop_mode);
+    if let Err(error) = validate_manifest(manifest) {
+        kernel_log_fmt(format_args!("[FAIL] init manifest refused: {error:?}\n"));
+        return Err("init manifest is invalid");
+    }
     super::desktop_image::set_row_desktop_mode(desktop_mode);
 
     {
@@ -827,11 +845,11 @@ mod tests {
         );
         assert_eq!(
             std::format!("{shell}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         assert_eq!(
             std::format!("{without_network}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         let without_stdin = HeldAuthority::for_grants(
             ServiceImage::LinuxShell,
@@ -851,7 +869,9 @@ mod tests {
     #[cfg(clean_slate_system_init)]
     #[test]
     fn desktop_rows_must_hold_their_graphics_display_and_input_grants_only() {
-        use clean_slate_service_fixtures::manifest::{find_service, SYSTEM_DESKTOP_MANIFEST};
+        use clean_slate_service_fixtures::manifest::{
+            find_service, COMPOSITOR_SLOT_ALLOWANCE, SYSTEM_DESKTOP_MANIFEST,
+        };
         use clean_slate_service_fixtures::{
             COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
         };
@@ -869,6 +889,7 @@ mod tests {
                 graphics_serve: 1,
                 display: 1,
                 input: 1,
+                slot_allowance: COMPOSITOR_SLOT_ALLOWANCE,
                 outside: OutsideCapabilitySpace {
                     ports_served: 1,
                     ..OutsideCapabilitySpace::default()
@@ -878,7 +899,7 @@ mod tests {
         );
         assert_eq!(
             std::format!("{compositor}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 other=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 other=0 revoked=0 allowance=24 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
         assert_eq!(
             row(DESKTOP_SHELL_SERVICE_ID),
@@ -958,7 +979,7 @@ mod tests {
     fn init_is_expected_to_hold_lifecycle_control_and_the_console_only() {
         assert_eq!(
             std::format!("{}", HeldAuthority::INIT),
-            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
         for held in [
             HeldAuthority {
@@ -1061,6 +1082,12 @@ mod tests {
         };
         assert_ne!(with_tmp, HeldAuthority::INIT);
         assert!(std::format!("{with_tmp}").contains(" tmp-objects=1 "));
+        let with_revoked = HeldAuthority {
+            revoked_records: 1,
+            ..HeldAuthority::INIT
+        };
+        assert_ne!(with_revoked, HeldAuthority::INIT);
+        assert!(std::format!("{with_revoked}").contains(" revoked=1 "));
         for outside in outside_extras {
             let held = HeldAuthority {
                 outside,
@@ -1147,6 +1174,8 @@ mod tests {
             input,
             console_records,
             other,
+            revoked_records,
+            slot_allowance,
             outside,
         } = HeldAuthority::default();
         let OutsideCapabilitySpace {
@@ -1205,6 +1234,14 @@ mod tests {
                 ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
             ),
             (other, ReleasedBy::Hook(Hook::RevokeHolderCapabilities)),
+            (
+                revoked_records,
+                ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
+            ),
+            (
+                slot_allowance,
+                ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
+            ),
             (ports_served, ReleasedBy::Hook(Hook::Port)),
             (port_connections, ReleasedBy::Hook(Hook::Port)),
             (display_presenter, ReleasedBy::Hook(Hook::DisplayPresenter)),

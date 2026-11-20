@@ -1017,14 +1017,16 @@ mod tests {
 
         let holder = HolderId(88_881);
         let target_object = 4242u64;
+        // Other holders fill the bootstrap table, so `holder` stays under its slot quota.
+        let filler = |object_id: u64| HolderId(88_900 + object_id);
         for object_id in 0..16u64 {
             let handle = grant_root(
-                holder,
+                filler(object_id),
                 ResourceRef::object(object_id + 10_000),
                 Rights::READ,
             )
             .expect("fill bootstrap grants");
-            register_bootstrap_grant(holder, handle).expect("register filler grant");
+            register_bootstrap_grant(filler(object_id), handle).expect("register filler grant");
         }
         let live_before = with_capability_space(|table| table.live_count());
         let listed_before = with_capability_space(|table| {
@@ -1057,7 +1059,10 @@ mod tests {
         });
         assert_eq!(listed_before, listed_after);
         assert!(!listed_after);
-        discard_bootstrap_grants_for_holder(holder);
+        for object_id in 0..16u64 {
+            discard_bootstrap_grants_for_holder(filler(object_id));
+            revoke_for_holder(filler(object_id));
+        }
         revoke_for_holder(holder);
     }
 }
