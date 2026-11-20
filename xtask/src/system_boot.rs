@@ -38,7 +38,8 @@ const LANE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// The kernel's record of a syscall 3 call whose handle names no console sink.
 const CONSOLE_REFUSED_PREFIX: &str = "[IPC ] console write refused pid=";
-/// The message init sends through its lifecycle handle; delivered, it would reach serial.
+/// The message init sends through its lifecycle handle. The handle names endpoint generation 0,
+/// which no endpoint has, so finding it on serial is a regression guard, not evidence.
 const CONSOLE_PROBE: &str = "[INIT] console probe on a non-console handle";
 
 /// In serial order, except that network and the shell start together once storage is ready, so
@@ -638,8 +639,8 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     summary.ok_or_else(|| "storage was not checked".to_owned())
 }
 
-/// Syscall 3 on init's lifecycle handle: the kernel refused it for init's pid and the probe text
-/// never reached serial.
+/// Syscall 3 on init's lifecycle handle: the kernel recorded its refusal for init's pid. Init
+/// probes before it starts any service, so its refusal is the boot's first and only one.
 fn check_console_refusal(output: &str, init_pid: u64) -> Result<(), String> {
     if let Some(line) = output.lines().find(|line| line.contains(CONSOLE_PROBE)) {
         return Err(format!(

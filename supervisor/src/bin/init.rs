@@ -106,7 +106,8 @@ fn probe_service_ready_refusal(console: u64) {
 }
 
 /// Syscall 3 writes only to the console sink, so the kernel must refuse it on init's lifecycle
-/// handle. The boot lane checks the kernel's refusal record.
+/// handle. The boot lane checks the kernel's refusal record, and the kernel records only the
+/// first refusals of a boot, so this must run before any service starts.
 fn probe_console_refusal(console: u64, lifecycle_capability: u64) {
     let sent = syscall(
         SYSCALL_NR_IPC_SEND,

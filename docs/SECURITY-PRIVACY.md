@@ -14,7 +14,7 @@ The goal is not to pretend compromise can be eliminated. The goal is to make com
 
 A newly launched application should begin with almost nothing beyond CPU, memory, and an IPC relationship with its supervisor.
 
-The console capability a manifest row grants is output only. It authorizes syscall 3, which writes a line to the kernel console sink and nothing else: a handle naming any other object is `EBADF`, and the kernel records the refusal. No process reaches another process through syscall 3 in any build. The mailbox endpoints of the M3/M4 resource self-tests are compiled only into those two builds, and only the kernel sends to them. See [ARCHITECTURE.md](ARCHITECTURE.md#m35-initial-capability-authorized-ipc-direction).
+The console capability a manifest row grants is output only. It authorizes syscall 3, which writes a line to the kernel console sink and nothing else: a handle naming any other object is `EBADF`, and the kernel records the first 8 refusals of each boot. No process reaches another process through syscall 3 in any build. The mailbox endpoints of the M3/M4 resource self-tests are compiled only into those two builds, and only the kernel sends to them. See [ARCHITECTURE.md](ARCHITECTURE.md#m35-initial-capability-authorized-ipc-direction).
 
 It should not automatically receive:
 

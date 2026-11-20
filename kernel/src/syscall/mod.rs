@@ -244,10 +244,7 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
             frame.rax = bytes_sent as u64;
         }
         Err(IpcSendError::NotConsoleSink) => {
-            kernel_log_fmt(format_args!(
-                "[IPC ] console write refused pid={sender_pid} handle={:#x}: not the console sink\n",
-                frame.rdi
-            ));
+            log_console_refusal(sender_pid, frame.rdi);
             frame.rax = STATUS_EBADF;
         }
         Err(IpcSendError::Unauthorized) => {
@@ -270,6 +267,40 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
         }
         Err(IpcSendError::StaleCapability) => frame.rax = SYSCALL_ESTALE,
         Err(IpcSendError::InvalidMessageLength) => frame.rax = SYSCALL_EINVAL,
+    }
+}
+
+/// Any native process can call syscall 3 and serial output runs with interrupts masked, so only
+/// the first refusals of a boot are recorded, followed by one line saying the rest are not.
+const CONSOLE_REFUSAL_LOG_LIMIT: u64 = 8;
+static CONSOLE_REFUSAL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConsoleRefusalLog {
+    Record,
+    Suppressed,
+    Silent,
+}
+
+const fn console_refusal_log(earlier_refusals: u64) -> ConsoleRefusalLog {
+    if earlier_refusals < CONSOLE_REFUSAL_LOG_LIMIT {
+        ConsoleRefusalLog::Record
+    } else if earlier_refusals == CONSOLE_REFUSAL_LOG_LIMIT {
+        ConsoleRefusalLog::Suppressed
+    } else {
+        ConsoleRefusalLog::Silent
+    }
+}
+
+fn log_console_refusal(sender_pid: u64, handle: u64) {
+    match console_refusal_log(CONSOLE_REFUSAL_COUNT.fetch_add(1, Ordering::Relaxed)) {
+        ConsoleRefusalLog::Record => kernel_log_fmt(format_args!(
+            "[IPC ] console write refused pid={sender_pid} handle={handle:#x}: not the console sink\n"
+        )),
+        ConsoleRefusalLog::Suppressed => kernel_log_fmt(format_args!(
+            "[IPC ] console write refusals after the first {CONSOLE_REFUSAL_LOG_LIMIT} are not logged\n"
+        )),
+        ConsoleRefusalLog::Silent => {}
     }
 }
 
@@ -990,6 +1021,21 @@ pub(crate) fn current_syscall_caller_pid() -> Result<u64, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_refusals_log_at_most_the_limit_and_one_suppression_line() {
+        let actions = (0..1000).map(console_refusal_log);
+        let recorded = actions
+            .clone()
+            .filter(|action| *action == ConsoleRefusalLog::Record)
+            .count();
+        let suppressed = actions
+            .filter(|action| *action == ConsoleRefusalLog::Suppressed)
+            .count();
+        assert_eq!(recorded, CONSOLE_REFUSAL_LOG_LIMIT as usize);
+        assert_eq!(suppressed, 1);
+        assert_eq!(console_refusal_log(0), ConsoleRefusalLog::Record);
+    }
 
     #[test]
     fn lifecycle_reply_capacity_rejects_short_buffers() {

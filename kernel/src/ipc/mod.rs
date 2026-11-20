@@ -22,7 +22,6 @@ pub(super) const USERSPACE_IPC_UNAUTHORIZED_TEST_PID: u64 = 2;
 #[allow(dead_code)]
 pub(crate) const USERSPACE_SUPERVISOR_TEST_PID: u64 = 1;
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IpcEndpointState {
     Vacant,
@@ -48,6 +47,8 @@ struct IpcEndpoint {
     owner_pid: u64,
     generation: u16,
     state: IpcEndpointState,
+    /// Meaningful only while `state` is `Active`: a vacant slot keeps its last kind, so every
+    /// kind check must also require `Active`.
     kind: IpcEndpointKind,
     last_message_len: u16,
     last_message: [u8; IPC_MAX_MESSAGE_BYTES],
@@ -99,7 +100,6 @@ pub(crate) struct IpcProcessResources {
     pub(crate) held_capabilities: usize,
 }
 
-#[allow(dead_code)]
 impl EndpointCapabilityHandleParts {
     fn encode(self) -> u64 {
         u64::from(self.capability_slot)
@@ -134,7 +134,6 @@ pub(crate) struct IpcEndpointTable {
     capabilities: [EndpointCapability; IPC_CAPABILITY_CAPACITY],
 }
 
-#[allow(dead_code)]
 impl IpcEndpointTable {
     pub(super) const fn new() -> Self {
         Self {
@@ -143,6 +142,7 @@ impl IpcEndpointTable {
         }
     }
 
+    #[cfg(any(feature = "m3-ipc-self-test", feature = "m4-supervisor-self-test"))]
     pub(super) fn clear(&mut self) {
         *self = Self::new();
     }
@@ -176,7 +176,6 @@ impl IpcEndpointTable {
     /// Holder teardown via [`Self::teardown_resources_for_pid`] retires the
     /// capability only — the shared endpoint stays so replacement processes do
     /// not permanently consume `IPC_ENDPOINT_CAPACITY` slots (#95).
-    #[allow(dead_code)] // Consumed by linux_fd host tests and #97 bootstrap.
     pub(crate) fn grant_console_capability_for_pid(
         &mut self,
         holder_pid: u64,
@@ -443,6 +442,10 @@ impl IpcEndpointTable {
         }
     }
 
+    #[cfg(any(
+        feature = "m3-resources-self-test",
+        feature = "m8-linux-dispatch-self-test"
+    ))]
     pub(crate) fn active_resources(&self) -> IpcProcessResources {
         IpcProcessResources {
             owned_endpoints: self
