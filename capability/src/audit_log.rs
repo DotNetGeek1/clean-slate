@@ -75,6 +75,11 @@ impl<const N: usize> BoundedAuditLog<N> {
         self.read_through = self.read_through.max(sequence);
     }
 
+    /// Highest sequence handed to a reader; 0 before the first read.
+    pub fn read_through(&self) -> u64 {
+        self.read_through
+    }
+
     /// Adds `event` (its sequence is assigned here) and says where it went.
     pub fn record_event(&mut self, mut event: AuditEvent) -> Recorded {
         let holder = event.charged_holder();
