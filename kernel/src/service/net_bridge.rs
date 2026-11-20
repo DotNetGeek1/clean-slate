@@ -48,7 +48,7 @@ pub(crate) fn log_entropy_failure(report: &NetworkServiceBootstrap) -> bool {
 /// address space is still current, so the network service's bootstrap page is readable.
 pub(crate) fn on_exit_trap(pid: u64) {
     let controller = unsafe { crate::service::control::service_lifecycle_controller_mut() };
-    if controller.live_pid(crate::capability::network::NETWORK_SERVICE_ID) != Some(pid) {
+    if controller.live_pid(clean_slate_service_fixtures::NETWORK_SERVICE_ID) != Some(pid) {
         return;
     }
     if let Ok(report) = crate::mm::user_access::read_user::<NetworkServiceBootstrap>(

@@ -81,8 +81,9 @@ mod integration {
         })
     }
 
-    /// #221: source ports and ISSs come from the transport's generator, with the ISS keyed on
-    /// the four-tuple as RFC 6528 describes.
+    /// The same seed gives the same SYNs and another seed different ones; the two connections
+    /// get distinct ports in the dynamic range; and each ISS is the RFC 6528 function of the
+    /// transport's ISS key, the four-tuple and the clock.
     #[test]
     fn ports_and_iss_come_from_the_generator() {
         let syns = first_syns(1);

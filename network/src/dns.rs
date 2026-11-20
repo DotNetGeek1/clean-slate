@@ -1688,9 +1688,8 @@ mod tests {
             });
         }
 
-        /// #221: query IDs and source ports come from the resolver's generator, so two
-        /// resolvers seeded differently send different ones, and concurrent queries never
-        /// share an ID.
+        /// Six concurrent queries carry six distinct IDs, and a resolver seeded differently
+        /// sends different IDs from different source ports.
         #[test]
         fn query_ids_and_ports_are_random_and_unique_among_live_queries() {
             run_on_large_stack(|| {

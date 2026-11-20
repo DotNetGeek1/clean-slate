@@ -859,7 +859,7 @@ mod tests {
         assert_eq!(t.endpoints_in_use(), 2);
     }
 
-    /// #221: ephemeral ports come from the table's generator, not a fixed base plus a slot.
+    /// Tables seeded differently hand out different ephemeral ports for the same opens.
     #[test]
     fn ephemeral_ports_differ_between_generators() {
         let ports = |seed: u8| {
