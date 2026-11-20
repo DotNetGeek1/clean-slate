@@ -337,8 +337,8 @@ mod tests {
             ("[IPC ] console pid=3: [FAIL] boom\r", "[FAIL] boom"),
             ("[DNS ] FAIL reason=timeout", "[DNS ] FAIL reason=timeout"),
             (
-                "[TLS ] FAIL reason=rdrand-unavailable",
-                "[TLS ] FAIL reason=rdrand-unavailable",
+                "[TLS ] FAIL entropy: no RDSEED or RDRAND",
+                "[TLS ] FAIL entropy: no RDSEED or RDRAND",
             ),
             ("[VMOD] FAIL Timeout", "[VMOD] FAIL Timeout"),
             (
