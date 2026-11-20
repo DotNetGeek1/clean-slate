@@ -188,7 +188,7 @@ Authoritative source: `capability/src/{resource,rights,authorize,error}.rs`.
 | shell | `Graphics{GFX_CONNECT \| GFX_SHELL}` (root grant); owner capabilities for its own buffers |
 | apps | `Graphics{GFX_CONNECT}`; owner capabilities for their own buffers |
 
-Shared-buffer allocation is ambient but bounded by a per-owner quota (#195); sharing is the capability-controlled act.
+Shared-buffer allocation is ambient but bounded by a per-owner quota (#195; the bounds are listed in [SECURITY-PRIVACY.md](SECURITY-PRIVACY.md#ambient-creation)); sharing is the capability-controlled act.
 
 ## Reserved syscalls
 

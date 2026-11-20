@@ -634,7 +634,7 @@ const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 16] = [
     "[STOR] malformed media rejected",
     "[M5.7] PASS",
 ];
-const M6_OBJECT_ACCEPTANCE_MARKERS: [&str; 8] = [
+const M6_OBJECT_ACCEPTANCE_MARKERS: [&str; 12] = [
     "[CAP ] object grant holder=",
     "[CAP ] object allowed holder=",
     "[CAP ] object queue reclaimed holder=",
@@ -642,6 +642,10 @@ const M6_OBJECT_ACCEPTANCE_MARKERS: [&str; 8] = [
     "reason=missing-right",
     "[CAP ] deny holder=",
     "reason=no-authority",
+    "[M6.3] object poll returned data before its deadline remaining_ns=",
+    "[M6.3] storage service stopped for the poll deadline check",
+    "[M6.3] object poll with a passed deadline did not block elapsed_ns=",
+    "[M6.3] object poll deadline honored request=",
     "[M6.3] PASS",
 ];
 const M7_NET_SERVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
