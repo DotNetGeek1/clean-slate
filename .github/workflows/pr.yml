@@ -188,8 +188,8 @@ jobs:
 
       # Every kernel build embeds the storage and network ELFs (kernel/build.rs), including
       # clippy, the bare kernel build, and host tests below; the featureless build (the default
-      # image, also the host tests) embeds init and the audit service as well. The M4 supervisor and recovery
-      # self-tests embed their supervisor ELFs, and the M6 fixture self-tests (with
+      # image, also the host tests) embeds init and the audit service as well. The M4 supervisor
+      # and recovery self-tests embed their supervisor ELFs, and the M6 fixture self-tests (with
       # m7-net-caps, m9-linux-fs, m9-userspace, m10-port and m10-shared-buffer) the M6 fixture.
       - name: Build embedded userspace images
         env:

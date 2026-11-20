@@ -80,6 +80,7 @@ const AUDIT_FLOOD_DENIALS: u64 = 100;
 /// `clean_slate_capability::AUDIT_HOLDER_BUDGET`, the records one holder keeps in the audit
 /// ring, stated here rather than taken from the code under test.
 const AUDIT_HOLDER_BUDGET: u64 = 16;
+const _: () = assert!(AUDIT_FLOOD_DENIALS > AUDIT_HOLDER_BUDGET);
 /// One Ctrl-A per denial, then Ctrl-B to commit them.
 const AUDIT_FLOOD_SEND: [u8; AUDIT_FLOOD_DENIALS as usize + 1] = {
     let mut bytes = [0x01; AUDIT_FLOOD_DENIALS as usize + 1];
@@ -1076,7 +1077,6 @@ mod tests {
         assert_eq!(*commit, 0x02);
         assert_eq!(queued.len() as u64, AUDIT_FLOOD_DENIALS);
         assert!(queued.iter().all(|byte| *byte == 0x01));
-        assert!(AUDIT_FLOOD_DENIALS > AUDIT_HOLDER_BUDGET);
         for step in &STEPS[1..] {
             assert!(!step.send.iter().any(|byte| [0x01, 0x02].contains(byte)));
         }

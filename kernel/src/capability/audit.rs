@@ -126,7 +126,7 @@ pub(crate) fn record_kernel_revoke(subject: HolderId, resource: ResourceRef, cou
         .with_count(count),
     );
 }
-
+#[cfg_attr(not(feature = "m6-audit-self-test"), allow(dead_code))] // Launch-policy API; exercised by M6 self-tests and the M6.8 integration path.
 pub(crate) fn grant_audit_reader(holder: HolderId) -> Result<CapabilityHandle, CapabilityError> {
     grant_root(holder, AUDIT_RESOURCE, Rights::AUDIT_READ)
 }
