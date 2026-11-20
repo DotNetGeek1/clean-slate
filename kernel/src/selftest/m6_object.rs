@@ -41,6 +41,8 @@ use crate::mm::frame_allocator::PageAllocator;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::mm::paging::current_root_frame_address;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
+use crate::mm::user_access::copy_from_user;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::process::id_allocator::id_allocator_mut;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::process::id_allocator::IdAllocator;
@@ -143,12 +145,34 @@ const CHECK_DEADLINE_AFTER: u64 = 1;
 /// is still queued.
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 const CHECK_DEADLINE_HONORED: u64 = 2;
+/// Returns the absolute deadline `arg` nanoseconds from now for the in-time read.
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const CHECK_IN_TIME_DEADLINE: u64 = 3;
+/// `arg` = the fixture's read buffer: 0 iff it holds `ALPHA_V1` and the in-time deadline
+/// has not passed.
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const CHECK_IN_TIME_RECEIVED: u64 = 4;
+/// Records the fixture's block count and the clock before the passed-deadline poll.
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const CHECK_MARK_BLOCKS: u64 = 5;
+/// 0 iff the fixture has not blocked since `CHECK_MARK_BLOCKS`.
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const CHECK_DID_NOT_BLOCK: u64 = 6;
 /// Long enough that a poll returning before its deadline is visible, short enough to keep
 /// the lane quick.
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 const POLL_WAIT_NS: u64 = 50_000_000;
+/// Far beyond one storage round trip under TCG, so only a broken poll times out.
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const IN_TIME_WAIT_NS: u64 = 10_000_000_000;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const IN_TIME_READ_OFFSET: usize = 0;
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 const DEADLINE_MARKER: &str = "[M6.3] object poll deadline honored request=";
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const IN_TIME_MARKER: &str = "[M6.3] object poll returned data before its deadline";
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+const NO_BLOCK_MARKER: &str = "[M6.3] object poll with a passed deadline did not block";
 
 #[cfg(any(
     clean_slate_userspace_selftest = "m6-object",
@@ -185,6 +209,17 @@ struct ObjectSelfTestState {
     poll_deadline_ns: Option<u64>,
     #[cfg(clean_slate_userspace_selftest = "m6-object")]
     is_deadline_honored: bool,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
+    in_time_deadline_ns: Option<u64>,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
+    is_in_time_received: bool,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
+    deadline_fixture_blocks: u64,
+    /// Block count and clock at `CHECK_IN_TIME_DEADLINE`, then at `CHECK_MARK_BLOCKS`.
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
+    block_mark: Option<(u64, u64)>,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
+    is_passed_deadline_unblocked: bool,
 }
 
 #[cfg(any(
@@ -382,21 +417,23 @@ fn build_unrelated_program() -> M6FixtureBootstrap {
     program
 }
 
-/// Runs last, after the owner's storage round trips: the harness stops the storage service,
-/// so this fixture's read stays pending. A poll with a passed deadline returns `ETIMEDOUT`
-/// at once; a poll with a future deadline blocks until it, then returns `ETIMEDOUT`. The
-/// harness, not the poll, then confirms the clock reached the deadline and the request is
+/// Runs last, after the owner has written `ALPHA_V1`. First a read polled with a distant
+/// deadline must return the data; the harness checks the bytes and that the deadline had not
+/// passed. Then the harness stops the storage service, so the next read stays pending. A poll
+/// with a passed deadline returns `ETIMEDOUT` without blocking (the harness counts the
+/// fixture's blocks); a poll with a future deadline blocks until it, then returns `ETIMEDOUT`.
+/// The harness, not the poll, confirms the clock reached the deadline and the request is
 /// still queued.
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn build_deadline_program(owner_pid: u64) -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     program.push(wait_exit_step(owner_pid)).unwrap();
     program.push(wait_turn_step(TURN_DEADLINE)).unwrap();
-    program
-        .push(lane_check_step(CHECK_STOP_STORAGE, 0))
-        .unwrap();
     let claim = program.push(claim_object_grant_step()).unwrap();
-    let submit = program
+    let in_time_deadline = program
+        .push(lane_query_step(CHECK_IN_TIME_DEADLINE, IN_TIME_WAIT_NS))
+        .unwrap();
+    let in_time_submit = program
         .push(
             M6FixtureStep::syscall(
                 SYSCALL_NR_CAP_OBJECT,
@@ -416,10 +453,55 @@ fn build_deadline_program(owner_pid: u64) -> M6FixtureBootstrap {
         .push(
             M6FixtureStep::syscall(
                 SYSCALL_NR_CAP_OBJECT,
+                [
+                    OBJECT_SUBOP_POLL,
+                    arg_result(in_time_submit),
+                    ALPHA_V1.len() as u64,
+                    arg_data(IN_TIME_READ_OFFSET),
+                    arg_result(in_time_deadline),
+                    0,
+                ],
+            )
+            .expect_eq(ALPHA_V1.len() as u64),
+        )
+        .unwrap();
+    program
+        .push(lane_check_step(
+            CHECK_IN_TIME_RECEIVED,
+            arg_data(IN_TIME_READ_OFFSET),
+        ))
+        .unwrap();
+    program
+        .push(lane_check_step(CHECK_STOP_STORAGE, 0))
+        .unwrap();
+    let submit = program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_OBJECT,
+                [
+                    OBJECT_SUBOP_SUBMIT,
+                    arg_result(claim),
+                    OBJECT_OP_READ,
+                    TEST_OBJECT_ID,
+                    0,
+                    0,
+                ],
+            )
+            .expect_ne(SYSCALL_EINVAL),
+        )
+        .unwrap();
+    program.push(lane_check_step(CHECK_MARK_BLOCKS, 0)).unwrap();
+    program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_OBJECT,
                 [OBJECT_SUBOP_POLL, arg_result(submit), 0, 0, 1, 0],
             )
             .expect_eq(STATUS_ETIMEDOUT),
         )
+        .unwrap();
+    program
+        .push(lane_check_step(CHECK_DID_NOT_BLOCK, 0))
         .unwrap();
     let deadline = program
         .push(lane_query_step(CHECK_DEADLINE_AFTER, POLL_WAIT_NS))
@@ -508,7 +590,69 @@ fn object_lane_check(pid: u64, check: u64, arg: u64) -> u64 {
             state.is_deadline_honored = true;
             0
         }
+        CHECK_IN_TIME_DEADLINE => {
+            let now_ns = monotonic_ns();
+            let deadline_ns = now_ns.saturating_add(arg);
+            state.in_time_deadline_ns = Some(deadline_ns);
+            state.block_mark = Some((state.deadline_fixture_blocks, now_ns));
+            deadline_ns
+        }
+        CHECK_IN_TIME_RECEIVED => check_in_time_received(state, arg),
+        CHECK_MARK_BLOCKS => {
+            state.block_mark = Some((state.deadline_fixture_blocks, monotonic_ns()));
+            0
+        }
+        CHECK_DID_NOT_BLOCK => {
+            let Some((blocks_before, marked_ns)) = state.block_mark else {
+                return SYSCALL_EINVAL;
+            };
+            if state.deadline_fixture_blocks != blocks_before {
+                kernel_log_line("[FAIL] object poll with a passed deadline blocked");
+                return SYSCALL_EINVAL;
+            }
+            kernel_log_fmt(format_args!(
+                "{NO_BLOCK_MARKER} elapsed_ns={}\n",
+                monotonic_ns().saturating_sub(marked_ns)
+            ));
+            state.is_passed_deadline_unblocked = true;
+            0
+        }
         _ => SYSCALL_EINVAL,
+    }
+}
+
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+fn check_in_time_received(state: &mut ObjectSelfTestState, buffer: u64) -> u64 {
+    let Some(deadline_ns) = state.in_time_deadline_ns else {
+        return SYSCALL_EINVAL;
+    };
+    let now_ns = monotonic_ns();
+    if now_ns >= deadline_ns {
+        kernel_log_line("[FAIL] object poll returned data only after its deadline");
+        return SYSCALL_EINVAL;
+    }
+    let mut received = [0u8; ALPHA_V1.len()];
+    if copy_from_user(&mut received, buffer).is_err() || received != ALPHA_V1 {
+        kernel_log_line("[FAIL] object poll with a deadline did not deliver alpha-v1");
+        return SYSCALL_EINVAL;
+    }
+    let blocks_before = state.block_mark.map_or(0, |(blocks, _)| blocks);
+    kernel_log_fmt(format_args!(
+        "{IN_TIME_MARKER} remaining_ns={} blocks={}\n",
+        deadline_ns - now_ns,
+        state.deadline_fixture_blocks - blocks_before
+    ));
+    state.is_in_time_received = true;
+    0
+}
+
+/// Counts the deadline fixture's blocks so the harness can tell whether a poll blocked.
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
+#[allow(static_mut_refs)]
+pub(crate) fn on_thread_blocked(pid: u64) {
+    let state = unsafe { OBJECT_SELF_TEST_STATE.as_mut() };
+    if let Some(state) = state.filter(|state| state.deadline_pid == pid) {
+        state.deadline_fixture_blocks += 1;
     }
 }
 
@@ -591,7 +735,10 @@ fn object_report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReport
         }
         state.readonly_reported = true;
     } else if pid == state.deadline_pid {
-        if report.status != FIXTURE_STATUS_DONE || !state.is_deadline_honored {
+        let is_every_check_passed = state.is_in_time_received
+            && state.is_passed_deadline_unblocked
+            && state.is_deadline_honored;
+        if report.status != FIXTURE_STATUS_DONE || !is_every_check_passed {
             return FixtureReportAction::Fail("object poll deadline fixture did not complete");
         }
         state.deadline_reported = true;
@@ -721,6 +868,11 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
             lifecycle_capability,
             poll_deadline_ns: None,
             is_deadline_honored: false,
+            in_time_deadline_ns: None,
+            is_in_time_received: false,
+            deadline_fixture_blocks: 0,
+            block_mark: None,
+            is_passed_deadline_unblocked: false,
         });
     }
     initialize_timer();
