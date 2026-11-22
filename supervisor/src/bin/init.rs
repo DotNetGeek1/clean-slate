@@ -28,7 +28,7 @@ use clean_slate_supervisor::{
 const SYSCALL_NR_IPC_SEND: u64 = 3;
 /// The kernel refuses longer IPC messages.
 const IPC_MAX_MESSAGE_BYTES: usize = 64;
-/// Supervisor slots; the desktop manifest has six rows, the base one three.
+/// Supervisor slots; the desktop manifest has seven rows, the base one four.
 const SERVICE_SLOTS: usize = 8;
 
 const _: () = assert!(SYSTEM_DESKTOP_MANIFEST.len() <= SERVICE_SLOTS);

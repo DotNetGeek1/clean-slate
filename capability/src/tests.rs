@@ -4,8 +4,8 @@ use crate::error::syscall_abi::{
     self, SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC, SYSCALL_ESTALE,
 };
 use crate::{
-    authorize, authorize_audited, fork_inheritable, validate_delegation, AuditEvent, AuditOutcome,
-    AuditSink, CapabilityError, CapabilityHandle, CapabilityRecord, CapabilityState,
+    authorize, authorize_audited, fork_inheritable, validate_delegation, AuditEvent, AuditKind,
+    AuditOutcome, AuditSink, CapabilityError, CapabilityHandle, CapabilityRecord, CapabilityState,
     CapabilityTable, Generation, HolderId, Provenance, ResourceClass, ResourceRef, Rights,
     AUDIT_EVENT_SIZE_BYTES, MAX_DELEGATION_DEPTH,
 };
@@ -262,6 +262,22 @@ fn provenance_depth_limit() {
 fn audit_event_size() {
     assert_eq!(AUDIT_EVENT_SIZE_BYTES, 64);
     assert_eq!(core::mem::size_of::<AuditEvent>(), 64);
+}
+
+#[test]
+fn audit_kind_and_resource_class_bytes_round_trip() {
+    for raw in 0..=u8::MAX {
+        if let Some(kind) = AuditKind::from_u8(raw) {
+            assert_eq!(kind as u8, raw);
+        }
+        if let Some(class) = ResourceClass::from_u8(raw) {
+            assert_eq!(class.as_u8(), raw);
+            assert!(!class.name().is_empty());
+        }
+    }
+    assert_eq!(AuditKind::from_u8(6), Some(AuditKind::Lost));
+    assert_eq!(AuditKind::from_u8(7), None);
+    assert_eq!(ResourceClass::Audit.name(), "audit");
 }
 
 #[test]

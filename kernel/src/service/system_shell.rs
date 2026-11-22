@@ -65,6 +65,7 @@ impl LinuxGrants {
                 Grant::NetworkClient => wanted.network_client = true,
                 Grant::BlockDevice
                 | Grant::ObjectServiceRole
+                | Grant::AuditReader
                 | Grant::NetworkService
                 | Grant::GraphicsPort
                 | Grant::DisplayPresenter

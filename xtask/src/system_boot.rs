@@ -1,7 +1,8 @@
 //! The default image (#218 S3b): `cargo xtask run` and the `test-system-boot` lane.
 //!
 //! The default image is the kernel built with no feature: the kernel launches userspace init,
-//! which starts storage, then network and the serial-console shell (#218 S5), and waits. `run` always attaches the persistent data
+//! which starts storage and the audit service (#219), then network and the serial-console shell
+//! (#218 S5), and waits. `run` always attaches the persistent data
 //! disk `target/system-data.img` (created when missing) and starts the network fixture peer
 //! only with `--net`. The lane boots the same image three times on a disk of its own: the first
 //! boot formats it, the second mounts it, and the third finds it corrupted and must refuse it
@@ -31,13 +32,18 @@ const DATA_DISK_BLOCK_BYTES: usize = 512;
 const STORAGE_SERVICE: u32 = 0x5100;
 const NETWORK_SERVICE: u32 = 0x5200;
 const SHELL_SERVICE: u32 = 0x5400;
+pub(crate) const AUDIT_SERVICE: u32 = 0x5500;
+/// The base rows: storage, network, the shell and the audit service.
+pub(crate) const BASE_SERVICES: u64 = 4;
 /// Compositor, desktop shell and app (#218 S6c): declared only with the desktop option.
 pub(crate) const DESKTOP_SERVICES: [u32; 3] = [0x5300, 0x5301, 0x5302];
 /// One boot to init idle, with the network service's DHCP exchange; the build is not counted.
 const LANE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// In serial order, except that network and the shell start together once storage is ready, so
-/// their lines interleave as the two run; [`validate_boot`] checks each service's own order.
+/// their lines interleave as the two run; [`validate_boot`] checks each service's own order. The
+/// audit service starts with storage and runs beside all three, so only [`validate_boot`] and
+/// the settle count check it.
 /// Kernel lines (`[KERN]`, `[SVC ]`) are printed by the kernel; `[INIT]` lines reach serial
 /// only through init's console capability, as `[IPC ] console pid=N: …`.
 pub(crate) const MARKERS: [MarkerStep<'static>; 17] = [
@@ -64,7 +70,7 @@ pub(crate) const MARKERS: [MarkerStep<'static>; 17] = [
         "[SVC ] ready service=20992 ",
         "[INIT] service=20992 ready gen=1",
     ]),
-    MarkerStep::Ordered("[INIT] boot settled running=3 down=0; waiting, no deadline"),
+    MarkerStep::Ordered("[INIT] boot settled running=4 down=0; waiting, no deadline"),
     MarkerStep::Ordered("[KERN] idle thread halted 16 times in a row while init pid="),
 ];
 
@@ -367,7 +373,8 @@ pub(crate) fn run_lane() -> Result<(), XtaskError> {
 const REFUSAL_LINE: &str = "[STOR] refusing data disk: corrupt (both superblock slots invalid)";
 
 /// Storage is launched once and restarted [`STORAGE_RESTARTS`] times, refusing the disk each
-/// time; init then gives up on it and on the two services that depend on it.
+/// time; init then gives up on it and on the two services that depend on it. The audit service
+/// depends on nothing and keeps running.
 const REFUSED_DISK_MARKERS: [MarkerStep<'static>; 7] = [
     MarkerStep::Ordered("[KERN] init launched pid="),
     MarkerStep::Ordered("[INIT] starting service=20736"),
@@ -378,7 +385,7 @@ const REFUSED_DISK_MARKERS: [MarkerStep<'static>; 7] = [
         "[INIT] not starting service=20992: service=20736 is down",
         "[INIT] not starting service=21504: service=20736 is down",
     ]),
-    MarkerStep::Ordered("[INIT] boot settled running=0 down=3; waiting, no deadline"),
+    MarkerStep::Ordered("[INIT] boot settled running=1 down=3; waiting, no deadline"),
 ];
 const STORAGE_RESTARTS: usize = 3;
 
@@ -532,7 +539,9 @@ fn only_line<'a>(output: &'a str, prefix: &str) -> Result<&'a str, String> {
 /// order, before init announced it; storage formatted the disk (with block writes) or mounted it,
 /// as `formatted` expects; the shell holds the console, stdin, `/tmp`, the network client
 /// entitlement, a client capability for the network instance (launched before it in the same
-/// init wake, so live) and the Linux personality only, and became ready by blocking on stdin.
+/// init wake, so live) and the Linux personality only, and became ready by blocking on stdin;
+/// the audit service holds `AUDIT_READ` and its console only and became ready where the kernel
+/// says its first drain stopped ([`check_audit_service`]).
 fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, String> {
     // `[HOOK]` lines come only from the `system-test-hooks` build; this is the default image.
     if let Some(line) = output.lines().find(|line| line.contains("[HOOK]")) {
@@ -547,7 +556,7 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     check_no_desktop_rows(output, launched)?;
     let authority = only_line(output, "[KERN] init authority pid=")?;
     let expected_authority = format!(
-        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1"
+        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1"
     );
     if authority != expected_authority {
         return Err(format!("init authority line {authority:?}"));
@@ -569,7 +578,12 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     }
 
     let mut summary = None;
-    for service in [STORAGE_SERVICE, NETWORK_SERVICE, SHELL_SERVICE] {
+    for service in [
+        STORAGE_SERVICE,
+        NETWORK_SERVICE,
+        SHELL_SERVICE,
+        AUDIT_SERVICE,
+    ] {
         let launch = only_line(output, &format!("[SVC ] launch service={service} "))?;
         let pid = number(launch, "pid")?;
         let generation = number(launch, "gen")?;
@@ -599,6 +613,9 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
         }
         if service == SHELL_SERVICE {
             check_shell(output, pid, generation, audit, ready)?;
+        }
+        if service == AUDIT_SERVICE {
+            check_audit_service(output, pid, audit, ready)?;
         }
         if service == NETWORK_SERVICE && field(ready, "raw-backend") != Some("virtio") {
             return Err(format!(
@@ -630,11 +647,71 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     summary.ok_or_else(|| "storage was not checked".to_owned())
 }
 
-/// With the desktop option off the kernel declares the three base rows and nothing of the
-/// desktop's: no desktop row is declared or launched and no graphics, display or input authority
-/// is granted.
+/// The audit service's launch audit: `AUDIT_READ` on the log and its console, nothing else.
+pub(crate) fn expected_audit_authority(pid: u64) -> String {
+    format!(
+        "[SVC ] authority service={AUDIT_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1"
+    )
+}
+
+/// The audit service holds exactly its row and reported ready after its first drain. That
+/// drain's summary line must account for every sequence up to where it ended (each is a record
+/// or inside a lost run), and the kernel's own read cursor, logged with the ready report, must
+/// be exactly there: the service read the log rather than only saying so. Its lost count can be
+/// no more than the kernel's count of records dropped.
+pub(crate) fn check_audit_service(
+    output: &str,
+    pid: u64,
+    audit: &str,
+    ready: &str,
+) -> Result<(), String> {
+    if audit != expected_audit_authority(pid) {
+        return Err(format!("audit service authority {audit:?}"));
+    }
+    let drained_prefix = format!("[IPC ] console pid={pid}: [ADT ] drained ");
+    let drained = output
+        .lines()
+        .map(str::trim_end)
+        .find(|line| line.starts_with(&drained_prefix))
+        .ok_or_else(|| format!("the audit service printed no {drained_prefix:?} line"))?;
+    let drained_fields = &drained[drained.find("[ADT ]").unwrap_or(0)..];
+    let through = number(drained_fields, "through")?;
+    let records = number(drained_fields, "records")?;
+    let lost = number(drained_fields, "lost")?;
+    if through == 0 || records + lost != through {
+        return Err(format!(
+            "the audit service's first drain does not account for sequences 1..={through}: {drained:?}"
+        ));
+    }
+    if number(ready, "audit-read-through")? != through {
+        return Err(format!(
+            "the kernel's audit read cursor is not where the service's first drain ended ({drained:?}): {ready:?}"
+        ));
+    }
+    if lost > number(ready, "audit-dropped")? {
+        return Err(format!(
+            "the audit service reported more sequences lost than the kernel dropped ({drained:?}): {ready:?}"
+        ));
+    }
+    // The service's own report, so a consistency check rather than evidence it read the log.
+    if number(ready, "first-drain-records")? != records {
+        return Err(format!(
+            "the audit service's ready detail is not its first drain's record count: {ready:?}"
+        ));
+    }
+    match (output.find(drained), output.find(ready)) {
+        (Some(drained_at), Some(ready_at)) if drained_at < ready_at => Ok(()),
+        _ => Err(format!(
+            "the audit service reported ready before its first drain: {ready:?}"
+        )),
+    }
+}
+
+/// With the desktop option off the kernel declares the base rows and nothing of the desktop's:
+/// no desktop row is declared or launched and no graphics, display or input authority is
+/// granted.
 pub(crate) fn check_no_desktop_rows(output: &str, launched: &str) -> Result<(), String> {
-    if number(launched, "declared-services")? != 3 {
+    if number(launched, "declared-services")? != BASE_SERVICES {
         return Err(format!("off-mode boot declared desktop rows: {launched:?}"));
     }
     let desktop_line = output.lines().find(|line| {
@@ -663,7 +740,7 @@ fn check_shell(
     ready: &str,
 ) -> Result<(), String> {
     let expected_audit = format!(
-        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
+        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
     );
     if audit != expected_audit {
         return Err(format!("shell authority {audit:?}"));
@@ -690,32 +767,41 @@ mod tests {
             "[SVC ] declared service=20736\n\
              [SVC ] declared service=20992\n\
              [SVC ] declared service=21504\n\
+             [SVC ] declared service=21760\n\
              [KERN] serial console input on vector=49\n\
              [KERN] boot profile=base\n\
-             [KERN] init launched pid=3 slot=0 declared-services=3\n\
-             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1\n\
+             [KERN] init launched pid=3 slot=0 declared-services=4\n\
+             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1\n\
              [IPC ] console pid=3: [INIT] boot profile=base\n\
-             [IPC ] console pid=3: [INIT] started pid=3 services=3\n\
+             [IPC ] console pid=3: [INIT] started pid=3 services=4\n\
              [IPC ] console pid=3: [INIT] SERVICE_READY from init refused: not a service\n\
              [IPC ] console pid=3: [INIT] starting service=20736\n\
-             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
+             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20736 pid=4 gen=1\n\
+             [IPC ] console pid=3: [INIT] starting service=21760\n\
+             {audit_authority}\n\
+             [SVC ] launch service=21760 pid=7 gen=1\n\
+             [IPC ] console pid=7: [ADT ] lost first=1 missing=40\n\
+             [IPC ] console pid=7: [ADT ] drained through=60 records=20 lost=40\n\
+             [SVC ] ready service=21760 pid=7 gen=1 source=live-instance kernel-observed audit-read-through=60 audit-next=61 audit-dropped=40 service-reported first-drain-records=20\n\
+             [IPC ] console pid=3: [INIT] service=21760 ready gen=1\n\
              [SVC ] ready service=20736 pid=4 gen=1 source=live-instance kernel-observed block-write-requests={writes} service-reported formatted={formatted} store-generation=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=20992\n\
-             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
+             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20992 pid=5 gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=21504\n\
              [SVC ] shell process pid=6 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
-             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
+             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
              [SVC ] launch service=21504 pid=6 gen=1\n\
              [SVC ] ready service=20992 pid=5 gen=1 source=live-instance kernel-observed raw-backend=virtio service-reported link-up=1\n\
              [IPC ] console pid=3: [INIT] service=20992 ready gen=1\n\
              \n\n# BusyBox v1.37.0 (2026-09-23 09:18:28 UTC) built-in shell (ash)\n\n\
              [SVC ] ready service=21504 pid=6 gen=1 source=live-instance kernel-observed first-console-input-wait\n\
              [IPC ] console pid=3: [INIT] service=21504 ready gen=1\n\
-             [IPC ] console pid=3: [INIT] boot settled running=3 down=0; waiting, no deadline\n\
-             [KERN] idle thread halted 16 times in a row while init pid=3 waited in LIFECYCLE_WAIT with no deadline\n"
+             [IPC ] console pid=3: [INIT] boot settled running=4 down=0; waiting, no deadline\n\
+             [KERN] idle thread halted 16 times in a row while init pid=3 waited in LIFECYCLE_WAIT with no deadline\n",
+            audit_authority = expected_audit_authority(7),
         )
     }
 
@@ -739,7 +825,7 @@ mod tests {
             "{}",
             tracker.pending_label()
         );
-        let unsettled = transcript(1, 9).replace("running=3 down=0", "running=2 down=1");
+        let unsettled = transcript(1, 9).replace("running=4 down=0", "running=3 down=1");
         let mut tracker = crate::MarkerTracker::from_steps(&MARKERS);
         assert!(!tracker.consume(&unsettled));
     }
@@ -772,6 +858,37 @@ mod tests {
     }
 
     #[test]
+    fn the_audit_service_holds_its_row_and_is_ready_where_the_kernel_says_it_read() {
+        for (from, to) in [
+            ("input=0 audit-read=1", "input=0 audit-read=0"),
+            (
+                "pid=7 lifecycle-control=0 console=1 block-device=0",
+                "pid=7 lifecycle-control=0 console=1 block-device=1",
+            ),
+            ("audit-read-through=60", "audit-read-through=59"),
+            ("audit-read-through=60", "audit-read-through=0"),
+            ("audit-dropped=40", "audit-dropped=39"),
+            ("records=20 lost=40", "records=20 lost=39"),
+            ("first-drain-records=20", "first-drain-records=21"),
+            ("[ADT ] drained", "[ADT ] skimmed"),
+        ] {
+            let text = transcript(1, 9).replace(from, to);
+            assert!(validate_boot(&text, Formatted::Yes).is_err(), "{to}");
+        }
+        let overcounted = transcript(1, 9).replace("audit-dropped=40", "audit-dropped=39");
+        assert!(validate_boot(&overcounted, Formatted::Yes)
+            .unwrap_err()
+            .contains("more sequences lost than the kernel dropped"));
+        let dropped_since = transcript(1, 9).replace("audit-dropped=40", "audit-dropped=41");
+        assert!(validate_boot(&dropped_since, Formatted::Yes).is_ok());
+        let drained = "[IPC ] console pid=7: [ADT ] drained through=60 records=20 lost=40\n";
+        let late = format!("{}{drained}", transcript(1, 9).replace(drained, ""));
+        assert!(validate_boot(&late, Formatted::Yes)
+            .unwrap_err()
+            .contains("before its first drain"));
+    }
+
+    #[test]
     fn each_service_runs_authority_launch_ready_then_init_announces_it() {
         let text = transcript(1, 9).replace(
             "[IPC ] console pid=3: [INIT] service=21504 ready gen=1\n",
@@ -794,7 +911,7 @@ mod tests {
             "[SVC ] declared service=21504\n",
             "[SVC ] declared service=21504\n[SVC ] declared service=21248\n",
         );
-        let counted = transcript(1, 9).replace("declared-services=3", "declared-services=6");
+        let counted = transcript(1, 9).replace("declared-services=4", "declared-services=7");
         let granted = transcript(1, 9).replace(
             "[SVC ] launch service=21504 pid=6 gen=1\n",
             "[SVC ] launch service=21504 pid=6 gen=1\n[SEAT] authority granted pid=7 seat=0 rights=consume,inspect\n",

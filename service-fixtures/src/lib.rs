@@ -5,6 +5,8 @@
 
 #![cfg_attr(not(test), no_std)]
 
+/// #219 stage B audit service bootstrap page.
+pub mod audit_service;
 mod block_transport;
 mod config;
 mod crash_service;
@@ -81,6 +83,7 @@ pub use storage_service::{
 };
 pub use unrelated_workload::{UnrelatedWorkloadFixture, UNRELATED_WORKLOAD_SERVICE_ID};
 
+pub use audit_service::AUDIT_SERVICE_ID;
 pub use clean_slate_service_lifecycle::ServiceId;
 
 /// Stable logical identity for the supervised crash-service fixture.

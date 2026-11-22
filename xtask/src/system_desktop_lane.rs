@@ -3,8 +3,8 @@
 //! `test-m10-desktop` (S6f) runs the same driver on that machine and on the `-vga std`
 //! framebuffer with `q0` ([`run_each`]).
 //!
-//! 1. **Boot**: init's six-row settle line, so only the system image passes, then
-//!    `test-system`'s six-row checks ([`check_baseline_boot`]) at the machine's tier.
+//! 1. **Boot**: init's seven-row settle line, so only the system image passes, then
+//!    `test-system`'s seven-row checks ([`check_baseline_boot`]) at the machine's tier.
 //! 2. **Serial shell**: COM1 still reaches the BusyBox shell with the desktop up.
 //! 3. **The M10 script**, closed loop (#240): every pointer move waits for the compositor's
 //!    `[INPT] pointer settled` at the target, and every button edge for its `[INPT] button` line
@@ -39,8 +39,8 @@ use crate::qmp::{InputAction, MouseButton, QCode};
 use crate::system_boot::{ensure_data_disk, field, number, start_shell_fixture_peer};
 use crate::system_desktop::{
     check_baseline_boot, check_row_gone, report_fault, whole_line, Desktop, DesktopMachine, Gone,
-    DESKTOP_ROWS, GIVE_UP_LINES, NETWORK, ROW_NAMES, SETTLED_DESKTOP, SHELL, SHELL_ANSWER, STORAGE,
-    VIRTIO_GPU_Q1,
+    AUDIT, DESKTOP_ROWS, GIVE_UP_LINES, NETWORK, ROW_NAMES, SETTLED_DESKTOP, SHELL, SHELL_ANSWER,
+    STORAGE, VIRTIO_GPU_Q1,
 };
 use crate::system_desktop_faults::{desktop_config, Session};
 use crate::system_shell::lines;
@@ -81,8 +81,9 @@ const FAULTS: [(&str, &[u8], usize); 3] = [
 /// `[SVC ] launch` lines per row over the run: the base rows once; the compositor again after
 /// its fault; the desktop shell after its fault and the compositor's; the app after the close,
 /// its fault and the compositor's.
-const LAUNCHES: [(u32, usize); 6] = [
+const LAUNCHES: [(u32, usize); 7] = [
     (STORAGE, 1),
+    (AUDIT, 1),
     (NETWORK, 1),
     (SHELL, 1),
     (DESKTOP_ROWS[0], 2),
@@ -575,12 +576,12 @@ fn drive(lane: &mut Lane) -> Result<Vec<Point>, XtaskError> {
     Ok(vec![first, second, third, first])
 }
 
-/// The boot is the system image's: init launched the desktop and settled with its six rows.
+/// The boot is the system image's: init launched the desktop and settled with its seven rows.
 /// Every other kernel (a self-test build, the retired M10 policy) fails here by name.
 fn check_system_image_boot(segment: &str, machine: &DesktopMachine) -> Result<Desktop, String> {
     if !lines(segment).any(|line| line.contains(SETTLED_DESKTOP)) {
         return Err(format!(
-            "not booted as the system image: no init six-row settle line {SETTLED_DESKTOP:?}"
+            "not booted as the system image: no init seven-row settle line {SETTLED_DESKTOP:?}"
         ));
     }
     check_baseline_boot(segment, machine)

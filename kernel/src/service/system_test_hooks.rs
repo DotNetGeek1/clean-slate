@@ -14,6 +14,17 @@
 //! (fault report, teardown, init's restart policy, the clients' `ServerGone`) is the
 //! production path the default image runs.
 //!
+//! **Audit flood.** Ctrl-A (`0x01`) queues one denial and Ctrl-B (`0x02`) commits the queue. In
+//! one interrupt-context call the kernel denies init one audit-log read (the witness), then
+//! denies the shell's holder one read per queued byte, through the production rights check that
+//! records each refusal. Nothing else records in between, so which records survive is decided
+//! by the ring's per-holder budget alone: the witness and the shell's newest
+//! `AUDIT_HOLDER_BUDGET`. The hook logs the sequences it used and how many records the shell's
+//! holder keeps; the audit service must report exactly that, from its own reads. Before the
+//! flood it also logs how many records of the audit service's own reads the log holds, which
+//! polling must neither grow nor lose, and how many records a full log has aged out (the only
+//! way the reader's one record can go).
+//!
 //! **Desktop evidence.** Three checks need a kernel-chosen moment and are lane evidence rather
 //! than system behaviour:
 //! - the desktop resource snapshot, taken at the first quiescence (no runnable thread, no
@@ -26,12 +37,13 @@
 //!   probe record naming the previous compositor generation's port, which must be refused as
 //!   stale by the live port and is then revoked.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use clean_slate_capability::{HolderId, ResourceClass, ResourceRef};
+use clean_slate_capability::{AuditEvent, AuditKind, HolderId, ResourceClass, ResourceRef, Rights};
 use clean_slate_port::PortError;
 use clean_slate_service_fixtures::{
-    COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
+    AUDIT_SERVICE_ID, COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
+    SYSTEM_SHELL_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::ServiceId;
 
@@ -81,29 +93,105 @@ const FAULT_TARGETS: [FaultTarget; 4] = [
 static FAULT_REQUESTED: [AtomicBool; FAULT_TARGETS.len()] =
     [const { AtomicBool::new(false) }; FAULT_TARGETS.len()];
 
+/// Like the fault bytes, ordinary dropped control bytes to the line discipline.
+const AUDIT_FLOOD_QUEUE_BYTE: u8 = 0x01;
+const AUDIT_FLOOD_COMMIT_BYTE: u8 = 0x02;
+
+static AUDIT_FLOOD_QUEUED: AtomicU32 = AtomicU32::new(0);
+static AUDIT_FLOOD_COMMIT: AtomicBool = AtomicBool::new(false);
+
 /// Printed once COM1 receive is on, so every transcript says which build produced it.
 pub(crate) fn announce() {
     kernel_log_fmt(format_args!(
-        "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service, Ctrl-] the compositor, Ctrl-^ the desktop shell, Ctrl-_ the app\n"
+        "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service, Ctrl-] the compositor, Ctrl-^ the desktop shell, Ctrl-_ the app; Ctrl-A queues an audit denial, Ctrl-B commits them\n"
     ));
 }
 
-/// COM1 receive path: records a fault request when `byte` is a fault byte.
+/// COM1 receive path: records a fault request when `byte` is a fault byte, and counts the
+/// audit flood bytes.
 pub(crate) fn observe_received_byte(byte: u8) {
     if let Some(index) = FAULT_TARGETS.iter().position(|target| target.byte == byte) {
         FAULT_REQUESTED[index].store(true, Ordering::Relaxed);
     }
+    match byte {
+        AUDIT_FLOOD_QUEUE_BYTE => {
+            AUDIT_FLOOD_QUEUED.fetch_add(1, Ordering::Relaxed);
+        }
+        AUDIT_FLOOD_COMMIT_BYTE => AUDIT_FLOOD_COMMIT.store(true, Ordering::Relaxed),
+        _ => {}
+    }
 }
 
-/// Arms requested faults. Called after every COM1 receive interrupt and on every timer tick: a
-/// thread can only be redirected while it is parked in a syscall, so a request that arrives
-/// while the target is running waits for the next tick that finds it parked.
+/// Arms requested faults and runs a committed audit flood. Called after every COM1 receive
+/// interrupt and on every timer tick: a thread can only be redirected while it is parked in a
+/// syscall, so a request that arrives while the target is running waits for the next tick that
+/// finds it parked.
 pub(crate) fn run_pending() {
     for (target, requested) in FAULT_TARGETS.iter().zip(&FAULT_REQUESTED) {
         if requested.load(Ordering::Relaxed) {
             arm(target, requested);
         }
     }
+    if AUDIT_FLOOD_COMMIT.swap(false, Ordering::Relaxed) {
+        audit_flood(AUDIT_FLOOD_QUEUED.swap(0, Ordering::Relaxed));
+    }
+}
+
+/// Runs with interrupts masked, so the witness and the denials take contiguous sequences.
+fn audit_flood(denials: u32) {
+    use crate::capability::audit::{with_audit_log, AUDIT_RESOURCE};
+
+    let Some(init) = super::system_init::init_pid() else {
+        kernel_log_fmt(format_args!(
+            "[HOOK] audit flood requested before init launched; ignored\n"
+        ));
+        return;
+    };
+    let Some(shell) =
+        unsafe { service_lifecycle_controller_mut() }.live_pid(SYSTEM_SHELL_SERVICE_ID)
+    else {
+        kernel_log_fmt(format_args!(
+            "[HOOK] audit flood requested but no shell instance is live; ignored\n"
+        ));
+        return;
+    };
+    let read_audit_log = |holder: u64| {
+        u32::from(crate::capability::holder_has_resource_rights(
+            HolderId(holder),
+            AUDIT_RESOURCE,
+            Rights::AUDIT_READ,
+        ))
+    };
+    let reader = unsafe { service_lifecycle_controller_mut() }
+        .live_pid(AUDIT_SERVICE_ID)
+        .unwrap_or(0);
+    let (reader_reads, aged_out) = with_audit_log(|log| {
+        let is_read_by_reader = |event: &AuditEvent| {
+            event.actor == HolderId(reader)
+                && event.kind == AuditKind::Authorize
+                && event.class == ResourceClass::Audit
+                && event.requested == Rights::AUDIT_READ
+                && event.is_allowed()
+        };
+        let reader_reads = log.oldest_sequence().map_or(0, |oldest| {
+            (oldest..log.next_sequence())
+                .filter_map(|sequence| log.get(sequence))
+                .filter(is_read_by_reader)
+                .count()
+        });
+        (reader_reads, log.aged_out())
+    });
+    let witness_seq = with_audit_log(|log| log.next_sequence());
+    let mut allowed = read_audit_log(init);
+    let first_seq = with_audit_log(|log| log.next_sequence());
+    for _ in 0..denials {
+        allowed += read_audit_log(shell);
+    }
+    let (next_seq, held) =
+        with_audit_log(|log| (log.next_sequence(), log.held_by(HolderId(shell))));
+    kernel_log_fmt(format_args!(
+        "[HOOK] audit flood witness-holder={init} witness-seq={witness_seq} holder={shell} denials={denials} first-seq={first_seq} next-seq={next_seq} allowed={allowed} held={held} reader={reader} reader-reads={reader_reads} aged-out={aged_out}\n"
+    ));
 }
 
 fn arm(target: &FaultTarget, requested: &AtomicBool) {
@@ -448,6 +536,12 @@ mod tests {
             .map(|target| target.service.0)
             .collect();
         assert_eq!(services, [0x5200, 0x5300, 0x5301, 0x5302]);
+        for byte in [AUDIT_FLOOD_QUEUE_BYTE, AUDIT_FLOOD_COMMIT_BYTE] {
+            assert!(byte < b' ');
+            assert!(!handled.contains(&byte));
+            assert!(FAULT_TARGETS.iter().all(|target| target.byte != byte));
+        }
+        assert_ne!(AUDIT_FLOOD_QUEUE_BYTE, AUDIT_FLOOD_COMMIT_BYTE);
     }
 
     #[test]

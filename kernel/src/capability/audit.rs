@@ -55,7 +55,7 @@ pub(crate) unsafe fn audit_log_mut() -> &'static mut BoundedAuditLog<AUDIT_RING_
     unsafe { &mut *AUDIT_LOG.get() }
 }
 
-#[cfg_attr(not(feature = "m6-audit-self-test"), allow(dead_code))] // Launch-policy API; exercised by M6 self-tests and the M6.8 integration path.
+#[cfg_attr(not(feature = "m6-audit-self-test"), allow(dead_code))] // The audit service's ready report, the system-test hooks and M6 self-tests; builds without services never call it.
 pub(crate) fn with_audit_log<R>(f: impl FnOnce(&BoundedAuditLog<AUDIT_RING_CAPACITY>) -> R) -> R {
     f(unsafe { &*AUDIT_LOG.get() })
 }
@@ -126,7 +126,10 @@ pub(crate) fn record_kernel_revoke(subject: HolderId, resource: ResourceRef, cou
         .with_count(count),
     );
 }
-#[cfg_attr(not(feature = "m6-audit-self-test"), allow(dead_code))] // Launch-policy API; exercised by M6 self-tests and the M6.8 integration path.
+/// Readers cannot make more readers: the log-read merge rule in `BoundedAuditLog` assumes one.
+const _: () = assert!(!Rights::AUDIT_READ.contains(Rights::DELEGATE));
+
+#[cfg_attr(not(feature = "m6-audit-self-test"), allow(dead_code))] // The audit service row's `AuditReader` grant and M6 self-tests; builds without services never call it.
 pub(crate) fn grant_audit_reader(holder: HolderId) -> Result<CapabilityHandle, CapabilityError> {
     grant_root(holder, AUDIT_RESOURCE, Rights::AUDIT_READ)
 }
@@ -169,7 +172,8 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
             frame.rax = CapabilityError::InvalidHandle.syscall_status();
             return;
         }
-        // Later uses must not change what this reader was given.
+        // Later uses must not change what this reader was given, except that its own repeated
+        // reads keep counting in its read record.
         log.mark_read(next_since - 1);
     }
     frame.rax = count as u64;
@@ -203,6 +207,18 @@ mod tests {
         assert_eq!(event.subject, holder);
         assert_eq!(event.handle, handle.encode());
         assert!(event.is_allowed());
+    }
+
+    /// The log-read merge rule assumes one reader; a delegable grant would let its holder make
+    /// another.
+    #[test]
+    fn the_audit_reader_grant_cannot_be_delegated() {
+        let holder = HolderId(49);
+        let handle = grant_audit_reader(holder).expect("grant");
+        let record =
+            super::super::with_capability_space(|table| table.record(handle)).expect("record");
+        assert_eq!(record.rights, Rights::AUDIT_READ);
+        assert!(!record.rights.contains(Rights::DELEGATE));
     }
 
     #[test]
