@@ -10,6 +10,8 @@ pub const STORAGE_READY_GENERATION_SHIFT: u32 = 8;
 /// Network service, bit 0: the link reported up when the service began serving.
 pub const NETWORK_READY_LINK_UP: u64 = 1 << 0;
 
+// Audit service: the detail word is the number of records its first drain returned.
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StorageReadyDetail {
     pub formatted: bool,

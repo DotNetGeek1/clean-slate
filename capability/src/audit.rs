@@ -30,6 +30,19 @@ pub enum AuditKind {
 }
 
 impl AuditKind {
+    pub fn from_u8(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Authorize),
+            1 => Some(Self::Grant),
+            2 => Some(Self::Delegate),
+            3 => Some(Self::Revoke),
+            4 => Some(Self::Drop),
+            5 => Some(Self::Inherit),
+            6 => Some(Self::Lost),
+            _ => None,
+        }
+    }
+
     pub const fn name(self) -> &'static str {
         match self {
             Self::Authorize => "authorize",
@@ -302,22 +315,6 @@ pub fn authorize_audited(
     result
 }
 
-fn resource_class_name(class: ResourceClass) -> &'static str {
-    match class {
-        ResourceClass::PersistentObject => "persistent-object",
-        ResourceClass::ProcessControl => "process-control",
-        ResourceClass::IpcEndpoint => "ipc-endpoint",
-        ResourceClass::BlockDevice => "block-device",
-        ResourceClass::LifecycleControl => "lifecycle-control",
-        ResourceClass::Audit => "audit",
-        ResourceClass::Network => "network",
-        ResourceClass::SharedBuffer => "shared-buffer",
-        ResourceClass::Graphics => "graphics",
-        ResourceClass::Display => "display",
-        ResourceClass::Input => "input",
-    }
-}
-
 /// Builds an [`AuditKind::Authorize`] event (sequence may be overwritten by the sink).
 pub fn event_for(
     sequence: u64,
@@ -349,7 +346,7 @@ pub fn format_audit_line(event: &AuditEvent, f: &mut impl core::fmt::Write) -> c
     f.write_str(" actor=")?;
     write_u64(event.actor.0, f)?;
     f.write_str(" class=")?;
-    f.write_str(resource_class_name(event.class))?;
+    f.write_str(event.class.name())?;
     f.write_str(" resource=")?;
     write_u64(event.resource_id, f)?;
     f.write_str(" op=")?;

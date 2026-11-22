@@ -634,7 +634,7 @@ const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 16] = [
     "[STOR] malformed media rejected",
     "[M5.7] PASS",
 ];
-const M6_OBJECT_ACCEPTANCE_MARKERS: [&str; 8] = [
+const M6_OBJECT_ACCEPTANCE_MARKERS: [&str; 12] = [
     "[CAP ] object grant holder=",
     "[CAP ] object allowed holder=",
     "[CAP ] object queue reclaimed holder=",
@@ -642,6 +642,10 @@ const M6_OBJECT_ACCEPTANCE_MARKERS: [&str; 8] = [
     "reason=missing-right",
     "[CAP ] deny holder=",
     "reason=no-authority",
+    "[M6.3] object poll returned data before its deadline remaining_ns=",
+    "[M6.3] storage service stopped for the poll deadline check",
+    "[M6.3] object poll with a passed deadline did not block elapsed_ns=",
+    "[M6.3] object poll deadline honored request=",
     "[M6.3] PASS",
 ];
 const M7_NET_SERVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
@@ -3177,6 +3181,7 @@ fn build_network_userspace(release: bool) -> Result<(), XtaskError> {
     Ok(())
 }
 
+/// Init and the audit service: the supervisor-package images only the default image embeds.
 fn build_init_userspace(release: bool) -> Result<(), XtaskError> {
     let mut cmd = Command::new("cargo");
     cmd.arg("build")
@@ -3184,6 +3189,8 @@ fn build_init_userspace(release: bool) -> Result<(), XtaskError> {
         .arg("clean-slate-supervisor")
         .arg("--bin")
         .arg("clean-slate-supervisor-init")
+        .arg("--bin")
+        .arg("clean-slate-audit-userspace")
         .arg("--features")
         .arg("userspace")
         .arg("--target")
@@ -5538,7 +5545,7 @@ fn print_help() {
         "  test-m10-shared-buffer  M10 #195 shared buffers: native-abi/service-fixtures/capability and kernel shared-buffer host tests, then the scripted fixture lane (NX, map/read, deny, stale, exhaustion, reuse, kernel-owned, ro-write, shared-exec, owner exit, reader exit, root revoke, port transfer); prints [M10.shared-buffer] PASS (aliases: m10-shared-buffer)"
     );
     println!("  test-m10-input-smoke M10 #113 i8042 input lane: init, IRQ 1/12 routing, raw queue and syscall 19 from CPL3 (controller stimulus), then BIND_WAKE-woken CPL3 consumer checked against keyboard + pointer events injected over a private QMP socket; prints [M10.input] PASS (aliases: m10-input-smoke)");
-    println!("  test-m10-desktop M10 #118 desktop lane on the system image (#218 S6f): desktop-shell host tests, then the system-test-hooks build with fw_cfg opt/clean-slate/desktop=q1 on VirtIO-GPU and =q0 on the -vga std framebuffer; each boot must reach init's six-row settle line, then test-system-desktop's closed-loop driver runs (click, toggle, background click, key, title-bar drag, close, app, desktop shell and compositor faults) with serial, resource-baseline, quiet-stretch and screendump checks; artifacts under target/xtask-artifacts; prints [M10.9] PASS (aliases: m10-desktop, m10.118)");
+    println!("  test-m10-desktop M10 #118 desktop lane on the system image (#218 S6f): desktop-shell host tests, then the system-test-hooks build with fw_cfg opt/clean-slate/desktop=q1 on VirtIO-GPU and =q0 on the -vga std framebuffer; each boot must reach init's seven-row settle line, then test-system-desktop's closed-loop driver runs (click, toggle, background click, key, title-bar drag, close, app, desktop shell and compositor faults) with serial, resource-baseline, quiet-stretch and screendump checks; artifacts under target/xtask-artifacts; prints [M10.9] PASS (aliases: m10-desktop, m10.118)");
     println!("  test-m10        M10 milestone gate: every test-m10-* constituent, clean-slate-ui host tests and test-qmp-smoke, then test-m10-desktop; prints [M10 ] PASS (aliases: m10, m10.119)");
     println!("  test-serial-input #218 S4 serial receive lane: COM1 on a private loopback socket; the host types a script (plain line, backspace/delete, Ctrl-U, an overlong line, a burst, a full committed buffer, Ctrl-D on a non-empty and an empty line) and checks the echo and every committed read byte for byte; prints [TTY ] PASS (aliases: serial-input)");
     println!("  test-system-boot #218 S3b default image: boots it twice on a fresh lane-owned data disk with the network fixture peer; init starts storage then network, the kernel checks every launched pid holds exactly its manifest grants and reports ready from that pid, boot 1 formats and boot 2 mounts, and the idle thread halts while init waits; prints [SYS ] PASS (aliases: system-boot)");

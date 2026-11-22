@@ -10,15 +10,19 @@ Native mechanism for sleeping and waking scheduler threads. Linux `wait4`, pipes
 
 ## Lost-wake discipline
 
-Wait registration and the “already woken?” check run with interrupts disabled. `wake_one` / `wake_all` record a **pending wake** when no waiter is registered yet; the next `block_current_thread` on that `WaitKey` consumes it and returns `Woken` without sleeping. The pending-wake table has `MAX_WAITERS` entries and silently drops records once full, and `RestartSyscall` / `RetrySyscall` blocks consume and ignore them.
+Wait registration and the “already woken?” check run with interrupts disabled. `wake_one` / `wake_all` record a **pending wake** when no waiter is registered yet; the next `block_current_thread` on that `WaitKey` consumes it and returns `Woken` without sleeping. The pending-wake table has `MAX_WAITERS` entries and drops records once full; each drop logs `[SCHED] pending wake dropped key=…: table full` (the first 8 only). It is not fatal, because a producer whose consumer never blocks leaves stale records behind. `RestartSyscall` / `RetrySyscall` blocks consume and ignore pending wakes.
 
 ### Atomic check-then-block (M10 W1)
 
 `block_current_thread_unless(frame, key, deadline, resume, check)` evaluates the readiness predicate `check` inside the same interrupts-disabled section that registers the waiter. On the single CPU a producer (an IRQ or another thread's syscall) therefore runs either wholly before `check`, which then sees its state change and returns `BlockCheck::Ready(rax)` without registering anything, or wholly after registration, and finds the waiter. An interrupt raised inside `check` is delivered only after the thread is registered. It neither consumes nor records pending wakes.
 
-Producers for such waiters call `wake_all_registered(key)`, which wakes registered waiters and **never records a pending wake**. New code must not call `wake_all` / `wake_one` for these keys: a wake of a key with no waiter would spend a slot of the bounded pending-wake table, and a full table silently drops the network service's `NET_SUBOP_WAIT_WORK` wakes.
+Producers for such waiters call `wake_all_registered(key)`, which wakes registered waiters and **never records a pending wake**. New code must not call `wake_all` / `wake_one` for these keys: a wake of a key with no waiter would spend a slot of the bounded pending-wake table, and a full table drops the network service's `NET_SUBOP_WAIT_WORK` wakes.
 
-The network service still checks readiness in one critical section and blocks in another, relying on the pending-wake table to close the gap. It is unchanged by M10; the service port and work sets (#200) use the atomic form.
+### Check and register in one masked syscall
+
+The object queue (`kernel/src/capability/object.rs`) uses the same rule without `block_current_thread_unless`. Native `OBJECT_SUBOP_POLL`, the storage service's `OBJECT_SUBOP_SERVICE_NEXT` and the Linux `/tmp` read/write check the queue and call `block_current_thread_with_resume` (`RestartSyscall`) within one syscall. Interrupts stay masked from entry to registration, so the check and the registration form one critical section. Their producers (`submit`, `service_complete`, the service-exit requeue) therefore call `wake_all_registered` on the per-request keys (`0x46 << 56 | id`) and the work key (`0x47 << 56`). A pending record there would never be consumed: once the client's next poll finds the request done it does not block, and request ids are never reused, so each completion that lands before the poll would leak a slot.
+
+The network service still checks readiness in one critical section and blocks in another, relying on the pending-wake table to close the gap. It is unchanged by M10; the service port and work sets (#200) use the atomic form. Its per-request keys (`0x54 << 56 | id`) leak pending-wake slots the way the object keys did ([#287](https://github.com/DotNetGeek1/clean-slate/issues/287)).
 
 ## Syscall continuation (design a)
 

@@ -109,6 +109,8 @@ pub(crate) struct HeldAuthority {
     pub(crate) display: usize,
     /// Input-class records.
     pub(crate) input: usize,
+    /// Audit-class records (`AUDIT_READ` on the capability audit log).
+    pub(crate) audit_read: usize,
     /// Capability-space records of any other kind. A console grant also records one IPC
     /// endpoint capability there; those are counted as `console_records`.
     pub(crate) console_records: usize,
@@ -208,6 +210,7 @@ impl HeldAuthority {
         graphics_client: 0,
         display: 0,
         input: 0,
+        audit_read: 0,
         console_records: 1,
         other: 0,
         revoked_records: 0,
@@ -255,6 +258,7 @@ impl HeldAuthority {
             graphics_client: held(Grant::GraphicsAppRole),
             display: held(Grant::DisplayPresenter),
             input: held(Grant::InputSeat),
+            audit_read: held(Grant::AuditReader),
             outside: OutsideCapabilitySpace {
                 ports_served: held(Grant::GraphicsPort),
                 raw_network_link: held(Grant::NetworkService),
@@ -324,6 +328,7 @@ impl HeldAuthority {
                     ResourceClass::Graphics => &mut held.graphics_client,
                     ResourceClass::Display => &mut held.display,
                     ResourceClass::Input => &mut held.input,
+                    ResourceClass::Audit => &mut held.audit_read,
                     _ => &mut held.other,
                 };
                 *count += 1;
@@ -340,7 +345,7 @@ impl fmt::Display for HeldAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "lifecycle-control={} console={} block-device={} object-service={} network={} net-client={} net-client-entitlement={} tmp-objects={} gfx-serve={} gfx-shell={} gfx-client={} display={} input={} other={} revoked={} allowance={} {}",
+            "lifecycle-control={} console={} block-device={} object-service={} network={} net-client={} net-client-entitlement={} tmp-objects={} gfx-serve={} gfx-shell={} gfx-client={} display={} input={} audit-read={} other={} revoked={} allowance={} {}",
             self.lifecycle_control,
             self.console,
             self.block_device,
@@ -354,6 +359,7 @@ impl fmt::Display for HeldAuthority {
             self.graphics_client,
             self.display,
             self.input,
+            self.audit_read,
             self.other + self.console_records.saturating_sub(self.console),
             self.revoked_records,
             self.slot_allowance,
@@ -790,7 +796,23 @@ mod tests {
 
     #[cfg(clean_slate_system_init)]
     fn native_rows_hold_exactly(row: impl Fn(ServiceId) -> HeldAuthority) {
-        use clean_slate_service_fixtures::{NETWORK_SERVICE_ID, STORAGE_SERVICE_ID};
+        use clean_slate_service_fixtures::{
+            AUDIT_SERVICE_ID, NETWORK_SERVICE_ID, STORAGE_SERVICE_ID,
+        };
+        let audit = row(AUDIT_SERVICE_ID);
+        assert_eq!(
+            audit,
+            HeldAuthority {
+                audit_read: 1,
+                console: 1,
+                console_records: 1,
+                ..HeldAuthority::default()
+            }
+        );
+        assert_eq!(
+            std::format!("{audit}"),
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+        );
         assert_eq!(
             row(STORAGE_SERVICE_ID),
             HeldAuthority {
@@ -845,11 +867,11 @@ mod tests {
         );
         assert_eq!(
             std::format!("{shell}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         assert_eq!(
             std::format!("{without_network}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         let without_stdin = HeldAuthority::for_grants(
             ServiceImage::LinuxShell,
@@ -899,7 +921,7 @@ mod tests {
         );
         assert_eq!(
             std::format!("{compositor}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 other=0 revoked=0 allowance=24 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 audit-read=0 other=0 revoked=0 allowance=24 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
         assert_eq!(
             row(DESKTOP_SHELL_SERVICE_ID),
@@ -979,7 +1001,7 @@ mod tests {
     fn init_is_expected_to_hold_lifecycle_control_and_the_console_only() {
         assert_eq!(
             std::format!("{}", HeldAuthority::INIT),
-            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
         for held in [
             HeldAuthority {
@@ -1070,6 +1092,10 @@ mod tests {
             },
             HeldAuthority {
                 input: 1,
+                ..HeldAuthority::INIT
+            },
+            HeldAuthority {
+                audit_read: 1,
                 ..HeldAuthority::INIT
             },
         ] {
@@ -1172,6 +1198,7 @@ mod tests {
             graphics_client,
             display,
             input,
+            audit_read,
             console_records,
             other,
             revoked_records,
@@ -1229,6 +1256,7 @@ mod tests {
             ),
             (display, ReleasedBy::Hook(Hook::RevokeHolderCapabilities)),
             (input, ReleasedBy::Hook(Hook::RevokeHolderCapabilities)),
+            (audit_read, ReleasedBy::Hook(Hook::RevokeHolderCapabilities)),
             (
                 console_records,
                 ReleasedBy::Hook(Hook::RevokeHolderCapabilities),

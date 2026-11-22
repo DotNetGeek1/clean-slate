@@ -5,6 +5,8 @@
 
 #![cfg_attr(not(test), no_std)]
 
+/// #219 stage B audit service bootstrap page.
+pub mod audit_service;
 mod block_transport;
 mod config;
 mod crash_service;
@@ -64,10 +66,11 @@ pub use network_transport::{
 };
 pub use object_capability::{
     ObjectServiceDecodeError, ObjectServiceRequest, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_READ,
-    OBJECT_OP_WRITE, OBJECT_REQUEST_SLOTS, OBJECT_SERVICE_REQUEST_BYTES, OBJECT_SERVICE_ROLE_ID,
-    OBJECT_STATUS_NOT_FOUND, OBJECT_STATUS_OK, OBJECT_STATUS_PENDING, OBJECT_STATUS_STORE_ERROR,
-    OBJECT_STATUS_TOO_LARGE, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, OBJECT_SUBOP_POLL,
-    OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT, OBJECT_SUBOP_SUBMIT,
+    OBJECT_OP_WRITE, OBJECT_POLL_NO_DEADLINE, OBJECT_REQUEST_SLOTS, OBJECT_SERVICE_REQUEST_BYTES,
+    OBJECT_SERVICE_ROLE_ID, OBJECT_STATUS_NOT_FOUND, OBJECT_STATUS_OK, OBJECT_STATUS_PENDING,
+    OBJECT_STATUS_STORE_ERROR, OBJECT_STATUS_TOO_LARGE, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT,
+    OBJECT_SUBOP_POLL, OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT,
+    OBJECT_SUBOP_SUBMIT,
 };
 pub use storage_service::{
     DiskRefusal, StorageServiceBootstrap, STORAGE_SERVICE_BOOTSTRAP_ADDRESS,
@@ -80,6 +83,7 @@ pub use storage_service::{
 };
 pub use unrelated_workload::{UnrelatedWorkloadFixture, UNRELATED_WORKLOAD_SERVICE_ID};
 
+pub use audit_service::AUDIT_SERVICE_ID;
 pub use clean_slate_service_lifecycle::ServiceId;
 
 /// Stable logical identity for the supervised crash-service fixture.

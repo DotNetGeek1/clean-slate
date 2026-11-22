@@ -38,6 +38,22 @@ impl ResourceClass {
             _ => None,
         }
     }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PersistentObject => "persistent-object",
+            Self::ProcessControl => "process-control",
+            Self::IpcEndpoint => "ipc-endpoint",
+            Self::BlockDevice => "block-device",
+            Self::LifecycleControl => "lifecycle-control",
+            Self::Audit => "audit",
+            Self::Network => "network",
+            Self::SharedBuffer => "shared-buffer",
+            Self::Graphics => "graphics",
+            Self::Display => "display",
+            Self::Input => "input",
+        }
+    }
 }
 
 /// Stable resource key bound by a capability (independent of handle slot/generation).

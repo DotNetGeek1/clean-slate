@@ -7,7 +7,7 @@
 
 use crate::init_bootstrap::{DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_VIRTIO_GPU};
 use crate::{
-    COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, NETWORK_SERVICE_ID,
+    AUDIT_SERVICE_ID, COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, NETWORK_SERVICE_ID,
     NETWORK_SERVICE_MODE_ACCEPTANCE, PLAYGROUND_SERVICE_ID, STORAGE_SERVICE_ID,
     STORAGE_SERVICE_MODE_OBJECT_SERVICE, SYSTEM_SHELL_SERVICE_ID,
 };
@@ -43,6 +43,8 @@ pub enum ServiceImage {
     DesktopShell,
     /// `clean-slate-playground-userspace`.
     Playground,
+    /// `clean-slate-audit-userspace`, the capability audit log's reader (#219).
+    Audit,
 }
 
 impl ServiceImage {
@@ -58,7 +60,8 @@ impl ServiceImage {
             | Self::M6Fixture
             | Self::Compositor
             | Self::DesktopShell
-            | Self::Playground => false,
+            | Self::Playground
+            | Self::Audit => false,
         }
     }
 
@@ -75,8 +78,9 @@ impl ServiceImage {
 ///
 /// `ConsoleInput`, `TmpObjects` and `NetworkClient` are Linux-personality grants: the kernel
 /// applies them while it builds the Linux process, so only a [`ServiceImage::LinuxShell`] row
-/// may hold them. `Console` is valid on that row and on the desktop images, whose console
-/// handle is written into their launch page.
+/// may hold them. `Console` is valid on that row, on the desktop images, whose console handle
+/// is written into their launch page, and on the audit image, which reads it from its
+/// bootstrap page.
 ///
 /// The graphics, display and input grants are separate variants (not one variant with a role
 /// field) because rows compare grants by `as u8` in `const` code, and so that the launch audit
@@ -122,6 +126,9 @@ pub enum Grant {
     /// [`Self::GraphicsShellRole`]. Playground rows only, which must depend on the
     /// `GraphicsPort` row.
     GraphicsAppRole,
+    /// Root `AUDIT_READ` on the capability audit log. Its handle is written into the audit
+    /// bootstrap page, so only a [`ServiceImage::Audit`] row may hold it.
+    AuditReader,
 }
 
 /// What init does when a started service exits or faults. Init counts ticks in monotonic
@@ -235,10 +242,24 @@ pub const SYSTEM_SHELL_SPEC: ServiceSpec = ServiceSpec {
     slot_allowance: None,
 };
 
+/// The capability audit log's reader (#219 stage B). It is a holder of its own, apart from the
+/// storage service, so either can be revoked alone. Reading the log needs no other service, so
+/// it depends on nothing and starts at boot. Ready is its first drain.
+pub const AUDIT_SERVICE_SPEC: ServiceSpec = ServiceSpec {
+    id: AUDIT_SERVICE_ID,
+    image: ServiceImage::Audit,
+    mode: 0,
+    grants: &[Grant::AuditReader, Grant::Console],
+    restart: SYSTEM_RESTART,
+    depends_on: &[],
+    slot_allowance: None,
+};
+
 pub const SYSTEM_MANIFEST: &[ServiceSpec] = &[
     STORAGE_SERVICE_SPEC,
     NETWORK_SERVICE_SPEC,
     SYSTEM_SHELL_SPEC,
+    AUDIT_SERVICE_SPEC,
 ];
 
 const _: () = assert!(validate_manifest(SYSTEM_MANIFEST).is_ok());
@@ -302,11 +323,12 @@ pub const PLAYGROUND_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     slot_allowance: None,
 };
 
-/// The desktop profile: the three system rows followed by the three desktop rows.
+/// The desktop profile: the four system rows followed by the three desktop rows.
 pub const SYSTEM_DESKTOP_MANIFEST: &[ServiceSpec] = &[
     STORAGE_SERVICE_SPEC,
     NETWORK_SERVICE_SPEC,
     SYSTEM_SHELL_SPEC,
+    AUDIT_SERVICE_SPEC,
     COMPOSITOR_SERVICE_SPEC,
     DESKTOP_SHELL_SERVICE_SPEC,
     PLAYGROUND_SERVICE_SPEC,
@@ -372,7 +394,7 @@ pub enum ManifestError {
     ConsoleInputWithoutConsole {
         row: usize,
     },
-    /// A second row holds `Grant::GraphicsPort` or `Grant::InputSeat`.
+    /// A second row holds `Grant::GraphicsPort`, `Grant::InputSeat` or `Grant::AuditReader`.
     DuplicateExclusiveGrant {
         row: usize,
     },
@@ -438,8 +460,10 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
             {
                 return Err(ManifestError::ConsoleInputWithoutConsole { row });
             }
-            if matches!(spec.grants[grant], Grant::GraphicsPort | Grant::InputSeat)
-                && earlier_row_grants(manifest, row, spec.grants[grant])
+            if matches!(
+                spec.grants[grant],
+                Grant::GraphicsPort | Grant::InputSeat | Grant::AuditReader
+            ) && earlier_row_grants(manifest, row, spec.grants[grant])
             {
                 return Err(ManifestError::DuplicateExclusiveGrant { row });
             }
@@ -480,14 +504,18 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
 
 /// Linux-personality grants go only to Linux rows, and Linux rows hold nothing else: the native
 /// grants are applied through the native bootstrap page or service registration. `Console` is
-/// shared with the desktop images; each graphics, display and input grant has one image.
+/// shared with the desktop and audit images; each graphics, display, input and audit grant has
+/// one image.
 const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
     match grant {
         Grant::ObjectServiceRole => matches!(image, ServiceImage::Storage),
         Grant::BlockDevice | Grant::NetworkService => {
-            !matches!(image, ServiceImage::LinuxShell) && !image.is_desktop()
+            !matches!(image, ServiceImage::LinuxShell | ServiceImage::Audit) && !image.is_desktop()
         }
-        Grant::Console => matches!(image, ServiceImage::LinuxShell) || image.is_desktop(),
+        Grant::Console => {
+            matches!(image, ServiceImage::LinuxShell | ServiceImage::Audit) || image.is_desktop()
+        }
+        Grant::AuditReader => matches!(image, ServiceImage::Audit),
         Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
             matches!(image, ServiceImage::LinuxShell)
         }
@@ -615,10 +643,72 @@ mod tests {
     }
 
     #[test]
-    fn system_manifest_declares_storage_network_then_shell() {
+    fn system_manifest_declares_storage_network_shell_then_audit() {
         let ids: Vec<u32> = SYSTEM_MANIFEST.iter().map(|spec| spec.id.0).collect();
-        assert_eq!(ids, [0x5100, 0x5200, 0x5400]);
+        assert_eq!(ids, [0x5100, 0x5200, 0x5400, 0x5500]);
         assert_eq!(validate_manifest(SYSTEM_MANIFEST), Ok(()));
+    }
+
+    #[test]
+    fn the_audit_row_reads_the_log_and_prints_and_depends_on_nothing() {
+        let audit = find_service(SYSTEM_MANIFEST, AUDIT_SERVICE_ID).unwrap();
+        assert_eq!(audit.image, ServiceImage::Audit);
+        assert_eq!(audit.grants, [Grant::AuditReader, Grant::Console]);
+        assert!(audit.depends_on.is_empty());
+        assert_eq!(audit.restart, STORAGE_SERVICE_SPEC.restart);
+        assert_eq!(audit.slot_allowance, None);
+        assert!(!ServiceImage::Audit.is_linux());
+        assert!(!ServiceImage::Audit.is_desktop());
+        assert!(SYSTEM_MANIFEST
+            .iter()
+            .filter(|spec| spec.id != AUDIT_SERVICE_ID)
+            .all(|spec| !spec.grants(Grant::AuditReader)));
+    }
+
+    #[test]
+    fn only_the_audit_image_may_read_the_log_and_it_holds_nothing_else_native() {
+        for image in [
+            ServiceImage::Storage,
+            ServiceImage::Network,
+            ServiceImage::LinuxShell,
+            ServiceImage::Compositor,
+            ServiceImage::DesktopShell,
+            ServiceImage::Playground,
+            ServiceImage::M6Fixture,
+        ] {
+            let rows = [row(7, image, &[Grant::AuditReader])];
+            assert_eq!(
+                validate_manifest(&rows),
+                Err(ManifestError::GrantNotSupportedByImage { row: 0 }),
+                "{image:?}"
+            );
+        }
+        for grant in [
+            Grant::BlockDevice,
+            Grant::NetworkService,
+            Grant::ObjectServiceRole,
+            Grant::ConsoleInput,
+            Grant::TmpObjects,
+            Grant::NetworkClient,
+            Grant::GraphicsPort,
+            Grant::DisplayPresenter,
+            Grant::InputSeat,
+            Grant::GraphicsShellRole,
+            Grant::GraphicsAppRole,
+        ] {
+            assert!(
+                !grant_supported_by_image(grant, ServiceImage::Audit),
+                "{grant:?}"
+            );
+        }
+        assert!(grant_supported_by_image(
+            Grant::Console,
+            ServiceImage::Audit
+        ));
+        assert!(grant_supported_by_image(
+            Grant::AuditReader,
+            ServiceImage::Audit
+        ));
     }
 
     #[test]
@@ -857,8 +947,11 @@ mod tests {
             .iter()
             .map(|spec| spec.id.0)
             .collect();
-        assert_eq!(ids, [0x5100, 0x5200, 0x5400, 0x5300, 0x5301, 0x5302]);
-        assert_eq!(SYSTEM_DESKTOP_MANIFEST[..3], *SYSTEM_MANIFEST);
+        assert_eq!(
+            ids,
+            [0x5100, 0x5200, 0x5400, 0x5500, 0x5300, 0x5301, 0x5302]
+        );
+        assert_eq!(SYSTEM_DESKTOP_MANIFEST[..4], *SYSTEM_MANIFEST);
         assert_eq!(validate_manifest(SYSTEM_DESKTOP_MANIFEST), Ok(()));
     }
 
@@ -919,6 +1012,7 @@ mod tests {
             ServiceImage::Compositor,
             ServiceImage::DesktopShell,
             ServiceImage::Playground,
+            ServiceImage::Audit,
         ];
         let owners = [
             (Grant::GraphicsPort, ServiceImage::Compositor),
@@ -926,6 +1020,7 @@ mod tests {
             (Grant::InputSeat, ServiceImage::Compositor),
             (Grant::GraphicsShellRole, ServiceImage::DesktopShell),
             (Grant::GraphicsAppRole, ServiceImage::Playground),
+            (Grant::AuditReader, ServiceImage::Audit),
         ];
         for (grant, owner) in owners {
             for image in images {
@@ -985,6 +1080,18 @@ mod tests {
             validate_manifest(&[COMPOSITOR_SERVICE_SPEC, second]),
             Ok(())
         );
+    }
+
+    #[test]
+    fn validation_allows_one_audit_reader() {
+        let mut second = AUDIT_SERVICE_SPEC;
+        second.id = ServiceId(0x5510);
+        assert_eq!(
+            validate_manifest(&[AUDIT_SERVICE_SPEC, second]),
+            Err(ManifestError::DuplicateExclusiveGrant { row: 1 })
+        );
+        second.grants = &[Grant::Console];
+        assert_eq!(validate_manifest(&[AUDIT_SERVICE_SPEC, second]), Ok(()));
     }
 
     #[test]

@@ -30,7 +30,7 @@ const SYSCALL_NR_IPC_SEND: u64 = 3;
 const IPC_MAX_MESSAGE_BYTES: usize = 64;
 /// Must never appear on serial: the boot lane fails if it does.
 const CONSOLE_PROBE: &[u8] = b"[INIT] console probe on a non-console handle\n";
-/// Supervisor slots; the desktop manifest has six rows, the base one three.
+/// Supervisor slots; the desktop manifest has seven rows, the base one four.
 const SERVICE_SLOTS: usize = 8;
 
 const _: () = assert!(SYSTEM_DESKTOP_MANIFEST.len() <= SERVICE_SLOTS);

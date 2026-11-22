@@ -39,6 +39,9 @@ pub(crate) const MAX_WAITERS: usize = super::TASK_COUNT;
 const STALE_WAKE_LOG_LIMIT: u64 = 8;
 static STALE_WAKE_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 
+const DROPPED_WAKE_LOG_LIMIT: u64 = 8;
+static DROPPED_WAKE_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+
 const WOKEN_MAGIC: u64 = 0x0000_4D39_E145_0001;
 const TIMEOUT_MAGIC: u64 = 0x0000_4D39_E145_0002;
 const CANCEL_MAGIC: u64 = 0x0000_4D39_E145_0003;
@@ -206,12 +209,17 @@ impl WaitTable {
         self.slots.iter().filter(|slot| slot.active).count()
     }
 
-    fn record_pending_wake(&mut self, key: WaitKey) {
+    /// Returns `false` when the table is full and the wake was dropped.
+    fn record_pending_wake(&mut self, key: WaitKey) -> bool {
         if self.pending_wake_keys.contains(&key.0) {
-            return;
+            return true;
         }
-        if let Some(slot) = self.pending_wake_keys.iter_mut().find(|k| **k == 0) {
-            *slot = key.0;
+        match self.pending_wake_keys.iter_mut().find(|k| **k == 0) {
+            Some(slot) => {
+                *slot = key.0;
+                true
+            }
+            None => false,
         }
     }
 
@@ -409,6 +417,8 @@ fn enqueue_current_waiter(waiter: WaiterSlot) -> Result<(), &'static str> {
     unsafe { scheduler_mut() }.threads[waiter.thread_index].state = ThreadState::Blocked;
     #[cfg(feature = "m9-userspace-self-test")]
     crate::selftest::m9_userspace::on_thread_blocked(waiter.thread_index, waiter.pid);
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
+    crate::selftest::m6_object::on_thread_blocked(waiter.pid);
     // A 60 Hz compositor blocks every frame; only the M9 lane needs the per-block line.
     #[cfg(feature = "m9-block-wake-self-test")]
     kernel_log_fmt(format_args!(
@@ -428,7 +438,8 @@ pub(crate) fn wake_all(key: WaitKey) -> usize {
 
 /// Wakes every waiter on `key` and never records a pending wake (M10 W1).
 ///
-/// Consumers of these keys block with [`block_current_thread_unless`], so a wake with no
+/// Consumers of these keys check their condition and register in one interrupts-disabled
+/// section ([`block_current_thread_unless`], or one masked syscall), so a wake with no
 /// waiter has nothing to deliver; recording one would spend a slot of the bounded
 /// pending-wake table that [`wake_all`] users (the net service) depend on.
 pub(crate) fn wake_all_registered(key: WaitKey) -> usize {
@@ -471,10 +482,23 @@ fn wake_matching(key: WaitKey, all: bool, record_pending: bool) -> usize {
             woken += 1;
         },
     );
-    if !found && record_pending {
-        table.record_pending_wake(key);
+    if !found && record_pending && !table.record_pending_wake(key) {
+        log_dropped_wake(key);
     }
     woken
+}
+
+/// A dropped pending wake can strand a `NativeOutcome` waiter that blocks on `key` later.
+/// Stale records from producers whose consumer never blocked can fill the table, so a drop
+/// is reported rather than fatal.
+fn log_dropped_wake(key: WaitKey) {
+    let observed = DROPPED_WAKE_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if observed < DROPPED_WAKE_LOG_LIMIT {
+        kernel_log_fmt(format_args!(
+            "[SCHED] pending wake dropped key={:#x}: table full\n",
+            key.0
+        ));
+    }
 }
 
 pub(crate) fn cancel_waiters_for_process(pid: u64, generation: InstanceGeneration) -> usize {
@@ -703,6 +727,16 @@ pub(crate) fn scheduler_handoff_stack_pointer(next_stack_pointer: u64, thread_in
 
 pub(crate) fn clear_wait_table_for_tests() {
     *wait_table_mut() = WaitTable::new();
+}
+
+#[cfg(test)]
+pub(crate) fn pending_wake_keys_for_tests() -> [u64; MAX_WAITERS] {
+    wait_table_mut().pending_wake_keys
+}
+
+#[cfg(test)]
+pub(crate) fn consume_pending_wake_for_tests(key: WaitKey) -> bool {
+    wait_table_mut().consume_pending_wake(key)
 }
 
 #[cfg(test)]
@@ -1029,10 +1063,11 @@ mod tests {
         // Why port and work-set keys must never use `wake_all` (#200 K1).
         let mut table = WaitTable::new();
         for key in 1..=MAX_WAITERS as u64 {
-            table.record_pending_wake(WaitKey(key));
+            assert!(table.record_pending_wake(WaitKey(key)));
         }
+        assert!(table.record_pending_wake(WaitKey(1)), "already recorded");
         let net_key = WaitKey(0x54 << 56);
-        table.record_pending_wake(net_key);
+        assert!(!table.record_pending_wake(net_key));
         assert!(!table.consume_pending_wake(net_key));
     }
 

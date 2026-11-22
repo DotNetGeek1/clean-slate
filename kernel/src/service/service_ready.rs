@@ -11,7 +11,7 @@
 
 use clean_slate_native_abi::service_ready::ServiceReadyResult;
 use clean_slate_service_fixtures::ready_detail::{NetworkReadyDetail, StorageReadyDetail};
-use clean_slate_service_fixtures::{NETWORK_SERVICE_ID, STORAGE_SERVICE_ID};
+use clean_slate_service_fixtures::{AUDIT_SERVICE_ID, NETWORK_SERVICE_ID, STORAGE_SERVICE_ID};
 use clean_slate_service_lifecycle::ServiceInstanceId;
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
@@ -72,6 +72,15 @@ fn log_ready(instance: ServiceInstanceId, block_write_requests: u64, detail: u64
             "[SVC ] ready service={service} pid={pid} gen={generation} source=live-instance kernel-observed raw-backend={} service-reported link-up={}\n",
             crate::service::net_bridge::net_bridge_mut().raw_backend_name(),
             u8::from(claim.link_up)
+        ));
+    } else if instance.service == AUDIT_SERVICE_ID {
+        // The audit service reports ready after its first drain, so the log must already
+        // show a reader past sequence 0.
+        let (read_through, next, dropped) = crate::capability::audit::with_audit_log(|log| {
+            (log.read_through(), log.next_sequence(), log.dropped())
+        });
+        kernel_log_fmt(format_args!(
+            "[SVC ] ready service={service} pid={pid} gen={generation} source=live-instance kernel-observed audit-read-through={read_through} audit-next={next} audit-dropped={dropped} service-reported first-drain-records={detail}\n"
         ));
     } else {
         #[cfg(clean_slate_system_init)]

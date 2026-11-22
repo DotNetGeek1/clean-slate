@@ -1290,6 +1290,7 @@ const fn rollback_failure_message(grant: Grant) -> &'static str {
         Grant::BlockDevice => "storage service block-capability rollback teardown failed",
         Grant::NetworkService => "network service capability rollback teardown failed",
         Grant::ObjectServiceRole => "object service role rollback teardown failed",
+        Grant::AuditReader => "audit reader rollback teardown failed",
         Grant::Console | Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
             "linux process grant rollback teardown failed"
         }

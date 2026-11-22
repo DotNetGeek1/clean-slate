@@ -6,6 +6,8 @@
 
 #![cfg_attr(not(test), no_std)]
 
+/// #219 stage B audit service drain.
+pub mod audit_reader;
 mod control;
 mod convergence;
 mod diagnostics;
