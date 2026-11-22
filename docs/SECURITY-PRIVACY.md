@@ -10,7 +10,7 @@ The goal is not to pretend compromise can be eliminated. The goal is to make com
 
 ## Default-deny application authority
 
-**Status: partial.** `grant_root` in `kernel/src/capability/mod.rs` installs an explicit capability. `allocate` in `kernel/src/mm/shared_buffer/syscall.rs` creates a shared buffer for the caller with no capability check. There is no launch policy that starts an application with only CPU, memory, and a supervisor IPC endpoint. Camera, microphone, clipboard, location, and process enumeration are not resources in this tree. Gaps: [#218](https://github.com/DotNetGeek1/clean-slate/issues/218), [#220](https://github.com/DotNetGeek1/clean-slate/issues/220).
+**Status: partial.** `grant_root` in `kernel/src/capability/mod.rs` installs an explicit capability. `allocate` in `kernel/src/mm/shared_buffer/syscall.rs` creates a shared buffer for the caller with no capability check, deliberately (see [Ambient creation](#ambient-creation)). There is no launch policy that starts an application with only CPU, memory, and a supervisor IPC endpoint. Camera, microphone, clipboard, location, and process enumeration are not resources in this tree. Gaps: [#218](https://github.com/DotNetGeek1/clean-slate/issues/218), [#220](https://github.com/DotNetGeek1/clean-slate/issues/220).
 
 A newly launched application should begin with almost nothing beyond CPU, memory, and an IPC relationship with its supervisor.
 
@@ -26,6 +26,31 @@ It should not automatically receive:
 - access to unrelated application state.
 
 Resources are granted as capabilities.
+
+## Ambient creation
+
+**Status: implemented.** Recorded for [#220](https://github.com/DotNetGeek1/clean-slate/issues/220). A few operations create a kernel object for the caller without any capability. Each is deliberate: the new object is private to its creator, which reaches it only through the handle or capability the operation returns, and anyone else needs a capability for it. Gating these behind a grant would add one grant per process and no isolation. What stops one process exhausting the table for everyone is a per-creator bound, and release when the creator exits. Every other create path in the tree needs a capability. Every limit below is a compile-time constant.
+
+Native processes (syscalls 16 and 20; a Linux-personality process cannot reach either):
+
+| Operation | Creates | Bound per creator | Bound for the system | Released |
+|---|---|---|---|---|
+| `SHARED_BUFFER_SUBOP_ALLOCATE` (`kernel/src/mm/shared_buffer/syscall.rs`) | a buffer and its owner capability | 8 buffers and 4096 pages (16 MiB); one buffer is at most 8 MiB; the owner capability counts against the holder's capability-slot quota (16 by default) | 32 buffers, 8192 pages (`native-abi/src/shared_buffer.rs`) | owner `RELEASE`, or owner exit, marks it `Dying`; it still counts against both bounds (`check_quota` counts every record that is not `Free`) until its last mapping is detached and its last pin dropped, which frees its frames and record |
+| `WORK_SET_OP_CREATE` (`kernel/src/sched/work_set.rs`) | a work set (32 ready bits) | 1 (`EEXIST`) | 8 (`ENOSPC`) | `DESTROY`, or holder exit |
+
+The system bounds are reached by a few creators together: four owners at their buffer limit fill the buffer table, two at their page limit fill the page pool, and eight processes with one work set each fill the work-set table. That is acceptable while every native process is launched by the kernel from a manifest row or a self-test; a third-party native application would need a smaller share.
+
+Linux-personality processes (the POSIX surface the personality emulates):
+
+| Operation | Bound per creator | Bound for the system | Source |
+|---|---|---|---|
+| `fork` | 12 live children; each child has its own capability-slot quota of 16 and a fork that cannot copy the parent's records fails with `EAGAIN` | 14 Linux processes, 16 processes in all | `kernel/src/process/linux_proc/table.rs`, `kernel/src/limits.rs` |
+| `pipe` | none of its own | 8 pipes of 1024 bytes | `kernel/src/process/linux_proc/pipe.rs` |
+| `open`, `dup`, `pipe` descriptors | 16 descriptors (`EMFILE`) | 48 open descriptions (`ENFILE`) | `kernel/src/process/linux_fd/` |
+| anonymous `mmap` | 16 regions and 512 pages (2 MiB) in all (`ENOMEM`) | 28 MiB: 14 Linux processes at 2 MiB each | `kernel/src/process/linux_mem.rs` (`LINUX_MMAP_MAX_REGIONS`, `LINUX_MMAP_MAX_PAGES`) |
+| `brk` | 4 MiB above the initial break (`ENOMEM`) | 56 MiB: 14 Linux processes at 4 MiB each | `kernel/src/process/linux_mem.rs` (`LINUX_BRK_MAX_BYTES`) |
+
+Not ambient: `socket(2)` needs the network client capability and fails with `EACCES` without it. Files and directories can be created only under `/tmp` (elsewhere `EROFS`), and only by a process holding the `/tmp` object capabilities the kernel grants at launch.
 
 ## User-selected object access
 

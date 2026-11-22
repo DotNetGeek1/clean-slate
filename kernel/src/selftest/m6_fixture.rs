@@ -252,7 +252,10 @@ pub(crate) fn set_report_handler(handler: fn(u64, &M6FixtureBootstrap) -> Fixtur
     }
 }
 
-#[cfg(feature = "m10-shared-buffer-self-test")]
+#[cfg(any(
+    clean_slate_userspace_selftest = "m6-object",
+    feature = "m10-shared-buffer-self-test"
+))]
 pub(crate) fn set_lane_check_handler(handler: FixtureLaneCheckHandler) {
     unsafe {
         *FIXTURE_LANE_CHECK_HANDLER.get() = Some(handler);
@@ -330,13 +333,24 @@ pub(crate) fn park_step() -> M6FixtureStep {
 }
 
 /// Lane-specific kernel assertion invoked from a fixture (`expect_eq(0)`).
-#[cfg(feature = "m10-shared-buffer-self-test")]
+#[cfg(any(
+    clean_slate_userspace_selftest = "m6-object",
+    feature = "m10-shared-buffer-self-test"
+))]
 pub(crate) fn lane_check_step(check: u64, arg: u64) -> M6FixtureStep {
+    lane_query_step(check, arg).expect_eq(0)
+}
+
+/// Lane-specific kernel query whose result a later step reads with `ARG_RESULT_OF`.
+#[cfg(any(
+    clean_slate_userspace_selftest = "m6-object",
+    feature = "m10-shared-buffer-self-test"
+))]
+pub(crate) fn lane_query_step(check: u64, arg: u64) -> M6FixtureStep {
     M6FixtureStep::syscall(
         SYSCALL_NR_CAP_GRANT,
         [FIXTURE_SUBOP_LANE_CHECK, check, arg, 0, 0, 0],
     )
-    .expect_eq(0)
 }
 
 /// Serves the harness sub-operations of `SYSCALL_NR_CAP_GRANT`; returns `false` for
