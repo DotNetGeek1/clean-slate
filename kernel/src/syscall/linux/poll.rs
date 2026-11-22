@@ -12,9 +12,7 @@
 #[cfg(clean_slate_serial_console)]
 use crate::process::linux_fd::open_description::DescriptorKind;
 use crate::process::linux_fd::open_description::OpenDescriptionId;
-#[cfg(clean_slate_system_init)]
-use crate::sched::wait::wake_all_registered;
-use crate::sched::wait::{wake_all, WaitKey};
+use crate::sched::wait::{wake_all_registered, WaitKey};
 use crate::sync::global_cell::GlobalCell;
 
 pub(crate) const LINUX_POLL_MAX_FDS: usize = 8;
@@ -91,7 +89,7 @@ pub(crate) fn clear_poll_interest_for_pid(pid: u64) {
 }
 
 pub(crate) fn wake_poll_waiters_for_pid(pid: u64) -> usize {
-    wake_all(poll_wait_key(pid))
+    wake_all_registered(poll_wait_key(pid))
 }
 
 /// Whether `desc` is a live serial console input description.
@@ -121,7 +119,7 @@ pub(crate) fn notify_readiness_changed(desc: OpenDescriptionId) {
     let table = unsafe { &*INTEREST.get() };
     for entry in table.entries.iter().flatten() {
         if entry.desc == desc {
-            wake_all(poll_wait_key(entry.pid));
+            wake_all_registered(poll_wait_key(entry.pid));
         }
     }
 }

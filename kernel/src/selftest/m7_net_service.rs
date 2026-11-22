@@ -37,9 +37,11 @@ use crate::sched::dispatch::start_current_scheduler_thread;
 #[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
+use crate::sched::wait::pending_wake_count_where;
 #[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::sched::Scheduler;
 use crate::service::control::ServiceLifecycleController;
+use crate::service::net_request_wake::net_bridge_request_wait_key;
 use crate::service::service_lifecycle_controller_mut;
 use crate::service::spawn::launch_network_aux_process;
 use crate::sync::global_cell::GlobalCell;
@@ -539,6 +541,16 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 "[NET ] capacity baseline ok cycles={} max_sessions={MAX_SESSIONS}\n",
                 report.aux_status
             ));
+            let request_family = net_bridge_request_wait_key(0).0;
+            let request_wakes =
+                pending_wake_count_where(|key| key.0 & (0xff << 56) == request_family);
+            if request_wakes == 0 {
+                kernel_log_line("[NET ] capacity loop left no request wakes pending");
+            } else {
+                kernel_log_fmt(format_args!(
+                    "[FAIL] capacity loop left {request_wakes} request wakes pending\n"
+                ));
+            }
             terminate_network_service(controller, allocator, test_state.lifecycle_capability);
             M7Phase::Complete
         }

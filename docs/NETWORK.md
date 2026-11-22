@@ -206,13 +206,14 @@ Ordered QEMU markers for `cargo xtask test-m7-net-service`:
 7. `[NET ] inflight failed count=1` (the fixture parks one UDP receive, proves the service took it with a follow-up round trip, and the kernel checks that exactly that request is in service before terminating)
 8. `[NET ] stale-session denied generation=…`
 9. `[NET ] capacity baseline ok`
-10. `[M7.3] PASS`
+10. `[NET ] capacity loop left no request wakes pending` (the kernel counts pending-wake records for request keys after the capacity loop; any left logs `[FAIL]`)
+11. `[M7.3] PASS`
 
 Run locally: `cargo xtask test-m7-net-service` (aliases `m7-net-service`, `m7.3`) or `./scripts/run-tests.ps1 test-m7-net-service`.
 
 ### Blocking waits and virtio interrupts (#167, #170)
 
-M7 clients block on per-request wait keys (`0x54 << 56 | request_id`) via the #145 substrate; `NET_SUBOP_POLL` retries use `BlockedResume::RestartSyscall`. Request completion always wakes `0x54 | request_id` from the deterministic key (no side table); `shutdown_service` wakes the same key for every slot it fails with `Reset`.
+M7 clients block on per-request wait keys (`0x54 << 56 | request_id`) via the #145 substrate; `NET_SUBOP_POLL` retries use `BlockedResume::RestartSyscall`. Request completion always wakes `0x54 | request_id` from the deterministic key (no side table); `shutdown_service` wakes the same key for every slot it fails with `Reset`. These wakes use `wake_all_registered` and never record a pending wake: request ids are never reused, and both waiters (`NET_SUBOP_POLL` and the Linux socket broker) check the request and register in one masked syscall (#287).
 
 **`NET_SUBOP_WAIT_WORK` (12)** is the net service's only blocking primitive (wait key `0x55 << 56`):
 

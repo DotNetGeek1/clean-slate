@@ -3,7 +3,7 @@
 use crate::process::linux_fd;
 use crate::process::linux_fd::open_description::{PipeEnd, PipeId, PipeRef};
 #[cfg(not(test))]
-use crate::sched::wait::wake_all;
+use crate::sched::wait::wake_all_registered;
 use crate::sched::wait::WaitKey;
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
@@ -221,14 +221,14 @@ pub(crate) fn wait_key_for_parent(pid: u64) -> WaitKey {
 
 fn wake_pipe_readers(handle: PipeHandle) {
     #[cfg(not(test))]
-    wake_all(reader_wait_key(handle));
+    wake_all_registered(reader_wait_key(handle));
     #[cfg(test)]
     let _ = handle;
 }
 
 fn wake_pipe_writers(handle: PipeHandle) {
     #[cfg(not(test))]
-    wake_all(writer_wait_key(handle));
+    wake_all_registered(writer_wait_key(handle));
     #[cfg(test)]
     let _ = handle;
 }

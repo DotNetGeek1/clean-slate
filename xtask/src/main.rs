@@ -648,7 +648,7 @@ const M6_OBJECT_ACCEPTANCE_MARKERS: [&str; 12] = [
     "[M6.3] object poll deadline honored request=",
     "[M6.3] PASS",
 ];
-const M7_NET_SERVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
+const M7_NET_SERVICE_ACCEPTANCE_MARKERS: [&str; 12] = [
     "[NET ] service started pid=",
     "[NET ] session open id=",
     "[NET ] echo ok len=",
@@ -659,9 +659,10 @@ const M7_NET_SERVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[NET ] inflight failed count=1",
     "[NET ] stale-session denied generation=",
     "[NET ] capacity baseline ok",
+    "[NET ] capacity loop left no request wakes pending",
     "[M7.3] PASS",
 ];
-const M7_NETWORK_ACCEPTANCE_MARKERS: [&str; 19] = [
+const M7_NETWORK_ACCEPTANCE_MARKERS: [&str; 20] = [
     "[NET ] raw backend=virtio mac=",
     "[NET ] service started pid=",
     "[AUD ] net op=resolve actor=",
@@ -680,6 +681,7 @@ const M7_NETWORK_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[NET ] inflight failed count=1",
     "[NET ] stale-session denied generation=",
     "[NET ] capacity baseline ok",
+    "[NET ] capacity loop left no request wakes pending",
     "[M7.8] PASS",
 ];
 /// #221: the network service on a vCPU without RDSEED/RDRAND. It exits before it takes the
