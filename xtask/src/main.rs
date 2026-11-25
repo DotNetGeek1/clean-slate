@@ -943,6 +943,22 @@ const M5_PERSISTENCE_WRITE_MARKERS: [&str; 7] = [
     "[STOR] commit generation=1",
     "[TEST] persistence phase=write PASS",
 ];
+/// First object-churn boot (#224 stage F): three commits on a blank disk leave 25 objects.
+/// The kernel prints these only after checking the service's report against the script.
+const M5_OBJECT_CHURN_WRITE_MARKERS: [&str; 4] = [
+    "[BLK ] virtio-block ready blocks=",
+    "[STOR] churn created=20 deleted=10 recreated=5 added=10 generation=3 live=25 limit=",
+    "[STOR] churn absent=5 recreated-epochs=newer",
+    "[TEST] object churn phase=write PASS",
+];
+/// Second object-churn boot: the 25 objects survived the reboot; deleting them all leaves none.
+const M5_OBJECT_CHURN_READ_MARKERS: [&str; 5] = [
+    "[BLK ] virtio-block ready blocks=",
+    "[STOR] churn recovered generation=3 live=25 fingerprint=",
+    "[STOR] churn absent=5 recreated-epochs=newer",
+    "[STOR] churn deleted all generation=4 live=0",
+    "[TEST] object churn phase=read PASS",
+];
 const M5_PERSISTENCE_READ_MARKERS: [&str; 9] = [
     "[BLK ] flush complete",
     "[STOR] recovered generation=1",
@@ -1793,7 +1809,7 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
     let run_result = (|| -> Result<(), XtaskError> {
         prepare_m5_data_disk_image(options.reuse_disk)?;
         let config = m5_storage_vm_config();
-        println!("[M5.P] phase 1/2 boot");
+        println!("[M5.P] phase 1/4 boot");
         run_vm_inner_with_config(
             false,
             false,
@@ -1809,7 +1825,7 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
             reason: error.to_string(),
         })?;
         println!("[TEST] rebooting with persistent disk");
-        println!("[M5.P] phase 2/2 boot");
+        println!("[M5.P] phase 2/4 boot");
         run_vm_inner_with_config(
             false,
             false,
@@ -1818,10 +1834,44 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
                 MarkerSet::Ordered(&M5_PERSISTENCE_READ_MARKERS),
                 M5_PERSISTENCE_BOOT_TIMEOUT,
             )),
-            config,
+            config.clone(),
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
             phase: "persistence boot 2".to_owned(),
+            reason: error.to_string(),
+        })?;
+        // Object churn (#224 stage F) on a blank disk: create, delete and re-create objects
+        // past the old seven-object limit, then reboot and check them.
+        prepare_m5_data_disk_image(false)?;
+        println!("[M5.P] phase 3/4 object churn boot");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m5-object-churn-self-test"],
+            Some((
+                MarkerSet::Ordered(&M5_OBJECT_CHURN_WRITE_MARKERS),
+                M5_PERSISTENCE_BOOT_TIMEOUT,
+            )),
+            config.clone(),
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "object churn boot 1".to_owned(),
+            reason: error.to_string(),
+        })?;
+        println!("[TEST] rebooting with persistent disk");
+        println!("[M5.P] phase 4/4 object churn boot");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m5-object-churn-self-test"],
+            Some((
+                MarkerSet::Ordered(&M5_OBJECT_CHURN_READ_MARKERS),
+                M5_PERSISTENCE_BOOT_TIMEOUT,
+            )),
+            config,
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "object churn boot 2".to_owned(),
             reason: error.to_string(),
         })?;
         println!("[M5.P] PASS");

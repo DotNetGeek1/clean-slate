@@ -11,6 +11,11 @@ use clean_slate_block::{
 };
 use clean_slate_capability::syscall_abi::SYSCALL_EINVAL;
 use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
+use clean_slate_service_fixtures::object_churn::{
+    churn_fold, churn_ids, churn_live_version, churn_name, churn_payload, CHURN_ADDED,
+    CHURN_CREATED, CHURN_DELETED, CHURN_FINGERPRINT_SEED, CHURN_FIRST_ID, CHURN_MAX_PAYLOAD,
+    CHURN_RECREATED,
+};
 use clean_slate_service_fixtures::ready_detail::StorageReadyDetail;
 use clean_slate_service_fixtures::{
     BlockTransportOp, BlockTransportRequest, BlockTransportResponse, BlockTransportStatus,
@@ -23,9 +28,10 @@ use clean_slate_service_fixtures::{
     STORAGE_SERVICE_BOOTSTRAP_ADDRESS as BOOTSTRAP_ADDRESS, STORAGE_SERVICE_MODE_CRASH_ARM_EARLY,
     STORAGE_SERVICE_MODE_CRASH_ARM_LATE, STORAGE_SERVICE_MODE_CRASH_RECOVERY,
     STORAGE_SERVICE_MODE_INTEGRATION_INITIAL, STORAGE_SERVICE_MODE_INTEGRATION_RESTART,
-    STORAGE_SERVICE_MODE_OBJECT_SERVICE, STORAGE_SERVICE_MODE_PERSISTENCE,
-    STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE, STORAGE_SERVICE_RESULT_ERROR,
-    STORAGE_SERVICE_RESULT_OK, STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
+    STORAGE_SERVICE_MODE_OBJECT_CHURN, STORAGE_SERVICE_MODE_OBJECT_SERVICE,
+    STORAGE_SERVICE_MODE_PERSISTENCE, STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE,
+    STORAGE_SERVICE_RESULT_ERROR, STORAGE_SERVICE_RESULT_OK,
+    STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
 };
 use clean_slate_store::heap::FreeListHeap;
 use clean_slate_store::{ObjectStore, OpenError, Opened, StoreError};
@@ -148,6 +154,7 @@ fn run(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> {
         STORAGE_SERVICE_MODE_CRASH_ARM_LATE => run_crash_arm(bootstrap, 3),
         STORAGE_SERVICE_MODE_CRASH_RECOVERY => run_crash_recovery(bootstrap),
         STORAGE_SERVICE_MODE_OBJECT_SERVICE => run_object_service(bootstrap),
+        STORAGE_SERVICE_MODE_OBJECT_CHURN => run_object_churn(bootstrap),
         _ => Err(0),
     }
 }
@@ -481,6 +488,126 @@ fn run_persistence(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> 
             Ok(STORAGE_SERVICE_RESULT_OK)
         }
     }
+}
+
+/// The object-churn script (`clean_slate_service_fixtures::object_churn`, #224 stage F).
+///
+/// On a blank disk: create, delete, re-create and add objects over three commits, then
+/// remount and record what the disk holds. On the second boot: record what the mount holds,
+/// delete everything, commit, remount and record that nothing is left.
+///
+/// Recorded in the bootstrap page: `mounted_alpha_len`/`_checksum` and `alpha_len`/
+/// `_checksum` are the live count and fingerprint at mount and after the last remount,
+/// `beta_len` is how many deleted-only ids are absent and `beta_checksum` 1 when every
+/// re-created object's epoch is above every surviving first-commit object's, both checked
+/// at the second boot's mount or the first boot's remount. `pending_len` is the object limit.
+fn run_object_churn(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> {
+    let (mut store, opened) = open_store(bootstrap)?;
+    bootstrap.mounted_generation = store.committed_generation();
+    bootstrap.pending_len = store.max_objects() as u64;
+    let mut buffer = [0u8; CHURN_MAX_PAYLOAD];
+    match opened {
+        Opened::Formatted => {
+            for id in CHURN_FIRST_ID..CHURN_FIRST_ID + CHURN_CREATED {
+                churn_write(&mut store, id, 1, &mut buffer)?;
+            }
+            store.commit().map_err(store_error_code)?;
+            for id in CHURN_FIRST_ID..CHURN_FIRST_ID + CHURN_DELETED {
+                store.delete_object(id).map_err(store_error_code)?;
+            }
+            store.commit().map_err(store_error_code)?;
+            for id in CHURN_FIRST_ID..CHURN_FIRST_ID + CHURN_RECREATED {
+                churn_write(&mut store, id, 2, &mut buffer)?;
+            }
+            let added = CHURN_FIRST_ID + CHURN_CREATED;
+            for id in added..added + CHURN_ADDED {
+                churn_write(&mut store, id, 1, &mut buffer)?;
+            }
+            store.commit().map_err(store_error_code)?;
+            bootstrap.committed_generation = store.committed_generation();
+            let remounted = ObjectStore::mount(store.into_inner()).map_err(store_error_code)?;
+            bootstrap.remounted_generation = remounted.committed_generation();
+            let (live, fingerprint) = churn_contents(&remounted);
+            bootstrap.alpha_len = live;
+            bootstrap.alpha_checksum = fingerprint;
+            record_churn_checks(&remounted, bootstrap);
+            bootstrap.capability_handle = remounted.into_inner().capability_handle();
+        }
+        Opened::Mounted => {
+            let (live, fingerprint) = churn_contents(&store);
+            bootstrap.mounted_alpha_len = live;
+            bootstrap.mounted_alpha_checksum = fingerprint;
+            record_churn_checks(&store, bootstrap);
+            let ids = store
+                .objects()
+                .iter()
+                .map(|object| object.id())
+                .collect::<alloc::vec::Vec<_>>();
+            for id in ids {
+                store.delete_object(id).map_err(store_error_code)?;
+            }
+            store.commit().map_err(store_error_code)?;
+            bootstrap.committed_generation = store.committed_generation();
+            let remounted = ObjectStore::mount(store.into_inner()).map_err(store_error_code)?;
+            bootstrap.remounted_generation = remounted.committed_generation();
+            let (live, fingerprint) = churn_contents(&remounted);
+            bootstrap.alpha_len = live;
+            bootstrap.alpha_checksum = fingerprint;
+        }
+    }
+    Ok(STORAGE_SERVICE_RESULT_OK)
+}
+
+fn churn_write<D: BlockDevice>(
+    store: &mut ObjectStore<D>,
+    id: u64,
+    version: u8,
+    buffer: &mut [u8; CHURN_MAX_PAYLOAD],
+) -> Result<(), u64> {
+    let len = churn_payload(id, version, buffer);
+    let name = churn_name(id);
+    let name = core::str::from_utf8(&name).map_err(|_| 0u64)?;
+    store
+        .write_object(id, name, &buffer[..len])
+        .map_err(store_error_code)
+}
+
+/// Live object count and fingerprint, folding objects in ascending id order.
+fn churn_contents<D: BlockDevice>(store: &ObjectStore<D>) -> (u64, u64) {
+    let mut ids = store
+        .objects()
+        .iter()
+        .map(|object| object.id())
+        .collect::<alloc::vec::Vec<_>>();
+    ids.sort_unstable();
+    let fingerprint = ids.iter().fold(CHURN_FINGERPRINT_SEED, |fingerprint, &id| {
+        let bytes = store.read_object_by_id(id).unwrap_or_default();
+        churn_fold(fingerprint, id, &bytes)
+    });
+    (ids.len() as u64, fingerprint)
+}
+
+fn record_churn_checks<D: BlockDevice>(
+    store: &ObjectStore<D>,
+    bootstrap: &mut StorageServiceBootstrap,
+) {
+    bootstrap.beta_len = churn_ids()
+        .filter(|&id| churn_live_version(id).is_none() && store.epoch_of(id).is_err())
+        .count() as u64;
+    let epochs = |version: u8, first_commit_only: bool| {
+        churn_ids()
+            .filter(move |&id| {
+                churn_live_version(id) == Some(version)
+                    && (!first_commit_only || id < CHURN_FIRST_ID + CHURN_CREATED)
+            })
+            .filter_map(|id| store.epoch_of(id).ok())
+    };
+    let oldest_recreated = epochs(2, false).min();
+    let newest_original = epochs(1, true).max();
+    bootstrap.beta_checksum = match (oldest_recreated, newest_original) {
+        (Some(recreated), Some(original)) => u64::from(recreated > original),
+        _ => 0,
+    };
 }
 
 /// Opens the data disk's store. A refused disk is left untouched and its reason recorded in

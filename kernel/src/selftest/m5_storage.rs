@@ -40,14 +40,18 @@ use crate::syscall::service_lifecycle_syscall_allocator_mut;
 use clean_slate_service_fixtures::manifest::{
     validate_manifest, Grant, RestartSpec, ServiceImage, ServiceSpec, STORAGE_SERVICE_SPEC,
 };
+use clean_slate_service_fixtures::object_churn::{
+    churn_absent_count, churn_expected_fingerprint, churn_live_count, CHURN_ADDED, CHURN_CREATED,
+    CHURN_DELETED, CHURN_FINGERPRINT_SEED, CHURN_RECREATED,
+};
 use clean_slate_service_fixtures::{
     BlockTransportOp, BlockTransportRequest, StorageServiceBootstrap,
     STORAGE_SERVICE_BOOTSTRAP_ADDRESS, STORAGE_SERVICE_ID, STORAGE_SERVICE_MODE_CRASH_ARM_EARLY,
     STORAGE_SERVICE_MODE_CRASH_ARM_LATE, STORAGE_SERVICE_MODE_CRASH_RECOVERY,
     STORAGE_SERVICE_MODE_INTEGRATION_INITIAL, STORAGE_SERVICE_MODE_INTEGRATION_RESTART,
-    STORAGE_SERVICE_MODE_PERSISTENCE, STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE,
-    STORAGE_SERVICE_RESULT_OK, STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
-    STORAGE_UNAUTHORIZED_SERVICE_ID,
+    STORAGE_SERVICE_MODE_OBJECT_CHURN, STORAGE_SERVICE_MODE_PERSISTENCE,
+    STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE, STORAGE_SERVICE_RESULT_OK,
+    STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED, STORAGE_UNAUTHORIZED_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::{
     ControlRequest, ControlRequestKind, LifecycleMessage, ServiceId,
@@ -83,6 +87,8 @@ pub(crate) const M5_STORAGE_PASS_MARKER: &str = "[M5.7] PASS";
 enum M5StorageSelfTestMode {
     Integration,
     Persistence,
+    /// Two boots of the object-churn script (#224 stage F).
+    ObjectChurn,
     CrashArmEarly,
     CrashArmLate,
     CrashTornSuperblock,
@@ -159,6 +165,8 @@ const M5_UNAUTHORIZED_ROW: ServiceSpec = ServiceSpec {
 };
 
 const M5_PERSISTENCE_SCENARIO: &[ServiceSpec] = &[m5_storage_row(STORAGE_SERVICE_MODE_PERSISTENCE)];
+const M5_OBJECT_CHURN_SCENARIO: &[ServiceSpec] =
+    &[m5_storage_row(STORAGE_SERVICE_MODE_OBJECT_CHURN)];
 const M5_CRASH_ARM_EARLY_SCENARIO: &[ServiceSpec] =
     &[m5_storage_row(STORAGE_SERVICE_MODE_CRASH_ARM_EARLY)];
 const M5_CRASH_ARM_LATE_SCENARIO: &[ServiceSpec] =
@@ -174,6 +182,7 @@ const M5_INTEGRATION_RESTART_SCENARIO: &[ServiceSpec] = &[
     M5_UNAUTHORIZED_ROW,
 ];
 const _: () = assert!(validate_manifest(M5_PERSISTENCE_SCENARIO).is_ok());
+const _: () = assert!(validate_manifest(M5_OBJECT_CHURN_SCENARIO).is_ok());
 const _: () = assert!(validate_manifest(M5_CRASH_ARM_EARLY_SCENARIO).is_ok());
 const _: () = assert!(validate_manifest(M5_CRASH_ARM_LATE_SCENARIO).is_ok());
 const _: () = assert!(validate_manifest(M5_CRASH_RECOVERY_SCENARIO).is_ok());
@@ -190,6 +199,7 @@ fn m5_scenario(state: &M5StorageSelfTestState) -> &'static [ServiceSpec] {
             IntegrationPhase::RestartAuthorized => M5_INTEGRATION_RESTART_SCENARIO,
         },
         M5StorageSelfTestMode::Persistence => M5_PERSISTENCE_SCENARIO,
+        M5StorageSelfTestMode::ObjectChurn => M5_OBJECT_CHURN_SCENARIO,
         M5StorageSelfTestMode::CrashArmEarly => M5_CRASH_ARM_EARLY_SCENARIO,
         M5StorageSelfTestMode::CrashArmLate
         | M5StorageSelfTestMode::CrashTornSuperblock
@@ -262,6 +272,7 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
         ),
         M5StorageSelfTestMode::Integration
         | M5StorageSelfTestMode::Persistence
+        | M5StorageSelfTestMode::ObjectChurn
         | M5StorageSelfTestMode::CrashRecovery => {}
     }
     let allocator = service_lifecycle_syscall_allocator_mut()
@@ -281,6 +292,9 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
 fn active_self_test_mode() -> M5StorageSelfTestMode {
     if cfg!(feature = "m5-storage-self-test") {
         M5StorageSelfTestMode::Integration
+    } else if cfg!(feature = "m5-object-churn-self-test") {
+        // Implies `m5-persistence-self-test`, so it is tested first.
+        M5StorageSelfTestMode::ObjectChurn
     } else if cfg!(feature = "m5-persistence-self-test") {
         M5StorageSelfTestMode::Persistence
     } else if cfg!(feature = "m5-crash-early-self-test") {
@@ -358,6 +372,7 @@ fn current_service(state: &M5StorageSelfTestState) -> ServiceId {
             IntegrationPhase::UnauthorizedProbe => STORAGE_UNAUTHORIZED_SERVICE_ID,
         },
         M5StorageSelfTestMode::Persistence
+        | M5StorageSelfTestMode::ObjectChurn
         | M5StorageSelfTestMode::CrashArmEarly
         | M5StorageSelfTestMode::CrashArmLate
         | M5StorageSelfTestMode::CrashTornSuperblock
@@ -391,6 +406,10 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
         M5StorageSelfTestMode::Integration => handle_integration_phase(state, pid, report),
         M5StorageSelfTestMode::Persistence => {
             validate_persistence(report).unwrap_or_else(|message| fatal_kernel_error(message));
+            None
+        }
+        M5StorageSelfTestMode::ObjectChurn => {
+            validate_object_churn(report).unwrap_or_else(|message| fatal_kernel_error(message));
             None
         }
         M5StorageSelfTestMode::CrashArmEarly
@@ -852,6 +871,76 @@ fn validate_crash_recovery(report: &StorageServiceBootstrap) -> Result<(), &'sta
     kernel_log_fmt(format_args!("[CRSH] recovery outcome={outcome}\n"));
     kernel_log_line("[TEST] crash recovery PASS");
     Ok(())
+}
+
+/// Checks one boot of the object-churn script against `object_churn`'s expected contents.
+fn validate_object_churn(report: &StorageServiceBootstrap) -> Result<(), &'static str> {
+    ensure_result(
+        report,
+        STORAGE_SERVICE_MODE_OBJECT_CHURN,
+        STORAGE_SERVICE_RESULT_OK,
+    )?;
+    let live = churn_live_count();
+    let fingerprint = churn_expected_fingerprint();
+    if report.pending_len < 128 {
+        return Err("object churn: the store's object limit is below 128");
+    }
+    if report.beta_len != churn_absent_count() {
+        return Err("object churn: a deleted object is still present");
+    }
+    if report.beta_checksum != 1 {
+        return Err("object churn: a re-created object did not get a newer epoch");
+    }
+    match (
+        report.formatted,
+        report.mounted_generation,
+        report.committed_generation,
+        report.remounted_generation,
+    ) {
+        (1, 0, 3, 3) => {
+            if (report.alpha_len, report.alpha_checksum) != (live, fingerprint) {
+                return Err("object churn: the remounted objects are not what the script wrote");
+            }
+            kernel_log_fmt(format_args!(
+                "[STOR] churn created={CHURN_CREATED} deleted={CHURN_DELETED} \
+                 recreated={CHURN_RECREATED} added={CHURN_ADDED} generation={} live={} \
+                 limit={} fingerprint={:016x}\n",
+                report.remounted_generation,
+                report.alpha_len,
+                report.pending_len,
+                report.alpha_checksum,
+            ));
+            kernel_log_fmt(format_args!(
+                "[STOR] churn absent={} recreated-epochs=newer\n",
+                report.beta_len
+            ));
+            kernel_log_line("[TEST] object churn phase=write PASS");
+            Ok(())
+        }
+        (0, 3, 4, 4) => {
+            if (report.mounted_alpha_len, report.mounted_alpha_checksum) != (live, fingerprint) {
+                return Err("object churn: the mounted objects are not what the first boot wrote");
+            }
+            if (report.alpha_len, report.alpha_checksum) != (0, CHURN_FINGERPRINT_SEED) {
+                return Err("object churn: objects survived deleting every object");
+            }
+            kernel_log_fmt(format_args!(
+                "[STOR] churn recovered generation={} live={} fingerprint={:016x}\n",
+                report.mounted_generation, report.mounted_alpha_len, report.mounted_alpha_checksum,
+            ));
+            kernel_log_fmt(format_args!(
+                "[STOR] churn absent={} recreated-epochs=newer\n",
+                report.beta_len
+            ));
+            kernel_log_fmt(format_args!(
+                "[STOR] churn deleted all generation={} live={}\n",
+                report.remounted_generation, report.alpha_len
+            ));
+            kernel_log_line("[TEST] object churn phase=read PASS");
+            Ok(())
+        }
+        _ => Err("object churn service reported an unexpected generation sequence"),
+    }
 }
 
 fn ensure_result(

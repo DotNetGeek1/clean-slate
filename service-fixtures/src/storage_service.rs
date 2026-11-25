@@ -8,6 +8,8 @@ pub const STORAGE_SERVICE_MODE_CRASH_ARM_EARLY: u64 = 5;
 pub const STORAGE_SERVICE_MODE_CRASH_ARM_LATE: u64 = 6;
 pub const STORAGE_SERVICE_MODE_CRASH_RECOVERY: u64 = 7;
 pub const STORAGE_SERVICE_MODE_OBJECT_SERVICE: u64 = 8;
+/// The object-churn script of `object_churn` (#224 stage F).
+pub const STORAGE_SERVICE_MODE_OBJECT_CHURN: u64 = 9;
 
 pub const STORAGE_SERVICE_RESULT_PENDING: u64 = 0;
 pub const STORAGE_SERVICE_RESULT_OK: u64 = 1;

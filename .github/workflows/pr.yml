@@ -225,6 +225,7 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-block-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-storage-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-persistence-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-object-churn-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-crash-early-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-crash-late-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-crash-torn-superblock-self-test -- -D warnings
