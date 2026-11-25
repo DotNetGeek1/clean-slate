@@ -93,8 +93,8 @@ use clean_slate_service_fixtures::m6_fixture::{
 };
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 use clean_slate_service_fixtures::{
-    OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_STATUS_NOT_FOUND, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT,
-    OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID,
+    OBJECT_OP_DELETE, OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_STATUS_NOT_FOUND,
+    OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID,
 };
 #[cfg(clean_slate_userspace_selftest = "m6-object")]
 use clean_slate_service_lifecycle::{ControlRequest, ControlRequestKind, LifecycleMessage};
@@ -384,6 +384,83 @@ fn build_owner_program() -> M6FixtureBootstrap {
                 ],
             )
             .expect_eq(ALPHA_V1.len() as u64),
+        )
+        .unwrap();
+    // Delete through the storage service (#224): the object is gone, a second delete finds
+    // nothing, and a write re-creates it with the bytes the later holders read.
+    for expected in [0, OBJECT_STATUS_NOT_FOUND] {
+        let submit_delete = program
+            .push(M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_OBJECT,
+                [
+                    OBJECT_SUBOP_SUBMIT,
+                    handle,
+                    OBJECT_OP_DELETE,
+                    TEST_OBJECT_ID,
+                    0,
+                    0,
+                ],
+            ))
+            .unwrap();
+        program
+            .push(
+                M6FixtureStep::syscall(
+                    SYSCALL_NR_CAP_OBJECT,
+                    [OBJECT_SUBOP_POLL, arg_result(submit_delete), 0, 0, 0, 0],
+                )
+                .expect_eq(expected),
+            )
+            .unwrap();
+    }
+    let submit_deleted_read = program
+        .push(M6FixtureStep::syscall(
+            SYSCALL_NR_CAP_OBJECT,
+            [
+                OBJECT_SUBOP_SUBMIT,
+                handle,
+                OBJECT_OP_READ,
+                TEST_OBJECT_ID,
+                0,
+                0,
+            ],
+        ))
+        .unwrap();
+    program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_OBJECT,
+                [
+                    OBJECT_SUBOP_POLL,
+                    arg_result(submit_deleted_read),
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            )
+            .expect_eq(OBJECT_STATUS_NOT_FOUND),
+        )
+        .unwrap();
+    let submit_rewrite = program
+        .push(M6FixtureStep::syscall(
+            SYSCALL_NR_CAP_OBJECT,
+            [
+                OBJECT_SUBOP_SUBMIT,
+                handle,
+                OBJECT_OP_WRITE,
+                TEST_OBJECT_ID,
+                arg_data(write_data_offset),
+                ALPHA_V1.len() as u64,
+            ],
+        ))
+        .unwrap();
+    program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_OBJECT,
+                [OBJECT_SUBOP_POLL, arg_result(submit_rewrite), 0, 0, 0, 0],
+            )
+            .expect_eq(0),
         )
         .unwrap();
     program.push(M6FixtureStep::report()).unwrap();
