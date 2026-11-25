@@ -1,6 +1,6 @@
 //! Crash matrix for the `clean-slate-store` commit protocol on a faulty device.
 //!
-//! Seeded random workloads (create and update objects, commit) run on a
+//! Seeded random workloads (create, update and delete objects, commit) run on a
 //! [`FaultDevice`]. Each workload is crashed at every operation prefix, the
 //! crash is resolved by fault-mode-specific crash plans, and the durable image
 //! is mounted. Every case must satisfy the store's promise for devices that may
@@ -141,19 +141,27 @@ impl Rng {
 
 type Snapshot = BTreeMap<u64, (String, Vec<u8>)>;
 
-struct Mutation {
-    id: u64,
-    name: String,
-    data: Vec<u8>,
+enum Mutation {
+    Write {
+        id: u64,
+        name: String,
+        data: Vec<u8>,
+    },
+    Delete {
+        id: u64,
+    },
 }
 
-/// Each entry is the writes staged before one commit.
+/// Each entry is the writes and deletes staged before one commit.
 struct Workload {
     commits: Vec<Vec<Mutation>>,
 }
 
+/// Creates, updates and deletes. A create sometimes takes the name of an object deleted
+/// earlier, under a new id, so a commit can drop one object and add another of the same name.
 fn generate_workload(rng: &mut Rng) -> Workload {
-    let mut live = Vec::new();
+    let mut live: Vec<(u64, String)> = Vec::new();
+    let mut freed_names: Vec<String> = Vec::new();
     let mut next_index = 0u64;
     let commit_count = 3 + rng.below(4);
     let commits = (0..commit_count)
@@ -161,17 +169,28 @@ fn generate_workload(rng: &mut Rng) -> Workload {
             let mutation_count = 1 + rng.below(3);
             (0..mutation_count)
                 .map(|_| {
+                    if !live.is_empty() && rng.below(4) == 0 {
+                        let (id, name) = live.swap_remove(rng.below(live.len()));
+                        freed_names.push(name);
+                        return Mutation::Delete { id };
+                    }
                     let create = live.is_empty() || (live.len() < MAX_LIVE_OBJECTS && rng.coin());
-                    let index = if create {
+                    let (id, name) = if create {
                         next_index += 1;
-                        live.push(next_index);
-                        next_index
+                        let id = 0x100 + next_index;
+                        let name = if !freed_names.is_empty() && rng.coin() {
+                            freed_names.swap_remove(rng.below(freed_names.len()))
+                        } else {
+                            format!("obj{next_index}")
+                        };
+                        live.push((id, name.clone()));
+                        (id, name)
                     } else {
-                        live[rng.below(live.len())]
+                        live[rng.below(live.len())].clone()
                     };
-                    Mutation {
-                        id: 0x100 + index,
-                        name: format!("obj{index}"),
+                    Mutation::Write {
+                        id,
+                        name,
                         data: payload(rng),
                     }
                 })
@@ -237,9 +256,14 @@ fn run_workload(workload: &Workload, faults: FaultConfig) -> Run {
     run.last_acked = Some(0);
     for commit in &workload.commits {
         for mutation in commit {
-            store
-                .write_object(mutation.id, &mutation.name, &mutation.data)
-                .expect("workload stays within store limits");
+            match mutation {
+                Mutation::Write { id, name, data } => store
+                    .write_object(*id, name, data)
+                    .expect("workload stays within store limits"),
+                Mutation::Delete { id } => store
+                    .delete_object(*id)
+                    .expect("workload deletes only live objects"),
+            }
         }
         run.snapshots.push(snapshot_of(&store));
         match store.commit() {
@@ -970,13 +994,50 @@ fn generator_is_deterministic_per_seed() {
             .commits
             .iter()
             .flatten()
-            .map(|mutation| (mutation.id, mutation.data.clone()))
+            .map(|mutation| match mutation {
+                Mutation::Write { id, data, .. } => (*id, Some(data.clone())),
+                Mutation::Delete { id } => (*id, None),
+            })
             .collect::<Vec<_>>()
     };
     assert_eq!(shape(&first), shape(&second));
     assert_ne!(
         shape(&first),
         shape(&generate_workload(&mut Rng(FIRST_SEED + 1)))
+    );
+}
+
+/// The crash matrix only covers deletes if the workloads hold them, including a delete and a
+/// create of the same name in one commit.
+#[test]
+fn workloads_delete_and_reuse_names() {
+    let mut deletes = 0;
+    let mut same_commit_name_reuse = 0;
+    for seed in FIRST_SEED..FIRST_SEED + BASE_SEEDS {
+        let workload = generate_workload(&mut Rng(seed));
+        let mut names: BTreeMap<u64, String> = BTreeMap::new();
+        for commit in &workload.commits {
+            let mut deleted_here = Vec::new();
+            for mutation in commit {
+                match mutation {
+                    Mutation::Delete { id } => {
+                        deletes += 1;
+                        deleted_here.push(names[id].clone());
+                    }
+                    Mutation::Write { id, name, .. } => {
+                        if !names.contains_key(id) && deleted_here.contains(name) {
+                            same_commit_name_reuse += 1;
+                        }
+                        names.insert(*id, name.clone());
+                    }
+                }
+            }
+        }
+    }
+    assert!(deletes >= BASE_SEEDS, "only {deletes} deletes");
+    assert!(
+        same_commit_name_reuse > 0,
+        "no commit reuses a deleted name"
     );
 }
 
