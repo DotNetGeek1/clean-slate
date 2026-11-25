@@ -979,8 +979,8 @@ const M5_PRE_CRASH_REPORT: [MarkerStep; 4] = [
         fields: &[("bytes=", "700"), ("checksum=", "00008b74")],
     },
 ];
-/// The generation-3 commit flushes its payload before the superblock write (#224); a
-/// boot stopped at write 3 must have logged that flush after arming.
+/// The generation-3 commit flushes its payload and object table before the superblock
+/// write (#224); a boot stopped at write 4 must have logged that flush after arming.
 const M5_PAYLOAD_FLUSH: MarkerStep = MarkerStep::Ordered("[BLK ] flush complete");
 const M5_CRASH_ARM_EARLY_SPEC: &[MarkerStep] = &[
     MarkerStep::Line {
@@ -996,12 +996,13 @@ const M5_CRASH_ARM_EARLY_SPEC: &[MarkerStep] = &[
         fields: &[("after-write=", "1")],
     },
 ];
-/// Superblock slots are LBA 0 and 1; generation 3 goes to slot 1, so the third write
-/// landing there is what makes `new-commit` the required late recovery outcome.
+/// Superblock slots are LBA 0 and 1; generation 3 goes to slot 1, so the fourth write
+/// (after alpha's payload, beta's payload and the object table) landing there is what
+/// makes `new-commit` the required late recovery outcome.
 const M5_CRASH_ARM_LATE_SPEC: &[MarkerStep] = &[
     MarkerStep::Line {
         prefix: "[CRSH] armed trigger=",
-        fields: &[("after-write=", "3")],
+        fields: &[("after-write=", "4")],
     },
     M5_PAYLOAD_FLUSH,
     M5_PRE_CRASH_REPORT[0],
@@ -1010,7 +1011,7 @@ const M5_CRASH_ARM_LATE_SPEC: &[MarkerStep] = &[
     M5_PRE_CRASH_REPORT[3],
     MarkerStep::Line {
         prefix: "[CRSH] inject after-write=",
-        fields: &[("after-write=", "3"), ("lba=", "1")],
+        fields: &[("after-write=", "4"), ("lba=", "1")],
     },
 ];
 /// The late crash arm with the superblock write torn by the kernel: the device gets the
@@ -1019,7 +1020,7 @@ const M5_CRASH_ARM_LATE_SPEC: &[MarkerStep] = &[
 const M5_CRASH_TORN_SUPERBLOCK_SPEC: &[MarkerStep] = &[
     MarkerStep::Line {
         prefix: "[CRSH] armed trigger=",
-        fields: &[("after-write=", "3"), ("tear=", "superblock-suffix")],
+        fields: &[("after-write=", "4"), ("tear=", "superblock-suffix")],
     },
     M5_PAYLOAD_FLUSH,
     M5_PRE_CRASH_REPORT[0],
@@ -1029,23 +1030,23 @@ const M5_CRASH_TORN_SUPERBLOCK_SPEC: &[MarkerStep] = &[
     MarkerStep::Line {
         prefix: "[CRSH] torn superblock write=",
         fields: &[
-            ("write=", "3"),
+            ("write=", "4"),
             ("lba=", "1"),
-            ("new-bytes=", "112"),
-            ("stale-bytes=", "400"),
+            ("new-bytes=", "56"),
+            ("stale-bytes=", "456"),
         ],
     },
     MarkerStep::Line {
         prefix: "[CRSH] inject after-write=",
-        fields: &[("after-write=", "3"), ("lba=", "1")],
+        fields: &[("after-write=", "4"), ("lba=", "1")],
     },
 ];
 /// The late crash arm with alpha's two-block payload write torn to its first block;
-/// beta's payload and the superblock then complete before the stop.
+/// beta's payload, the object table and the superblock then complete before the stop.
 const M5_CRASH_TORN_PAYLOAD_SPEC: &[MarkerStep] = &[
     MarkerStep::Line {
         prefix: "[CRSH] armed trigger=",
-        fields: &[("after-write=", "3"), ("tear=", "payload-prefix")],
+        fields: &[("after-write=", "4"), ("tear=", "payload-prefix")],
     },
     MarkerStep::Line {
         prefix: "[CRSH] torn payload write=",
@@ -1058,7 +1059,7 @@ const M5_CRASH_TORN_PAYLOAD_SPEC: &[MarkerStep] = &[
     M5_PRE_CRASH_REPORT[3],
     MarkerStep::Line {
         prefix: "[CRSH] inject after-write=",
-        fields: &[("after-write=", "3"), ("lba=", "1")],
+        fields: &[("after-write=", "4"), ("lba=", "1")],
     },
 ];
 /// Read-back evidence for `beta`, which no crash phase rewrites.
@@ -1093,8 +1094,8 @@ const M5_CRASH_RECOVERY_EARLY_SPEC: &[MarkerStep] = &[
     },
     MarkerStep::Ordered("[TEST] crash recovery PASS"),
 ];
-/// The third write of the generation-3 commit is its superblock (alpha data, beta data,
-/// flush, superblock, flush). The device completed it before the crash, so recovery must
+/// The fourth write of the generation-3 commit is its superblock (alpha data, beta data,
+/// object table, flush, superblock, flush). The device completed it before the crash, so recovery must
 /// mount the new commit even though the final flush never ran.
 const M5_CRASH_RECOVERY_LATE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[BLK ] virtio-block ready blocks="),

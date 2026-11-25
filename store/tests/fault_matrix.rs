@@ -51,8 +51,8 @@ use std::time::Instant;
 use clean_slate_block::fake::FakeBlockDevice;
 use clean_slate_block::{BlockDeviceId, BlockGeometry};
 use clean_slate_store::{
-    probe, ObjectStore, OpenError, Opened, Probe, Refusal, StoreError, MAX_OBJECTS, STORE_MAGIC,
-    SUPERBLOCK_SLOTS,
+    probe, ObjectStore, OpenError, Opened, Probe, Refusal, StoreError, MIN_OBJECT_LIMIT,
+    STORE_MAGIC, SUPERBLOCK_SLOTS, TABLE_ENTRY_BYTES,
 };
 use support::fault_device::{CrashStep, FaultConfig, FaultDevice, OpKind, OpOutcome};
 
@@ -69,20 +69,23 @@ const BLOCK_COUNT: u64 = 64;
 const ARENA_BLOCKS: u64 = (BLOCK_COUNT - SUPERBLOCK_SLOTS) / 2;
 const MAX_LIVE_OBJECTS: usize = 5;
 const MAX_OBJECT_BLOCKS: usize = 4;
-const _: () = assert!(MAX_LIVE_OBJECTS <= MAX_OBJECTS);
+const _: () = assert!(MAX_LIVE_OBJECTS <= MIN_OBJECT_LIMIT);
 const _: () = assert!((MAX_LIVE_OBJECTS * MAX_OBJECT_BLOCKS) as u64 <= ARENA_BLOCKS);
 
-/// Superblock layout used by the intactness oracle: the generation, then a
-/// table of 64-byte entries after the 48-byte header, each holding flags,
-/// payload length, start LBA and object id.
+/// Format layout used by the intactness oracle: the superblock's generation,
+/// object count and object-table extent, and in each table entry the object
+/// id, start LBA and payload length.
 const GENERATION_OFFSET: usize = 12;
-const ENTRY_TABLE_OFFSET: usize = 48;
-const ENTRY_BYTES: usize = 64;
-const ENTRY_PRESENT_FLAG: u8 = 0x01;
+const OBJECT_COUNT_OFFSET: usize = 36;
+const TABLE_START_OFFSET: usize = 56;
+const TABLE_BLOCKS_OFFSET: usize = 64;
+const ENTRY_ID_OFFSET: usize = 0;
+const ENTRY_START_OFFSET: usize = 16;
+const ENTRY_LEN_OFFSET: usize = 24;
 
-/// Fixed tear offsets: the checksum, generation, object-count and first and
-/// second table-entry fields of a superblock, and the block boundary of a
-/// two-block payload write.
+/// Fixed tear offsets: the checksum, generation, object-count, next-epoch and
+/// table-extent fields of a superblock, the start, length and second-entry
+/// fields of an object table, and the block boundary of a two-block write.
 const TEAR_OFFSETS: &[usize] = &[
     1,
     4,
@@ -90,18 +93,22 @@ const TEAR_OFFSETS: &[usize] = &[
     12,
     16,
     20,
+    24,
     36,
     48,
-    112,
-    176,
+    56,
+    64,
+    68,
+    72,
+    144,
     BLOCK - 1,
     BLOCK,
     BLOCK + 1,
     BLOCK + 48,
 ];
 const RANDOM_TEAR_OFFSETS: usize = 3;
-/// Fixed bit flips in each superblock slot: the magic, the version field (2
-/// becomes 3, 0 and 258), the checksum and the generation.
+/// Fixed bit flips in each superblock slot: the magic, the version field (3
+/// becomes 2, 1 and 259), the checksum and the generation.
 const FLIP_BITS: &[usize] = &[0, 32, 33, 40, 64, 96];
 /// Pending-write counts up to this enumerate every subset; above it, sample.
 const EXHAUSTIVE_SUBSET_LIMIT: usize = 6;
@@ -287,21 +294,48 @@ struct SuperblockWrite {
     generation: u64,
     lba: u64,
     bytes: Vec<u8>,
+    /// The object table this superblock names, as its commit wrote it: the
+    /// newest write aimed at each of its blocks before the superblock write.
+    table: Vec<u8>,
+}
+
+impl SuperblockWrite {
+    fn table_start(&self) -> u64 {
+        read_u64(&self.bytes, TABLE_START_OFFSET)
+    }
+
+    fn entries(&self) -> impl Iterator<Item = &[u8]> {
+        let count = usize::try_from(read_u32(&self.bytes, OBJECT_COUNT_OFFSET)).unwrap();
+        self.table[..count * TABLE_ENTRY_BYTES].chunks_exact(TABLE_ENTRY_BYTES)
+    }
 }
 
 fn superblock_writes(device: &FaultDevice) -> Vec<SuperblockWrite> {
-    device
-        .log()
-        .into_iter()
-        .filter_map(|op| match op.kind {
-            OpKind::Write { lba, data, .. } if lba < SUPERBLOCK_SLOTS => Some(SuperblockWrite {
+    let mut written = BTreeMap::<u64, Vec<u8>>::new();
+    let mut writes = Vec::new();
+    for op in device.log() {
+        let OpKind::Write { lba, data, .. } = op.kind else {
+            continue;
+        };
+        if lba < SUPERBLOCK_SLOTS {
+            let table_start = read_u64(&data, TABLE_START_OFFSET);
+            let table_blocks = u64::from(read_u32(&data, TABLE_BLOCKS_OFFSET));
+            let table = (table_start..table_start + table_blocks)
+                .flat_map(|block| written[&block].clone())
+                .collect();
+            writes.push(SuperblockWrite {
                 generation: read_u64(&data, GENERATION_OFFSET),
                 lba,
                 bytes: data,
-            }),
-            _ => None,
-        })
-        .collect()
+                table,
+            });
+        } else {
+            for (index, block) in data.chunks_exact(BLOCK).enumerate() {
+                written.insert(lba + u64::try_from(index).unwrap(), block.to_vec());
+            }
+        }
+    }
+    writes
 }
 
 fn stored_block(image: &[u8], lba: u64) -> &[u8] {
@@ -309,16 +343,17 @@ fn stored_block(image: &[u8], lba: u64) -> &[u8] {
     &image[start..start + BLOCK]
 }
 
-/// Every payload byte the superblock references is on disk as its commit wrote it.
+/// The object table and every payload byte the superblock references are on
+/// disk as its commit wrote them.
 fn payload_intact(image: &[u8], superblock: &SuperblockWrite, snapshot: &Snapshot) -> bool {
-    (0..MAX_OBJECTS).all(|index| {
-        let entry = &superblock.bytes[ENTRY_TABLE_OFFSET + index * ENTRY_BYTES..][..ENTRY_BYTES];
-        if entry[0] & ENTRY_PRESENT_FLAG == 0 {
-            return true;
-        }
-        let len = usize::try_from(read_u32(entry, 4)).unwrap();
-        let start = usize::try_from(read_u64(entry, 8)).unwrap() * BLOCK;
-        let (_, data) = &snapshot[&read_u64(entry, 24)];
+    let table_start = usize::try_from(superblock.table_start()).unwrap() * BLOCK;
+    if image[table_start..table_start + superblock.table.len()] != superblock.table[..] {
+        return false;
+    }
+    superblock.entries().all(|entry| {
+        let len = usize::try_from(read_u32(entry, ENTRY_LEN_OFFSET)).unwrap();
+        let start = usize::try_from(read_u64(entry, ENTRY_START_OFFSET)).unwrap() * BLOCK;
+        let (_, data) = &snapshot[&read_u64(entry, ENTRY_ID_OFFSET)];
         image[start..start + len] == data[..]
     })
 }
@@ -975,9 +1010,10 @@ fn bit_flip_at_every_prefix_never_mixes_generations() {
         .contains_key("RefusedBeforeFormatAck(SuperblocksInvalid)"));
 }
 
-/// Holds before checksums bind object id and location (stage E of #224): a
-/// superblock needs a valid CRC-32C and extents inside its own slot's arena,
-/// and each payload must match the CRC-32C in its entry, so a misdirected
+/// A superblock needs a valid CRC-32C and a table inside its own slot's arena,
+/// the table must match the CRC-32C the superblock gives it (bound to the
+/// generation and the table's location), and each payload the CRC-32C in its
+/// entry (bound to the object's id, epoch and location), so a misdirected
 /// write can roll the mount back or fail it, but not mix generations.
 #[test]
 fn misdirected_write_at_every_prefix_never_mixes_generations() {

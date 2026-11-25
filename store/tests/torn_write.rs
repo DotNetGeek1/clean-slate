@@ -20,10 +20,11 @@ const ALPHA_V1: [u8; 1300] = [0x11; 1300];
 const ALPHA_V2: [u8; 900] = [0x22; 900];
 const ALPHA_V3: [u8; 700] = [0x33; 700];
 const BETA_V1: &[u8] = b"beta-stable";
-/// Byte offset of the second object-table entry (`beta`): the 48-byte header
-/// plus one 64-byte entry. A tear here keeps the new header and `alpha` entry
-/// and leaves generation 1's `beta` entry behind.
-const SUPERBLOCK_TEAR_OFFSET: usize = 48 + 64;
+/// Byte offset of the superblock's object-table extent. A tear here keeps
+/// generation 3's header up to its next epoch and leaves generation 1's table
+/// extent and table checksum behind (generation 1's table sits one block
+/// later in the arena, after its larger `alpha`).
+const SUPERBLOCK_TEAR_OFFSET: usize = 56;
 const SECTOR_BYTES: usize = 512;
 
 fn geometry(block_size: u32) -> BlockGeometry {

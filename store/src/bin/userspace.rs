@@ -804,6 +804,7 @@ fn store_error_code(error: StoreError) -> u64 {
         StoreError::GenerationExhausted => 18,
         StoreError::Incompatible(_) => 19,
         StoreError::Corrupt(_) => 20,
+        StoreError::EpochExhausted => 22,
     }
 }
 
