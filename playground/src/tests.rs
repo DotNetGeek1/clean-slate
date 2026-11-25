@@ -637,3 +637,21 @@ fn diagnostics_report_only_observable_state_changes() {
         "truncated to one message"
     );
 }
+
+#[test]
+fn a_compositor_that_ended_mid_send_is_compositor_gone() {
+    use crate::diag::exit_reason;
+    use crate::session::{ExitReason, HostError, Outcome};
+
+    assert_eq!(exit_reason(Outcome::Continue), "compositor-gone");
+    assert_eq!(
+        exit_reason(Outcome::Exit(ExitReason::HostFailed(HostError::Gone))),
+        "compositor-gone"
+    );
+    assert_eq!(exit_reason(Outcome::Exit(ExitReason::Closed)), "closed");
+    assert_eq!(
+        exit_reason(Outcome::Exit(ExitReason::HostFailed(HostError::Failed(1)))),
+        "failed"
+    );
+    assert_eq!(exit_reason(Outcome::Exit(ExitReason::NoPixels)), "failed");
+}

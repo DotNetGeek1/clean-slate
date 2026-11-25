@@ -52,14 +52,9 @@ impl BufferSlot {
     }
 }
 
-/// Host failure for one call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostError {
-    /// The connection is closed or the compositor is gone.
-    Gone,
-    /// Any other failure (status code).
-    Failed(u64),
-}
+/// Host failure for one call: the runtime's error, so a compositor that has ended is
+/// [`HostError::Gone`] wherever the failure was seen.
+pub use clean_slate_runtime::Error as HostError;
 
 /// The kernel side of the shell: a port connection and read-write buffer mappings.
 pub trait Host {

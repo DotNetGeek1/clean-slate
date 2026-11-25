@@ -24,9 +24,11 @@ clean-slate-capability = { path = "../capability" }
 clean-slate-graphics = { path = "../graphics" }
 clean-slate-native-abi = { path = "../native-abi" }
 clean-slate-raster = { path = "../raster" }
+clean-slate-runtime = { path = "../runtime" }
 clean-slate-ui = { path = "../ui" }
 
 [dev-dependencies]
+clean-slate-runtime = { path = "../runtime", features = ["fake"] }
 clean-slate-compositor = { path = "../compositor", features = ["fake"] }
 clean-slate-graphics = { path = "../graphics", features = ["fake"] }
 clean-slate-playground = { path = "../playground" }

@@ -8,12 +8,14 @@
 //! authority, and no redraw that time alone causes.
 //!
 //! - [`session`]: the sans-IO protocol client (setup, rail input, double-buffered rail commits).
+//! - [`host`]: the runtime's compositor client as the session's host.
 //! - [`diag`]: the serial diagnostic lines the CPL3 binary prints through the console.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
 pub mod diag;
+pub mod host;
 pub mod session;
 
 pub use session::{BufferSlot, ExitReason, Host, HostError, Outcome, SessionStats, ShellSession};

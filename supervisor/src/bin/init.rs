@@ -12,9 +12,10 @@
 use clean_slate_native_abi::lifecycle::{
     decode_wait_result, LifecycleWait, LIFECYCLE_WAIT_NO_DEADLINE, SYSCALL_NR_LIFECYCLE_WAIT,
 };
-use clean_slate_native_abi::service_ready::{ServiceReadyResult, SYSCALL_NR_SERVICE_READY};
-use clean_slate_native_abi::status::{is_status, STATUS_EBADF};
-use clean_slate_native_abi::work_set::{SYSCALL_NR_WORK_SET, WORK_SET_OP_NOW};
+use clean_slate_native_abi::service_ready::ServiceReadyResult;
+use clean_slate_native_abi::status::STATUS_EBADF;
+use clean_slate_runtime::console::Console;
+use clean_slate_runtime::{port, process, Error, Kernel, Syscalls};
 use clean_slate_service_fixtures::init_bootstrap::{
     InitBootstrap, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_VIRTIO_GPU,
     INIT_BOOTSTRAP_ADDRESS,
@@ -25,9 +26,6 @@ use clean_slate_supervisor::{
     DiagnosticSink, SupervisorError, SyscallLifecycleControl, SystemInit, INIT_READY_TIMEOUT_NS,
 };
 
-const SYSCALL_NR_IPC_SEND: u64 = 3;
-/// The kernel refuses longer IPC messages.
-const IPC_MAX_MESSAGE_BYTES: usize = 64;
 /// Must never appear on serial: the boot lane fails if it does.
 const CONSOLE_PROBE: &[u8] = b"[INIT] console probe on a non-console handle\n";
 /// Supervisor slots; the desktop manifest has seven rows, the base one four.
@@ -35,17 +33,15 @@ const SERVICE_SLOTS: usize = 8;
 
 const _: () = assert!(SYSTEM_DESKTOP_MANIFEST.len() <= SERVICE_SLOTS);
 
-struct IpcConsoleSink {
-    capability: u64,
+struct ConsoleSink {
+    console: Console,
 }
 
-impl DiagnosticSink for IpcConsoleSink {
+impl DiagnosticSink for ConsoleSink {
     /// Never fails: a lost console line must not make init treat a service operation as
-    /// failed. A line longer than one IPC message is sent in pieces.
+    /// failed. A line longer than one console message is sent in pieces.
     fn emit_line(&mut self, line: &str) -> Result<(), SupervisorError> {
-        for chunk in line.as_bytes().chunks(IPC_MAX_MESSAGE_BYTES) {
-            let _ = ipc_send(self.capability, chunk);
-        }
+        self.console.write_str(&mut Kernel, line);
         Ok(())
     }
 }
@@ -53,14 +49,12 @@ impl DiagnosticSink for IpcConsoleSink {
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     let bootstrap = unsafe { *(INIT_BOOTSTRAP_ADDRESS as *const InitBootstrap) };
-    let console = bootstrap.console_capability;
+    let console = Console::new(bootstrap.console_capability);
     log_boot_profile(console, bootstrap.desktop_mode);
     let Ok(mut init) = SystemInit::<_, _, SERVICE_SLOTS>::new(
         bootstrap.self_pid,
         SyscallLifecycleControl::<16>::new(bootstrap.lifecycle_capability),
-        IpcConsoleSink {
-            capability: console,
-        },
+        ConsoleSink { console },
         manifest_for(bootstrap.desktop_mode),
         INIT_READY_TIMEOUT_NS,
     ) else {
@@ -77,7 +71,7 @@ pub extern "C" fn _start() -> ! {
                 // 0 means "no deadline" to the kernel; a due-at-zero deadline is due now anyway.
                 deadline.max(1)
             });
-        let raw = syscall(
+        let raw = Kernel.syscall(
             SYSCALL_NR_LIFECYCLE_WAIT,
             [bootstrap.lifecycle_capability, deadline, 0, 0, 0, 0],
         );
@@ -92,12 +86,11 @@ pub extern "C" fn _start() -> ! {
 
 /// Init is not a service instance, so the kernel must refuse its ready report. The line is
 /// evidence for the boot lane that the refusal path is live in the default image.
-fn probe_service_ready_refusal(console: u64) {
-    let raw = syscall(SYSCALL_NR_SERVICE_READY, [0; 6]);
-    match ServiceReadyResult::decode(raw) {
+fn probe_service_ready_refusal(console: Console) {
+    match process::report_ready(&mut Kernel, 0) {
         ServiceReadyResult::NotAServiceInstance => {
-            let _ = ipc_send(
-                console,
+            let _ = console.send(
+                &mut Kernel,
                 b"[INIT] SERVICE_READY from init refused: not a service\n",
             );
         }
@@ -108,21 +101,11 @@ fn probe_service_ready_refusal(console: u64) {
 /// Syscall 3 writes only to the console sink, so the kernel must refuse it on init's lifecycle
 /// handle. The boot lane checks the kernel's refusal record, and the kernel records only the
 /// first refusals of a boot, so this must run before any service starts.
-fn probe_console_refusal(console: u64, lifecycle_capability: u64) {
-    let sent = syscall(
-        SYSCALL_NR_IPC_SEND,
-        [
-            lifecycle_capability,
-            CONSOLE_PROBE.as_ptr() as u64,
-            CONSOLE_PROBE.len() as u64,
-            0,
-            0,
-            0,
-        ],
-    );
-    if sent == STATUS_EBADF {
-        let _ = ipc_send(
-            console,
+fn probe_console_refusal(console: Console, lifecycle_capability: u64) {
+    let sent = Console::new(lifecycle_capability).send(&mut Kernel, CONSOLE_PROBE);
+    if sent == Err(Error::Failed(STATUS_EBADF)) {
+        let _ = console.send(
+            &mut Kernel,
             b"[INIT] console write on the lifecycle handle refused: EBADF\n",
         );
     } else {
@@ -135,16 +118,16 @@ fn probe_console_refusal(console: u64, lifecycle_capability: u64) {
 
 /// One line, before any service starts. An unknown word is a boot error and leaves the desktop
 /// off; init still brings up the system manifest.
-fn log_boot_profile(console: u64, mode: u64) {
+fn log_boot_profile(console: Console, mode: u64) {
     match mode {
         DESKTOP_MODE_OFF => {
-            let _ = ipc_send(console, b"[INIT] boot profile=base\n");
+            let _ = console.send(&mut Kernel, b"[INIT] boot profile=base\n");
         }
         DESKTOP_MODE_FRAMEBUFFER => {
-            let _ = ipc_send(console, b"[INIT] boot profile=desktop tier=Q0\n");
+            let _ = console.send(&mut Kernel, b"[INIT] boot profile=desktop tier=Q0\n");
         }
         DESKTOP_MODE_VIRTIO_GPU => {
-            let _ = ipc_send(console, b"[INIT] boot profile=desktop tier=Q1\n");
+            let _ = console.send(&mut Kernel, b"[INIT] boot profile=desktop tier=Q1\n");
         }
         other => {
             let mut buffer = [0u8; 80];
@@ -167,67 +150,21 @@ fn log_boot_profile(console: u64, mode: u64) {
             buffer[prefix.len()..end].copy_from_slice(digits);
             let tail = end + suffix.len();
             buffer[end..tail].copy_from_slice(suffix);
-            let _ = ipc_send(console, &buffer[..tail]);
+            let _ = console.send(&mut Kernel, &buffer[..tail]);
         }
     }
 }
 
-fn now(console: u64) -> u64 {
-    let raw = syscall(SYSCALL_NR_WORK_SET, [WORK_SET_OP_NOW, 0, 0, 0, 0, 0]);
-    if is_status(raw) {
-        fail(console, b"[INIT] WORK_SET NOW failed\n");
-    }
-    raw
+fn now(console: Console) -> u64 {
+    port::now(&mut Kernel).unwrap_or_else(|_| fail(console, b"[INIT] WORK_SET NOW failed\n"))
 }
 
-fn ipc_send(capability: u64, message: &[u8]) -> Result<(), ()> {
-    let sent = syscall(
-        SYSCALL_NR_IPC_SEND,
-        [
-            capability,
-            message.as_ptr() as u64,
-            message.len() as u64,
-            0,
-            0,
-            0,
-        ],
-    );
-    if sent == 0 || sent > message.len() as u64 {
-        return Err(());
-    }
-    Ok(())
-}
-
-fn syscall(number: u64, args: [u64; 6]) -> u64 {
-    let result: u64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") number => result,
-            in("rdi") args[0],
-            in("rsi") args[1],
-            in("rdx") args[2],
-            in("r10") args[3],
-            in("r8") args[4],
-            in("r9") args[5],
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    result
-}
-
-fn fail(console: u64, line: &[u8]) -> ! {
-    let _ = ipc_send(console, line);
-    unsafe {
-        core::arch::asm!("ud2", options(noreturn));
-    }
+fn fail(console: Console, line: &[u8]) -> ! {
+    let _ = console.send(&mut Kernel, line);
+    process::abort();
 }
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe {
-        core::arch::asm!("ud2", options(noreturn));
-    }
+    process::abort();
 }

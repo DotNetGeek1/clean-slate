@@ -9,6 +9,7 @@ use clean_slate_ui::QualityTier;
 
 use crate::app::Playground;
 use crate::layout::PANEL_SIZE;
+use crate::session::{ExitReason, HostError, Outcome};
 
 /// The app state the lane observes: what clicks and keys change.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -95,6 +96,18 @@ pub fn authority_line(display_denied: bool, input_denied: bool) -> ConsoleLine {
 /// `[APP ] exit reason=<reason>`; `closed` after a #115 close.
 pub fn exit_line(reason: &str) -> ConsoleLine {
     ConsoleLine::format(format_args!("[APP ] exit reason={reason}"))
+}
+
+/// The `reason=` word for how the session ended. A compositor that ended, seen on a receive
+/// or on a send, is `compositor-gone`: the desktop lane relaunches on that word.
+pub const fn exit_reason(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Exit(ExitReason::Closed) => "closed",
+        Outcome::Continue | Outcome::Exit(ExitReason::HostFailed(HostError::Gone)) => {
+            "compositor-gone"
+        }
+        Outcome::Exit(_) => "failed",
+    }
 }
 
 /// A line that reports one key, click or focus change. Printed on serial only when the launch

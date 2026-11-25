@@ -118,7 +118,7 @@ impl Host for Link<'_> {
         let transfer = transfer.map(|slot| self.caps[usize::from(slot.0)]);
         self.conn
             .send(self.port, &frame, transfer)
-            .map_err(HostError::Failed)?;
+            .map_err(HostError::from_status)?;
         self.waiter.raise(WAKE_REQUESTS);
         Ok(())
     }
