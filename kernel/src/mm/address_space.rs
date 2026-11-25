@@ -47,10 +47,14 @@ use crate::sync::global_cell::GlobalCell;
 // bounded pool (`UserMappingTableSlot`); the page-table frame list below stays
 // inline, so it must stay small.
 use crate::limits::BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES;
+use crate::limits::LARGE_USER_MAPPING_TABLES;
 pub(crate) use crate::limits::MAX_ADDRESS_SPACE_USER_MAPPINGS;
+pub(crate) use crate::limits::SMALL_ADDRESS_SPACE_USER_MAPPINGS;
 
 pub(crate) const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize =
     BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES + KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES;
+
+const _: () = assert!(SMALL_ADDRESS_SPACE_USER_MAPPINGS <= MAX_ADDRESS_SPACE_USER_MAPPINGS);
 
 static KERNEL_ROOT_FRAME: AtomicU64 = AtomicU64::new(0);
 
@@ -88,7 +92,8 @@ pub(crate) struct AddressSpaceResourceCounts {
     pub(crate) page_table_frames: usize,
 }
 
-type UserMappingTable = [OwnedUserMapping; MAX_ADDRESS_SPACE_USER_MAPPINGS];
+type SmallUserMappingTable = [OwnedUserMapping; SMALL_ADDRESS_SPACE_USER_MAPPINGS];
+type LargeUserMappingTable = [OwnedUserMapping; MAX_ADDRESS_SPACE_USER_MAPPINGS];
 
 /// Address spaces that can own a mapping table at once: every process
 /// registry slot plus spaces in flight (an exec replacement or fork child
@@ -97,22 +102,73 @@ const USER_MAPPING_TABLE_POOL_SIZE: usize = crate::process::PROCESS_REGISTRY_CAP
 
 struct UserMappingTablePool {
     is_claimed: [bool; USER_MAPPING_TABLE_POOL_SIZE],
-    tables: [UserMappingTable; USER_MAPPING_TABLE_POOL_SIZE],
+    tables: [SmallUserMappingTable; USER_MAPPING_TABLE_POOL_SIZE],
 }
 
 static USER_MAPPING_TABLES: GlobalCell<UserMappingTablePool> =
     GlobalCell::new(UserMappingTablePool {
         is_claimed: [false; USER_MAPPING_TABLE_POOL_SIZE],
-        tables: [[OwnedUserMapping::EMPTY; MAX_ADDRESS_SPACE_USER_MAPPINGS];
+        tables: [[OwnedUserMapping::EMPTY; SMALL_ADDRESS_SPACE_USER_MAPPINGS];
             USER_MAPPING_TABLE_POOL_SIZE],
     });
 
-/// Exclusive owner of one pooled mapping table, returned to the pool on drop.
+/// Tables a space moves to when it outgrows its small one (#293).
+struct LargeUserMappingTablePool {
+    is_claimed: [bool; LARGE_USER_MAPPING_TABLES],
+    tables: [LargeUserMappingTable; LARGE_USER_MAPPING_TABLES],
+}
+
+static LARGE_USER_MAPPING_TABLES_POOL: GlobalCell<LargeUserMappingTablePool> =
+    GlobalCell::new(LargeUserMappingTablePool {
+        is_claimed: [false; LARGE_USER_MAPPING_TABLES],
+        tables: [[OwnedUserMapping::EMPTY; MAX_ADDRESS_SPACE_USER_MAPPINGS];
+            LARGE_USER_MAPPING_TABLES],
+    });
+
+/// Self-test switch: while set, no space can move to a large table, so a
+/// lane can fill a small table and prove the refusal path.
+#[cfg(feature = "m9-syscall-fail-closed-self-test")]
+static LARGE_TABLES_WITHHELD: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "m9-syscall-fail-closed-self-test")]
+pub(crate) fn withhold_large_mapping_tables_for_selftest(withheld: bool) {
+    LARGE_TABLES_WITHHELD.store(withheld, Ordering::Relaxed);
+}
+
+fn large_tables_withheld() -> bool {
+    #[cfg(feature = "m9-syscall-fail-closed-self-test")]
+    {
+        LARGE_TABLES_WITHHELD.load(Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "m9-syscall-fail-closed-self-test"))]
+    {
+        false
+    }
+}
+
+/// Large tables not claimed by any address space.
+#[cfg_attr(
+    not(any(test, feature = "m9-syscall-fail-closed-self-test")),
+    allow(dead_code)
+)]
+pub(crate) fn free_large_mapping_tables() -> usize {
+    let pool = unsafe { &*LARGE_USER_MAPPING_TABLES_POOL.get() };
+    pool.is_claimed
+        .iter()
+        .filter(|is_claimed| !**is_claimed)
+        .count()
+}
+
+/// Exclusive owner of one pooled mapping table, returned to its pool on drop.
 /// Keeping the table out of line leaves `ProcessAddressSpace` a few hundred
 /// bytes, so the spawn/exec/fork paths can move it by value without
 /// multi-KiB stack copies.
 #[derive(Debug)]
-struct UserMappingTableSlot(usize);
+enum UserMappingTableSlot {
+    Small(usize),
+    Large(usize),
+}
 
 impl UserMappingTableSlot {
     fn claim() -> Result<Self, &'static str> {
@@ -123,23 +179,59 @@ impl UserMappingTableSlot {
             .position(|is_claimed| !is_claimed)
             .ok_or("process address-space mapping table pool exhausted")?;
         pool.is_claimed[index] = true;
-        pool.tables[index] = [OwnedUserMapping::EMPTY; MAX_ADDRESS_SPACE_USER_MAPPINGS];
-        Ok(Self(index))
+        pool.tables[index].fill(OwnedUserMapping::EMPTY);
+        Ok(Self::Small(index))
     }
 
-    fn table(&self) -> &UserMappingTable {
-        unsafe { &(*USER_MAPPING_TABLES.get()).tables[self.0] }
+    fn claim_large() -> Result<Self, &'static str> {
+        if large_tables_withheld() {
+            return Err("process address-space large mapping table pool exhausted");
+        }
+        let pool = unsafe { &mut *LARGE_USER_MAPPING_TABLES_POOL.get() };
+        let index = pool
+            .is_claimed
+            .iter()
+            .position(|is_claimed| !is_claimed)
+            .ok_or("process address-space large mapping table pool exhausted")?;
+        pool.is_claimed[index] = true;
+        // In place: a temporary 256 KiB array would not fit on a kernel stack.
+        pool.tables[index].fill(OwnedUserMapping::EMPTY);
+        Ok(Self::Large(index))
     }
 
-    fn table_mut(&mut self) -> &mut UserMappingTable {
-        unsafe { &mut (*USER_MAPPING_TABLES.get()).tables[self.0] }
+    fn table(&self) -> &[OwnedUserMapping] {
+        match *self {
+            Self::Small(index) => unsafe { &(*USER_MAPPING_TABLES.get()).tables[index] },
+            Self::Large(index) => unsafe { &(*LARGE_USER_MAPPING_TABLES_POOL.get()).tables[index] },
+        }
+    }
+
+    fn table_mut(&mut self) -> &mut [OwnedUserMapping] {
+        match *self {
+            Self::Small(index) => unsafe { &mut (*USER_MAPPING_TABLES.get()).tables[index] },
+            Self::Large(index) => unsafe {
+                &mut (*LARGE_USER_MAPPING_TABLES_POOL.get()).tables[index]
+            },
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        self.table().len()
     }
 }
 
 impl Drop for UserMappingTableSlot {
     fn drop(&mut self) {
-        let pool = unsafe { &mut *USER_MAPPING_TABLES.get() };
-        pool.is_claimed[self.0] = false;
+        match *self {
+            Self::Small(index) => {
+                let pool = unsafe { &mut *USER_MAPPING_TABLES.get() };
+                pool.is_claimed[index] = false;
+            }
+            Self::Large(index) => {
+                let pool = unsafe { &mut *LARGE_USER_MAPPING_TABLES_POOL.get() };
+                pool.is_claimed[index] = false;
+            }
+        }
     }
 }
 
@@ -184,20 +276,41 @@ impl ProcessAddressSpace {
         Ok(())
     }
 
+    /// Makes room for one more tracked page. A full small table moves to a
+    /// large one; nothing changes when no large table is free.
+    fn ensure_user_mapping_capacity(&mut self) -> Result<(), &'static str> {
+        if self.user_mapping_count < self.user_mappings.capacity() {
+            return Ok(());
+        }
+        if matches!(self.user_mappings, UserMappingTableSlot::Large(_)) {
+            return Err("process address-space mapping tracking capacity exceeded");
+        }
+        let mut large = UserMappingTableSlot::claim_large()
+            .map_err(|_| "process address-space mapping tracking capacity exceeded")?;
+        let count = self.user_mapping_count;
+        large.table_mut()[..count].copy_from_slice(&self.user_mappings.table()[..count]);
+        // Dropping the small slot returns it to its pool.
+        self.user_mappings = large;
+        Ok(())
+    }
+
     fn record_user_mapping(
         &mut self,
         virtual_address: u64,
         frame_address: u64,
     ) -> Result<(), &'static str> {
-        if self.user_mapping_count == MAX_ADDRESS_SPACE_USER_MAPPINGS {
-            return Err("process address-space mapping tracking capacity exceeded");
-        }
+        self.ensure_user_mapping_capacity()?;
         self.user_mappings.table_mut()[self.user_mapping_count] = OwnedUserMapping {
             virtual_address,
             frame_address,
         };
         self.user_mapping_count += 1;
         Ok(())
+    }
+
+    /// Pages the current table can track before it must grow.
+    pub(crate) fn user_mapping_capacity(&self) -> usize {
+        self.user_mappings.capacity()
     }
 
     pub(crate) fn resource_counts(&self) -> AddressSpaceResourceCounts {
@@ -482,9 +595,7 @@ pub(crate) fn map_process_page(
     flags: PageTableFlags,
     allocator: &mut PageAllocator,
 ) -> Result<(), &'static str> {
-    if address_space.user_mapping_count == MAX_ADDRESS_SPACE_USER_MAPPINGS {
-        return Err("process address-space mapping tracking capacity exceeded");
-    }
+    address_space.ensure_user_mapping_capacity()?;
     let page_end = virtual_address
         .checked_add(PAGE_SIZE)
         .ok_or("user mapping virtual address overflow")?;
@@ -519,10 +630,12 @@ pub(crate) fn unmap_process_page_at(
     allocator: &mut PageAllocator,
 ) -> Result<(), &'static str> {
     let aligned = align_down(virtual_address, PAGE_SIZE);
+    // From the end: brk shrink, munmap and teardown free the newest pages
+    // first, so the match is usually the last entry and the shift is short.
     let index = address_space
         .user_mappings()
         .iter()
-        .position(|mapping| mapping.virtual_address == aligned);
+        .rposition(|mapping| mapping.virtual_address == aligned);
     let index = index.ok_or("unmap target was not tracked")?;
     let mapping = address_space.user_mappings()[index];
     let mut mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };
@@ -619,8 +732,12 @@ pub(crate) fn destroy_process_address_space(
 mod tests {
     use super::*;
 
+    /// The pools are process-wide statics; tests that claim from them take turns.
+    static POOL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn mapping_table_pool_is_bounded_released_on_drop_and_reset_on_reuse() {
+        let _pool = POOL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut slots = std::vec::Vec::new();
         for _ in 0..USER_MAPPING_TABLE_POOL_SIZE {
             slots.push(UserMappingTableSlot::claim().expect("pooled table"));
@@ -640,6 +757,91 @@ mod tests {
             .table()
             .iter()
             .all(|mapping| *mapping == OwnedUserMapping::EMPTY));
+    }
+
+    fn record_pages(space: &mut ProcessAddressSpace, pages: usize) -> Result<(), &'static str> {
+        let first = space.user_mapping_count as u64;
+        for page in first..first + pages as u64 {
+            space
+                .record_user_mapping(0x40_0000 + page * PAGE_SIZE, 0x100_0000 + page * PAGE_SIZE)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_full_small_table_moves_to_a_large_one_and_keeps_its_entries() {
+        let _pool = POOL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut space = ProcessAddressSpace::new(0x1000).expect("space");
+        assert_eq!(
+            space.user_mapping_capacity(),
+            SMALL_ADDRESS_SPACE_USER_MAPPINGS
+        );
+        record_pages(&mut space, SMALL_ADDRESS_SPACE_USER_MAPPINGS).expect("small table");
+        let free_before = free_large_mapping_tables();
+
+        record_pages(&mut space, 1).expect("promotion");
+        assert_eq!(
+            space.user_mapping_capacity(),
+            MAX_ADDRESS_SPACE_USER_MAPPINGS
+        );
+        assert_eq!(free_large_mapping_tables(), free_before - 1);
+        assert_eq!(
+            space.user_mapping_count(),
+            SMALL_ADDRESS_SPACE_USER_MAPPINGS + 1
+        );
+        for index in 0..space.user_mapping_count() {
+            let mapping = space.user_mapping_at(index).expect("entry");
+            assert_eq!(
+                mapping.virtual_address,
+                0x40_0000 + index as u64 * PAGE_SIZE
+            );
+            assert_eq!(mapping.frame_address, 0x100_0000 + index as u64 * PAGE_SIZE);
+        }
+
+        let remaining = MAX_ADDRESS_SPACE_USER_MAPPINGS - space.user_mapping_count();
+        record_pages(&mut space, remaining).expect("fill large table");
+        assert_eq!(
+            record_pages(&mut space, 1),
+            Err("process address-space mapping tracking capacity exceeded")
+        );
+        assert_eq!(space.user_mapping_count(), MAX_ADDRESS_SPACE_USER_MAPPINGS);
+
+        drop(space);
+        assert_eq!(
+            free_large_mapping_tables(),
+            free_before,
+            "drop returns the large table"
+        );
+    }
+
+    #[test]
+    fn a_full_small_table_stays_put_when_no_large_table_is_free() {
+        let _pool = POOL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut held = std::vec::Vec::new();
+        while let Ok(slot) = UserMappingTableSlot::claim_large() {
+            held.push(slot);
+        }
+        let mut space = ProcessAddressSpace::new(0x1000).expect("space");
+        record_pages(&mut space, SMALL_ADDRESS_SPACE_USER_MAPPINGS).expect("small table");
+        assert_eq!(
+            record_pages(&mut space, 1),
+            Err("process address-space mapping tracking capacity exceeded")
+        );
+        assert_eq!(
+            space.user_mapping_count(),
+            SMALL_ADDRESS_SPACE_USER_MAPPINGS
+        );
+        assert_eq!(
+            space.user_mapping_capacity(),
+            SMALL_ADDRESS_SPACE_USER_MAPPINGS
+        );
+
+        held.pop();
+        record_pages(&mut space, 1).expect("a released large table is used");
+        assert_eq!(
+            space.user_mapping_capacity(),
+            MAX_ADDRESS_SPACE_USER_MAPPINGS
+        );
     }
 
     #[test]

@@ -18,10 +18,17 @@ use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::diagnostics::serial::serial_write_line;
 use crate::interrupt::timer::initialize_timer;
-use crate::mm::address_space::{translate_address_in_root, MAX_ADDRESS_SPACE_USER_MAPPINGS};
+use crate::mm::address_space::{
+    free_large_mapping_tables, translate_address_in_root,
+    withhold_large_mapping_tables_for_selftest, MAX_ADDRESS_SPACE_USER_MAPPINGS,
+    SMALL_ADDRESS_SPACE_USER_MAPPINGS,
+};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::PAGE_SIZE;
-use crate::process::linux_mem::{set_layout_for_selftest, sys_brk, sys_mmap, sys_munmap};
+use crate::process::linux_mem::{
+    memory_budget, set_layout_for_selftest, set_memory_budget, sys_brk, sys_mmap, sys_munmap,
+    LinuxMemoryBudget,
+};
 use crate::process::live_instance_generation;
 use crate::process::process_registry_mut;
 use crate::process::spoof_registered_address_space_root_for_self_test;
@@ -54,6 +61,20 @@ pub(crate) const M9_NONCANONICAL_LINUX_MARKER: &str =
     "[M9.C] non-canonical syscall rsp terminated linux offender OK";
 pub(crate) const M9_MAP_FAILURE_ROLLBACK_MARKER: &str =
     "[M9.C] failed mmap/brk left free frames and mappings unchanged OK";
+pub(crate) const M9_LARGE_BUDGET_MARKER: &str =
+    "[M9.C] 24 MiB brk and 32 MiB mmap mapped and released OK";
+
+/// #293: brk and mmap far from the probe's 2 MiB span, in the same PML4 slot.
+const LARGE_BRK_BASE: u64 = USER_TEST_CODE_ADDRESS + 0x4000_0000;
+const LARGE_MMAP_WINDOW: Range<u64> =
+    USER_TEST_CODE_ADDRESS + 0x8000_0000..USER_TEST_CODE_ADDRESS + 0xC000_0000;
+const LARGE_BRK_BYTES: u64 = 24 * 1024 * 1024;
+const LARGE_MMAP_BYTES: u64 = 32 * 1024 * 1024;
+const LARGE_MMAP_HEADROOM_PAGES: u64 = 16;
+const _: () = assert!(
+    (LARGE_BRK_BYTES + LARGE_MMAP_BYTES) / PAGE_SIZE
+        < (MAX_ADDRESS_SPACE_USER_MAPPINGS - SMALL_ADDRESS_SPACE_USER_MAPPINGS) as u64
+);
 
 /// Repetitions of each failing call; one leaked frame per call would show as
 /// thousands of missing frames.
@@ -231,7 +252,11 @@ pub(crate) fn start_m9_syscall_fail_closed_self_test(allocator: PageAllocator) -
     if let Err(message) = install_payload(allocator) {
         fatal_kernel_error(message);
     }
+    // The #216 probe fills the small mapping table, so it must not move to a large one.
+    withhold_large_mapping_tables_for_selftest(true);
     prove_failed_maps_release_their_frames(M9_LINUX_HOSTILE_PID.load(Ordering::Relaxed));
+    withhold_large_mapping_tables_for_selftest(false);
+    prove_large_budget_maps_and_releases(M9_LINUX_HOSTILE_PID.load(Ordering::Relaxed));
 
     let kernel_stack_top = unsafe {
         let stacks = &*task_stacks_mut();
@@ -296,7 +321,7 @@ fn prove_failed_maps_release_their_frames(pid: u64) {
         .unwrap_or_else(|_| fatal_kernel_error("m9 map probe: first mmap failed"));
     let (_, mappings_at_fill) = user_space(pid);
     let frames_at_fill = free_frames();
-    let fill_target = MAX_ADDRESS_SPACE_USER_MAPPINGS - MAPPING_TABLE_HEADROOM;
+    let fill_target = SMALL_ADDRESS_SPACE_USER_MAPPINGS - MAPPING_TABLE_HEADROOM;
     if mappings_at_fill > fill_target {
         fatal_kernel_error("m9 map probe filler started past the mapping headroom");
     }
@@ -355,7 +380,7 @@ fn prove_failed_maps_release_their_frames(pid: u64) {
         Err(_) => check(false, "PROT_NONE mmap failed"),
     }
 
-    let pages_past_capacity = (MAX_ADDRESS_SPACE_USER_MAPPINGS - mappings_before) as u64 + 1;
+    let pages_past_capacity = (SMALL_ADDRESS_SPACE_USER_MAPPINGS - mappings_before) as u64 + 1;
     let brk_target = PROBE_BRK_BASE + pages_past_capacity * PAGE_SIZE;
     if brk_target > PROBE_MMAP_WINDOW.start {
         fatal_kernel_error("m9 map probe brk target would reach the mmap window");
@@ -405,6 +430,115 @@ fn prove_failed_maps_release_their_frames(pid: u64) {
     if frames_released != frames_at_fill {
         fatal_kernel_error("m9 map probe filler unmap did not restore the free-frame count");
     }
+}
+
+/// Page-table frames and mapping-table capacity of `pid`'s address space.
+fn user_space_tables(pid: u64) -> (usize, usize) {
+    let space = unsafe { process_registry_mut() }
+        .get_mut(pid)
+        .and_then(|process| process.resource_domain.address_space_mut())
+        .unwrap_or_else(|| fatal_kernel_error("m9 budget probe process has no address space"));
+    (
+        space.resource_counts().page_table_frames,
+        space.user_mapping_capacity(),
+    )
+}
+
+/// #293: a budget set for the process is the limit, and tens of MiB fit in
+/// it. Grows brk by 24 MiB and maps 32 MiB through the real handlers, checks
+/// every page is present, that one page past the brk budget is refused, then
+/// releases both and checks every user frame came back. Page-table frames
+/// stay until the address space is destroyed, so they are counted apart.
+fn prove_large_budget_maps_and_releases(pid: u64) {
+    let generation = live_instance_generation(pid)
+        .unwrap_or_else(|| fatal_kernel_error("m9 budget probe process had no generation"));
+    if set_layout_for_selftest(pid, generation, LARGE_BRK_BASE, LARGE_MMAP_WINDOW).is_err() {
+        fatal_kernel_error("m9 budget probe could not set the linux memory layout");
+    }
+    let budget = LinuxMemoryBudget {
+        brk_bytes: LARGE_BRK_BYTES,
+        // Room for the page the #216 probe left mapped.
+        mmap_pages: LARGE_MMAP_BYTES / PAGE_SIZE + LARGE_MMAP_HEADROOM_PAGES,
+        ..memory_budget(pid, generation)
+    };
+    if set_memory_budget(pid, generation, budget).is_err() {
+        fatal_kernel_error("m9 budget probe could not set the memory budget");
+    }
+    let large_tables_before = free_large_mapping_tables();
+    let (root, mappings_before) = user_space(pid);
+    let (tables_before, _) = user_space_tables(pid);
+    let frames_before = free_frames();
+
+    let brk_end = LARGE_BRK_BASE + LARGE_BRK_BYTES;
+    if sys_brk(brk_end, pid, generation) != Ok(brk_end) {
+        fatal_kernel_error("m9 budget probe: 24 MiB brk was refused");
+    }
+    if sys_brk(brk_end + PAGE_SIZE, pid, generation) != Err(ENOMEM)
+        || sys_brk(0, pid, generation) != Ok(brk_end)
+    {
+        fatal_kernel_error("m9 budget probe: brk past the budget was not refused");
+    }
+    let mapped = match sys_mmap(
+        0,
+        LARGE_MMAP_BYTES,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0,
+        pid,
+        generation,
+    ) {
+        Ok(addr) => addr,
+        Err(_) => fatal_kernel_error("m9 budget probe: 32 MiB mmap was refused"),
+    };
+    if mapped < LARGE_MMAP_WINDOW.start || mapped + LARGE_MMAP_BYTES > LARGE_MMAP_WINDOW.end {
+        fatal_kernel_error("m9 budget probe: mmap returned an address outside its window");
+    }
+    let all_present = |start: u64, bytes: u64| {
+        (start..start + bytes)
+            .step_by(PAGE_SIZE as usize)
+            .all(|va| translate_address_in_root(root, VirtAddr::new(va)).is_ok())
+    };
+    if !all_present(LARGE_BRK_BASE, LARGE_BRK_BYTES) || !all_present(mapped, LARGE_MMAP_BYTES) {
+        fatal_kernel_error("m9 budget probe: a brk or mmap page is not present");
+    }
+    let (_, mappings_full) = user_space(pid);
+    let (tables_full, capacity_full) = user_space_tables(pid);
+    let frames_full = free_frames();
+    let pages = (LARGE_BRK_BYTES + LARGE_MMAP_BYTES) / PAGE_SIZE;
+    kernel_log_fmt(format_args!(
+        "[M9.C] budget probe mapped pages={pages} mappings before={mappings_before} full={mappings_full} capacity={capacity_full} page_tables before={tables_before} full={tables_full} free_frames before={frames_before} full={frames_full}\n"
+    ));
+    if mappings_full - mappings_before != pages as usize
+        || capacity_full != MAX_ADDRESS_SPACE_USER_MAPPINGS
+        || free_large_mapping_tables() + 1 != large_tables_before
+    {
+        fatal_kernel_error("m9 budget probe: the mapping table did not grow to the large table");
+    }
+
+    if sys_munmap(mapped, LARGE_MMAP_BYTES, pid, generation) != Ok(0)
+        || sys_brk(LARGE_BRK_BASE + LARGE_BRK_BYTES / 2, pid, generation)
+            != Ok(LARGE_BRK_BASE + LARGE_BRK_BYTES / 2)
+        || !all_present(LARGE_BRK_BASE, LARGE_BRK_BYTES / 2)
+        || sys_brk(LARGE_BRK_BASE, pid, generation) != Ok(LARGE_BRK_BASE)
+        || sys_brk(0, pid, generation) != Ok(LARGE_BRK_BASE)
+    {
+        fatal_kernel_error("m9 budget probe: releasing the brk or mmap failed");
+    }
+    let (_, mappings_released) = user_space(pid);
+    let (tables_released, _) = user_space_tables(pid);
+    let frames_released = free_frames();
+    let new_tables = (tables_released - tables_before) as u64;
+    kernel_log_fmt(format_args!(
+        "[M9.C] budget probe released mappings={mappings_released} page_tables={tables_released} free_frames={frames_released} new_page_tables={new_tables}\n"
+    ));
+    if mappings_released != mappings_before || frames_released + new_tables != frames_before {
+        fatal_kernel_error("m9 budget probe: released brk/mmap did not return every frame");
+    }
+    if set_memory_budget(pid, generation, LinuxMemoryBudget::DEFAULT).is_err() {
+        fatal_kernel_error("m9 budget probe could not restore the default budget");
+    }
+    kernel_log_line(M9_LARGE_BUDGET_MARKER);
 }
 
 pub(crate) fn observe_syscall_fail_closed(reason: &'static str, torn_down_pid: u64) {

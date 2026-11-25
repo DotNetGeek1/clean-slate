@@ -49,8 +49,8 @@ Linux-personality processes (the POSIX surface the personality emulates):
 | `fork` | 12 live children; each child has its own capability-slot quota of 16 and a fork that cannot copy the parent's records fails with `EAGAIN` | 14 Linux processes, 16 processes in all | `kernel/src/process/linux_proc/table.rs`, `kernel/src/limits.rs` |
 | `pipe` | none of its own | 8 pipes of 1024 bytes | `kernel/src/process/linux_proc/pipe.rs` |
 | `open`, `dup`, `pipe` descriptors | 16 descriptors (`EMFILE`) | 48 open descriptions (`ENFILE`) | `kernel/src/process/linux_fd/` |
-| anonymous `mmap` | 16 regions and 512 pages (2 MiB) in all (`ENOMEM`) | 28 MiB: 14 Linux processes at 2 MiB each | `kernel/src/process/linux_mem.rs` (`LINUX_MMAP_MAX_REGIONS`, `LINUX_MMAP_MAX_PAGES`) |
-| `brk` | 4 MiB above the initial break (`ENOMEM`) | 56 MiB: 14 Linux processes at 4 MiB each | `kernel/src/process/linux_mem.rs` (`LINUX_BRK_MAX_BYTES`) |
+| anonymous `mmap` | the process's `LinuxMemoryBudget`: by default 64 regions and 12,288 pages (48 MiB) in all (`ENOMEM`) | No pool of its own: frames come from physical memory. A process past 384 tracked pages (1.5 MiB) needs one of 4 large mapping tables, so at most four processes hold more than 1.5 MiB at once, 64 MiB each | `kernel/src/process/linux_mem.rs` (`LinuxMemoryBudget`), `kernel/src/limits.rs` |
+| `brk` | the process's `LinuxMemoryBudget`: by default 32 MiB above the initial break (`ENOMEM`) | shared with `mmap`, above | `kernel/src/process/linux_mem.rs` (`LinuxMemoryBudget`) |
 
 Not ambient: `socket(2)` needs the network client capability and fails with `EACCES` without it. Files and directories can be created only under `/tmp` (elsewhere `EROFS`), and only by a process holding the `/tmp` object capabilities the kernel grants at launch.
 

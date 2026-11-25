@@ -34,19 +34,35 @@ pub(crate) const MAX_GUARDED_STACKS: usize = SCHEDULER_THREAD_SLOTS + 1 + IST_ST
 /// not inline; they live in the pool sized from this capacity.
 pub(crate) const PROCESS_REGISTRY_CAPACITY: usize = 16;
 
-/// User pages one address space can track.
+/// User pages every address space can track in its pooled mapping table.
 ///
 /// The pool holds `PROCESS_REGISTRY_CAPACITY + 8` tables (spaces in flight
 /// during exec, fork and spawn). Each entry is two `u64`s, so the pool is
 /// 24 × 384 × 16 = 144 KiB.
-pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 384;
+pub(crate) const SMALL_ADDRESS_SPACE_USER_MAPPINGS: usize = 384;
+
+/// User pages one address space can track at most (64 MiB of 4 KiB pages):
+/// the ceiling for a Linux process's image, stack, brk and mmap together.
+///
+/// A space that outgrows its small table moves to one of
+/// [`LARGE_USER_MAPPING_TABLES`] large tables, so only big processes pay
+/// for the capacity. Each large table is 16,384 × 16 = 256 KiB.
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 16 * 1024;
+
+/// Large mapping tables, shared by every address space (1 MiB of `.bss`).
+///
+/// Four covers two large Linux processes, each with an exec replacement
+/// in flight. Beyond that a growing space fails with `ENOMEM` once its
+/// small table is full.
+pub(crate) const LARGE_USER_MAPPING_TABLES: usize = 4;
 
 /// Page-table frames tracked inside `ProcessAddressSpace`, before the fixed
 /// carve-out tables are added.
 ///
-/// The list is inline and the address space is moved by value on kernel
-/// stacks. Twenty-nine `u64`s is 232 bytes per address space.
-pub(crate) const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 29;
+/// One page table maps 2 MiB, so a 64 MiB process needs 32 of them plus
+/// its directories. The list is inline and the address space is moved by
+/// value on kernel stacks: 61 `u64`s is 488 bytes per address space.
+pub(crate) const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 61;
 
 /// Declared services. The planned system set is six (storage, network, the Linux shell,
 /// compositor, desktop shell and one application); eight leaves two spare.

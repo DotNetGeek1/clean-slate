@@ -185,12 +185,20 @@ scratch below that window.
 
 ## Capacity notes
 
-`MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES = BASE + KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES`
-with mutually exclusive `BASE` arms per feature set. Default host builds use
-`BASE = 8` (11 total including carve-out private frames). Low-slot
-`linux_conventional_x86_64()` images use a stack near `0x0080_0000` so image and
-stack share page-table depth with the carve-out attach path; validation subtracts
-the redundant root+PDPT demand already covered by attach.
+`MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES = BASE + KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES`,
+with `BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES = 61` in `kernel/src/limits.rs` (64 in
+all, enough for a 64 MiB process). Low-slot `linux_conventional_x86_64()` images
+put the stack at `LINUX_CONVENTIONAL_STACK_TOP`, the last page below `1 << 47`
+(#293), which costs a PDPT, PD and PT of its own; the page-table demand counts one
+PDPT per PML4 slot touched, and validation subtracts the root+PDPT demand the
+carve-out attach already covers.
+
+Every address space tracks its user pages in a pooled table of
+`SMALL_ADDRESS_SPACE_USER_MAPPINGS = 384` entries. One that fills it moves to one
+of `LARGE_USER_MAPPING_TABLES = 4` tables of `MAX_ADDRESS_SPACE_USER_MAPPINGS =
+16384` entries (64 MiB); when none is free the map fails with `ENOMEM` and nothing
+changes. Lookups search from the newest entry and the Linux unmap paths free from
+the top down, so brk shrink, `munmap` and teardown stay linear.
 
 `m9-low-va-self-test` uses the default user mapping budget (4 pages) for the
 low hello fixture plus probe processes.
@@ -204,8 +212,16 @@ low hello fixture plus probe processes.
 
 ## M9 #103 — brk and anonymous mmap window
 
-- **brk:** grows from page-aligned end of the highest PT_LOAD (`linux_mem::init_for_image`);
-  capped at `LINUX_BRK_MAX_BYTES` (4 MiB) below stack/mmap reservations.
-- **mmap:** anonymous private mappings only, allocated top-down from
-  `[LINUX_MMAP_WINDOW_BASE, LINUX_MMAP_WINDOW_TOP)` =
-  `0x0020_0000` … `0x0060_0000` (below conventional stack reservation).
+- **brk:** grows from page-aligned end of the highest PT_LOAD (`linux_mem::init_for_image`),
+  up to the process's `LinuxMemoryBudget::brk_bytes` (#293). Shrinking unmaps the
+  pages above the new break and returns the new break.
+- **mmap:** anonymous private mappings only, allocated top-down from the stack
+  guard of the exec layout (`stack_reservation_start`) towards the image, so they
+  sit just below the stack near the top of the user half. Pages and regions count
+  against `LinuxMemoryBudget::mmap_pages` and `mmap_regions`.
+  `[LINUX_MMAP_WINDOW_BASE, LINUX_MMAP_WINDOW_TOP)` = `0x0020_0000` … `0x0060_0000`
+  is only the window of a process that has no exec layout.
+- **Budget:** `LinuxMemoryBudget::DEFAULT` is 32 MiB of brk, 48 MiB (12,288 pages)
+  of mmap and 64 regions. A launcher may set another with
+  `linux_mem::set_memory_budget`; `execve` keeps it and `fork` copies it. Image,
+  stack, brk and mmap together are capped by the mapping table (64 MiB).
