@@ -31,6 +31,7 @@ pub(crate) mod linux_rootfs;
 pub(crate) mod linux_signal;
 pub(crate) mod linux_socket;
 pub(crate) mod linux_stdio_m9_payload;
+pub(crate) mod native_mem;
 pub(crate) mod personality;
 
 use crate::arch::x86_64::cpu::without_interrupts;

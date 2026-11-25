@@ -655,6 +655,33 @@ pub(crate) fn unmap_process_page_at(
     Ok(())
 }
 
+/// Sets or clears `WRITABLE` on a tracked, present user page; the page stays user-accessible
+/// and never executable (#306 `MEMORY` PROTECT).
+pub(crate) fn set_process_page_writable(
+    address_space: &mut ProcessAddressSpace,
+    virtual_address: u64,
+    writable: bool,
+) -> Result<(), &'static str> {
+    let aligned = align_down(virtual_address, PAGE_SIZE);
+    if !address_space
+        .user_mappings()
+        .iter()
+        .any(|mapping| mapping.virtual_address == aligned)
+    {
+        return Err("access change target was not tracked");
+    }
+    let mut flags =
+        PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
+    if writable {
+        flags |= PageTableFlags::WRITABLE;
+    }
+    let mut mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(aligned));
+    without_write_protect(|| unsafe { mapper.update_flags(page, flags) })
+        .map(|flush| flush.flush())
+        .map_err(|_| "failed to change a user page's access")
+}
+
 /// Unmap and free the most recently recorded user mapping (LIFO rollback helper).
 #[allow(dead_code)]
 pub(crate) fn unmap_last_user_mapping(

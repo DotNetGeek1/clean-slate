@@ -23,7 +23,8 @@ use crate::mm::PAGE_SIZE;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 use clean_slate_service_fixtures::m6_fixture::{
     M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_BOOTSTRAP_BYTES,
@@ -204,7 +205,8 @@ const _: () = assert!(
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 include!(concat!(env!("OUT_DIR"), "/m6_fixture_userspace_entry.rs"));
 #[cfg(any(
@@ -217,7 +219,8 @@ include!(concat!(env!("OUT_DIR"), "/m6_fixture_userspace_entry.rs"));
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 const _: () = assert!(M6_FIXTURE_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDRESS);
 #[cfg(any(
@@ -230,7 +233,8 @@ const _: () = assert!(M6_FIXTURE_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_A
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 const M6_FIXTURE_USERSPACE_IMAGE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/m6_fixture_userspace.bin"));
@@ -244,7 +248,8 @@ const M6_FIXTURE_USERSPACE_IMAGE: &[u8] =
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 const M6_FIXTURE_BOOTSTRAP_PAGES: u64 = 2;
 #[cfg(any(
@@ -257,7 +262,8 @@ const M6_FIXTURE_BOOTSTRAP_PAGES: u64 = 2;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 const M6_FIXTURE_STACK_PAGES: u64 = 4;
 #[cfg(any(
@@ -270,7 +276,8 @@ const M6_FIXTURE_STACK_PAGES: u64 = 4;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 const M6_FIXTURE_STACK_ADDRESS: u64 =
     M6_FIXTURE_BOOTSTRAP_ADDRESS + M6_FIXTURE_BOOTSTRAP_PAGES * PAGE_SIZE;
@@ -286,7 +293,8 @@ const M6_FIXTURE_STACK_ADDRESS: u64 =
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 const M6_FIXTURE_MAX_CODE_PAGES: usize = 16;
 #[cfg(any(
@@ -299,7 +307,8 @@ const M6_FIXTURE_MAX_CODE_PAGES: usize = 16;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 const _: () = assert!(M6_FIXTURE_USERSPACE_MAPPED_CODE_PAGES <= M6_FIXTURE_MAX_CODE_PAGES);
 #[cfg(any(
@@ -312,7 +321,8 @@ const _: () = assert!(M6_FIXTURE_USERSPACE_MAPPED_CODE_PAGES <= M6_FIXTURE_MAX_C
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 const M6_FIXTURE_MAPPED_PAGES: usize = M6_FIXTURE_USERSPACE_MAPPED_CODE_PAGES
     + M6_FIXTURE_BOOTSTRAP_PAGES as usize
@@ -327,7 +337,8 @@ const M6_FIXTURE_MAPPED_PAGES: usize = M6_FIXTURE_USERSPACE_MAPPED_CODE_PAGES
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 const _: () = assert!(
     M6_FIXTURE_BOOTSTRAP_BYTES <= (M6_FIXTURE_BOOTSTRAP_PAGES as usize) * PAGE_SIZE as usize
@@ -342,7 +353,8 @@ const _: () = assert!(
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 const _: () =
     assert!(M6_FIXTURE_MAPPED_PAGES <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS);
@@ -374,6 +386,7 @@ pub(crate) enum BuiltinServiceImage {
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
         feature = "m6-fixture-smoke-self-test",
+        feature = "m10-native-memory-self-test",
         feature = "m7-net-caps-self-test",
         feature = "m10-port-self-test",
         feature = "m10-shared-buffer-self-test"
@@ -434,6 +447,7 @@ impl BuiltinServiceImage {
                 feature = "m6-audit-self-test",
                 feature = "m6-capabilities-self-test",
                 feature = "m6-fixture-smoke-self-test",
+                feature = "m10-native-memory-self-test",
                 feature = "m7-net-caps-self-test",
                 feature = "m10-port-self-test",
                 feature = "m10-shared-buffer-self-test"
@@ -549,6 +563,7 @@ pub(crate) fn launch_builtin_service(
             feature = "m6-audit-self-test",
             feature = "m6-capabilities-self-test",
             feature = "m6-fixture-smoke-self-test",
+            feature = "m10-native-memory-self-test",
             feature = "m7-net-caps-self-test",
             feature = "m10-port-self-test",
             feature = "m10-shared-buffer-self-test"
@@ -941,6 +956,7 @@ fn launch_single_page_service(
                 feature = "m6-audit-self-test",
                 feature = "m6-capabilities-self-test",
                 feature = "m6-fixture-smoke-self-test",
+                feature = "m10-native-memory-self-test",
                 feature = "m7-net-caps-self-test",
                 feature = "m10-port-self-test",
                 feature = "m10-shared-buffer-self-test"
@@ -1372,7 +1388,8 @@ fn launch_storage_userspace_service(
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 #[inline(never)]
 fn launch_m6_fixture_service(

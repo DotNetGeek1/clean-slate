@@ -162,6 +162,7 @@ const M5_UNAUTHORIZED_ROW: ServiceSpec = ServiceSpec {
     restart: RestartSpec::Never,
     depends_on: &[],
     slot_allowance: None,
+    memory_pages: 0,
 };
 
 const M5_PERSISTENCE_SCENARIO: &[ServiceSpec] = &[m5_storage_row(STORAGE_SERVICE_MODE_PERSISTENCE)];

@@ -102,6 +102,7 @@ const USERSPACE_DISPATCH_ARMS: &[(&str, &[&str])] = &[
     ),
     ("m7-net-caps", &["m7-net-caps-self-test"]),
     ("m10-port", &["m10-port-self-test"]),
+    ("m10-native-memory", &["m10-native-memory-self-test"]),
     ("m6-revocation", &["m6-revocation-self-test"]),
     ("m6-capabilities", &["m6-capabilities-self-test"]),
     ("m6-object", &["m6-object-self-test"]),
@@ -249,6 +250,7 @@ const FIXTURE_SPAWN_FEATURES: &[&str] = &[
     "m7-net-caps-self-test",
     "m10-port-self-test",
     "m10-shared-buffer-self-test",
+    "m10-native-memory-self-test",
 ];
 
 fn emit_fixture_spawn_cfg(userspace_arm: Option<&str>) {
@@ -367,7 +369,8 @@ fn main() {
         || env::var("CARGO_FEATURE_M6_CAPABILITIES_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M7_NET_CAPS_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M10_PORT_SELF_TEST").is_ok()
-        || env::var("CARGO_FEATURE_M10_SHARED_BUFFER_SELF_TEST").is_ok();
+        || env::var("CARGO_FEATURE_M10_SHARED_BUFFER_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M10_NATIVE_MEMORY_SELF_TEST").is_ok();
     if env::var("CARGO_FEATURE_M4_SUPERVISOR_SELF_TEST").is_ok() {
         embed_userspace_image(
             "supervisor_userspace.bin",

@@ -18,6 +18,7 @@ pub const STATUS_ESTALE: u64 = SYSCALL_ESTALE;
 
 pub const STATUS_EBADF: u64 = u64::MAX - 8;
 pub const STATUS_EAGAIN: u64 = u64::MAX - 10;
+pub const STATUS_ENOMEM: u64 = u64::MAX - 11;
 pub const STATUS_EEXIST: u64 = u64::MAX - 16;
 pub const STATUS_EPIPE: u64 = u64::MAX - 31;
 pub const STATUS_ETIMEDOUT: u64 = u64::MAX - 109;
@@ -48,6 +49,7 @@ mod tests {
             (STATUS_ENOSYS, 38),
             (STATUS_EBADF, 9),
             (STATUS_EAGAIN, 11),
+            (STATUS_ENOMEM, 12),
             (STATUS_EEXIST, 17),
             (STATUS_EPIPE, 32),
             (STATUS_ETIMEDOUT, 110),
@@ -72,6 +74,7 @@ mod tests {
             STATUS_ESTALE,
             STATUS_EBADF,
             STATUS_EAGAIN,
+            STATUS_ENOMEM,
             STATUS_EEXIST,
             STATUS_EPIPE,
             STATUS_ETIMEDOUT,

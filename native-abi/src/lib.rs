@@ -1,7 +1,7 @@
 //! Generic native kernel ABI shared by the kernel and userspace binaries.
 //!
-//! Shared buffers, the bounded service port, work-set, lifecycle-wait and service-ready ABI live here; the port engine
-//! is the separate `clean-slate-port` crate. Graphics protocol types remain in
+//! Shared buffers, the bounded service port, work-set, lifecycle-wait, service-ready and memory
+//! ABI live here; the port engine is the separate `clean-slate-port` crate. Graphics protocol types remain in
 //! `clean-slate-graphics`.
 
 #![cfg_attr(not(test), no_std)]
@@ -9,6 +9,7 @@
 
 pub mod desktop;
 pub mod lifecycle;
+pub mod memory;
 pub mod shared_buffer;
 
 #[macro_use]
@@ -33,8 +34,8 @@ pub use shared_buffer::{
 };
 pub use status::{
     is_status, NETWORK_STATUS_PENDING, STATUS_EACCES, STATUS_EAGAIN, STATUS_EBADF,
-    STATUS_ECONNREFUSED, STATUS_EEXIST, STATUS_EINVAL, STATUS_ENOSPC, STATUS_ENOSYS, STATUS_EPIPE,
-    STATUS_ESTALE, STATUS_ETIMEDOUT, STATUS_RANGE_START,
+    STATUS_ECONNREFUSED, STATUS_EEXIST, STATUS_EINVAL, STATUS_ENOMEM, STATUS_ENOSPC, STATUS_ENOSYS,
+    STATUS_EPIPE, STATUS_ESTALE, STATUS_ETIMEDOUT, STATUS_RANGE_START,
 };
 
 pub use port::{
@@ -70,8 +71,8 @@ mod graphics_status_mirrors_capability_syscall_abi {
     };
     use crate::status::{
         self, STATUS_EACCES, STATUS_EAGAIN, STATUS_EBADF, STATUS_ECONNREFUSED, STATUS_EEXIST,
-        STATUS_EINVAL, STATUS_ENOSPC, STATUS_ENOSYS, STATUS_EPIPE, STATUS_ESTALE, STATUS_ETIMEDOUT,
-        STATUS_RANGE_START,
+        STATUS_EINVAL, STATUS_ENOMEM, STATUS_ENOSPC, STATUS_ENOSYS, STATUS_EPIPE, STATUS_ESTALE,
+        STATUS_ETIMEDOUT, STATUS_RANGE_START,
     };
     use crate::{ConnectionId, WorkSetId};
 
@@ -105,6 +106,7 @@ mod graphics_status_mirrors_capability_syscall_abi {
             ("native.ENOSYS", STATUS_ENOSYS),
             ("native.ESTALE", STATUS_ESTALE),
             ("native.EAGAIN", STATUS_EAGAIN),
+            ("native.ENOMEM", STATUS_ENOMEM),
             ("native.EEXIST", STATUS_EEXIST),
             ("native.EPIPE", STATUS_EPIPE),
             ("native.ETIMEDOUT", STATUS_ETIMEDOUT),
