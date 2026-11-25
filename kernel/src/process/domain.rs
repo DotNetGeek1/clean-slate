@@ -322,7 +322,6 @@ impl<'a> TeardownContext<'a> {
 struct TeardownPath {
     /// The process has been dispatched, so the holder-exit bookkeeping hooks apply.
     process_ran: bool,
-    revokes_capabilities: bool,
     /// Keep running after a failed hook and report the first failure.
     best_effort: bool,
     record_missing: &'static str,
@@ -332,7 +331,6 @@ struct TeardownPath {
 /// `teardown_current_process`: the exiting thread is the caller.
 const CURRENT_TEARDOWN: TeardownPath = TeardownPath {
     process_ran: true,
-    revokes_capabilities: true,
     best_effort: false,
     record_missing: "process missing from registry during resource teardown",
     address_space_missing: "process address space was missing during teardown",
@@ -341,7 +339,6 @@ const CURRENT_TEARDOWN: TeardownPath = TeardownPath {
 /// `teardown_process_by_id`: supervisor-initiated, target is not running.
 const EXTERNAL_TEARDOWN: TeardownPath = TeardownPath {
     process_ran: true,
-    revokes_capabilities: true,
     best_effort: false,
     record_missing: "process missing from registry during external resource teardown",
     address_space_missing: "process address space was missing during external teardown",
@@ -358,8 +355,10 @@ impl TeardownPath {
             | TeardownHook::RevokeProcessResource
             | TeardownHook::DiscardBootstrapGrants
             | TeardownHook::ThreadReap => self.process_ran,
-            TeardownHook::RevokeHolderCapabilities => self.revokes_capabilities,
-            TeardownHook::Port
+            // Every path revokes the holder's tree. PIDs are never reused, so on a
+            // rollback that installed nothing this finds nothing (#212).
+            TeardownHook::RevokeHolderCapabilities
+            | TeardownHook::Port
             | TeardownHook::DisplayPresenter
             | TeardownHook::InputConsumer
             | TeardownHook::WorkSet
@@ -566,7 +565,6 @@ fn run_exit_teardown_hooks(
     feature = "m2-timer-self-test"
 )))]
 pub(crate) struct RegistrationRollback {
-    pub(crate) revokes_capabilities: bool,
     /// Run every step and report the first failure instead of stopping at it.
     pub(crate) best_effort: bool,
     pub(crate) process_missing: &'static str,
@@ -588,7 +586,6 @@ pub(crate) fn rollback_registered_process(
 ) -> Result<(), &'static str> {
     let path = TeardownPath {
         process_ran: false,
-        revokes_capabilities: rollback.revokes_capabilities,
         best_effort: rollback.best_effort,
         record_missing: rollback.process_missing,
         address_space_missing: rollback.address_space_missing,
@@ -884,10 +881,9 @@ mod tests {
         feature = "m2-double-fault-self-test",
         feature = "m2-timer-self-test"
     )))]
-    fn rollback_path(revokes_capabilities: bool, best_effort: bool) -> TeardownPath {
+    fn rollback_path(best_effort: bool) -> TeardownPath {
         TeardownPath {
             process_ran: false,
-            revokes_capabilities,
             best_effort,
             record_missing: "rollback record missing",
             address_space_missing: "rollback address space missing",
@@ -1017,7 +1013,7 @@ mod tests {
     )))]
     #[test]
     fn rollback_runs_only_the_p4_hooks_once_in_order() {
-        let (ran, result) = hooks_run_by(&rollback_path(true, false), &[]);
+        let (ran, result) = hooks_run_by(&rollback_path(false), &[]);
         assert_eq!(result, Ok(()));
         assert_runs_once_each_in_order(&ran);
         assert_eq!(
@@ -1033,15 +1029,6 @@ mod tests {
                 TeardownHook::AddressSpace,
             ]
         );
-
-        let (without_capabilities, _) = hooks_run_by(&rollback_path(false, false), &[]);
-        assert_eq!(
-            without_capabilities,
-            ran.iter()
-                .copied()
-                .filter(|hook| *hook != TeardownHook::RevokeHolderCapabilities)
-                .collect::<Vec<_>>()
-        );
     }
 
     #[cfg(not(any(
@@ -1051,16 +1038,16 @@ mod tests {
     )))]
     #[test]
     fn best_effort_rollback_runs_every_hook_and_reports_the_first_failure() {
-        let (all, _) = hooks_run_by(&rollback_path(true, true), &[]);
+        let (all, _) = hooks_run_by(&rollback_path(true), &[]);
         let (ran, result) = hooks_run_by(
-            &rollback_path(true, true),
+            &rollback_path(true),
             &[TeardownHook::Port, TeardownHook::SharedMappings],
         );
         assert_eq!(result, Err("port hook failed"));
         assert_eq!(ran, all);
 
         let (stopped, result) = hooks_run_by(
-            &rollback_path(true, false),
+            &rollback_path(false),
             &[TeardownHook::Port, TeardownHook::SharedMappings],
         );
         assert_eq!(result, Err("port hook failed"));

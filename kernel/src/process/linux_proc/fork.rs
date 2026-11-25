@@ -18,6 +18,7 @@ use crate::process::linux_mem;
 use crate::process::linux_signal;
 use crate::process::{
     personality::ExecutionPersonality, process_registry_mut, Process, ProcessState, ResourceDomain,
+    PROCESS_REGISTRY_CAPACITY,
 };
 use crate::sched::{scheduler_mut, Thread, ThreadKind, ThreadState};
 use clean_slate_capability::HolderId;
@@ -29,7 +30,6 @@ struct ForkChildCleanup {
     child_gen: InstanceGeneration,
     registry_committed: bool,
     proc_registered: bool,
-    caps_inherited: bool,
     fd_inherited: bool,
 }
 
@@ -101,6 +101,12 @@ pub(crate) fn linux_fork(
                 let _ = destroy_process_address_space(&child_space, allocator);
                 return Err("scheduler-slot-occupied");
             }
+            // Same precondition as spawn and `linux_image`: refuse while we still own
+            // `child_space`, before `insert` takes it (#212).
+            if process_registry_mut().occupied_slots() >= PROCESS_REGISTRY_CAPACITY {
+                let _ = destroy_process_address_space(&child_space, allocator);
+                return Err("registry-full");
+            }
             let process = Process {
                 id: child_pid,
                 instance_generation: InstanceGeneration(0),
@@ -110,13 +116,18 @@ pub(crate) fn linux_fork(
                 exit_status: None,
                 execution_personality: ExecutionPersonality::LinuxX86_64,
             };
-            if let Err(_message) = process_registry_mut().insert(process) {
-                let _ = rollback_registered_process(child_pid, allocator, LINUX_LAUNCH_ROLLBACK);
+            // No record was inserted, so there is nothing to roll back through the
+            // registry: free the address space the refused record still owns.
+            if let Err(rejected) = process_registry_mut().insert_or_return(process) {
+                if let Some(space) = rejected.process.resource_domain.address_space() {
+                    let _ = destroy_process_address_space(space, allocator);
+                }
                 return Err("registry-insert");
             }
-            let generation = process_registry_mut()
-                .instance_generation(child_pid)
-                .ok_or("registry-generation")?;
+            let Some(generation) = process_registry_mut().instance_generation(child_pid) else {
+                let _ = rollback_registered_process(child_pid, allocator, LINUX_LAUNCH_ROLLBACK);
+                return Err("registry-generation");
+            };
             if scheduler_mut()
                 .configure_thread(
                     scheduler_slot,
@@ -144,7 +155,6 @@ pub(crate) fn linux_fork(
         child_gen,
         registry_committed: true,
         proc_registered: false,
-        caps_inherited: false,
         fd_inherited: false,
     };
 
@@ -158,7 +168,6 @@ pub(crate) fn linux_fork(
         abort_fork_child(child_pid, &cleanup, allocator);
         return Err(EAGAIN);
     }
-    cleanup.caps_inherited = true;
 
     if table_mut()
         .register(
@@ -204,8 +213,9 @@ fn abort_fork_child(child_pid: u64, cleanup: &ForkChildCleanup, allocator: &mut 
             let _ = rollback_registered_process(
                 child_pid,
                 allocator,
+                // Revokes the child's whole capability tree even when inheritance
+                // failed part-way: no copy can outlive the rollback (#212).
                 RegistrationRollback {
-                    revokes_capabilities: cleanup.caps_inherited,
                     best_effort: true,
                     process_missing: "fork rollback: child missing from registry",
                     address_space_missing: "fork rollback: child had no address space",
