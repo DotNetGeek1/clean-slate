@@ -1198,6 +1198,12 @@ mod tests {
             "discard_address_space",
             "destroy_process_address_space",
         ),
+        // #297: the probe's fork child is never registered as a process.
+        (
+            "selftest/m9_syscall_fail_closed.rs",
+            "prove_large_space_forks",
+            "destroy_process_address_space",
+        ),
         (
             "service/spawn.rs",
             "discard_address_space",

@@ -18,13 +18,15 @@ use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::diagnostics::serial::serial_write_line;
 use crate::interrupt::timer::initialize_timer;
+use crate::mm::address_space::destroy_process_address_space;
 use crate::mm::address_space::{
     free_large_mapping_tables, translate_address_in_root,
     withhold_large_mapping_tables_for_selftest, MAX_ADDRESS_SPACE_USER_MAPPINGS,
     SMALL_ADDRESS_SPACE_USER_MAPPINGS,
 };
+use crate::mm::fork_clone::{fork_child_address_space, LINUX_FORK_MAX_PAGES};
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::PAGE_SIZE;
+use crate::mm::{phys_to_virt, PAGE_SIZE};
 use crate::process::linux_mem::{
     memory_budget, set_layout_for_selftest, set_memory_budget, sys_brk, sys_mmap, sys_munmap,
     LinuxMemoryBudget,
@@ -61,6 +63,8 @@ pub(crate) const M9_NONCANONICAL_LINUX_MARKER: &str =
     "[M9.C] non-canonical syscall rsp terminated linux offender OK";
 pub(crate) const M9_MAP_FAILURE_ROLLBACK_MARKER: &str =
     "[M9.C] failed mmap/brk left free frames and mappings unchanged OK";
+pub(crate) const M9_LARGE_FORK_MARKER: &str =
+    "[M9.C] fork copied a 56 MiB address space and released it OK";
 pub(crate) const M9_LARGE_BUDGET_MARKER: &str =
     "[M9.C] 24 MiB brk and 32 MiB mmap mapped and released OK";
 
@@ -515,6 +519,15 @@ fn prove_large_budget_maps_and_releases(pid: u64) {
     {
         fatal_kernel_error("m9 budget probe: the mapping table did not grow to the large table");
     }
+    prove_large_space_forks(
+        pid,
+        [
+            LARGE_BRK_BASE,
+            LARGE_BRK_BASE + LARGE_BRK_BYTES - PAGE_SIZE,
+            mapped,
+            mapped + LARGE_MMAP_BYTES - PAGE_SIZE,
+        ],
+    );
 
     if sys_munmap(mapped, LARGE_MMAP_BYTES, pid, generation) != Ok(0)
         || sys_brk(LARGE_BRK_BASE + LARGE_BRK_BYTES / 2, pid, generation)
@@ -539,6 +552,102 @@ fn prove_large_budget_maps_and_releases(pid: u64) {
         fatal_kernel_error("m9 budget probe could not restore the default budget");
     }
     kernel_log_line(M9_LARGE_BUDGET_MARKER);
+}
+
+/// #297: fork copies a process far past the old 4 MiB cap. Forks `pid`'s
+/// space (the #293 probe's 24 MiB brk and 32 MiB mmap) through the same
+/// clone the `fork` syscall uses, and checks the child holds every page at
+/// the same address in a frame of its own with the same bytes, that a child
+/// write stays private, and that tearing the child down returns every frame
+/// and the large mapping table. A fork refused by the page cap must leave
+/// the free-frame count unchanged.
+fn prove_large_space_forks(pid: u64, samples: [u64; 4]) {
+    const MARK: u64 = 0x5f0c_297f_0c29_7f0c;
+    let allocator = service_lifecycle_syscall_allocator_mut()
+        .as_mut()
+        .unwrap_or_else(|| fatal_kernel_error("m9 fork probe allocator missing"));
+    let parent = unsafe { process_registry_mut() }
+        .get(pid)
+        .and_then(|process| process.resource_domain.address_space())
+        .unwrap_or_else(|| fatal_kernel_error("m9 fork probe process has no address space"));
+    let word = |root: u64, va: u64| -> *mut u64 {
+        let phys = translate_address_in_root(root, VirtAddr::new(va))
+            .unwrap_or_else(|_| fatal_kernel_error("m9 fork probe: sampled page not mapped"));
+        phys_to_virt(phys) as *mut u64
+    };
+    for va in samples {
+        unsafe { word(parent.root_frame, va).write_volatile(MARK ^ va) };
+    }
+    let pages = parent.user_mapping_count();
+    let frames_before = allocator.stats().free_pages;
+    let large_before = free_large_mapping_tables();
+    // 1024 pages was the copy cap before #297.
+    if pages <= 1024 || pages > LINUX_FORK_MAX_PAGES {
+        fatal_kernel_error("m9 fork probe parent is not a large address space");
+    }
+
+    let base = VirtAddr::new(USER_TEST_CODE_ADDRESS);
+    if fork_child_address_space(parent, allocator, base, pages - 1).is_ok()
+        || allocator.stats().free_pages != frames_before
+        || free_large_mapping_tables() != large_before
+    {
+        fatal_kernel_error("m9 fork probe: a fork over the page cap was not refused cleanly");
+    }
+
+    let child = fork_child_address_space(parent, allocator, base, LINUX_FORK_MAX_PAGES)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+    let frames_forked = allocator.stats().free_pages;
+    if child.user_mapping_count() != pages
+        || child.user_mapping_capacity() != MAX_ADDRESS_SPACE_USER_MAPPINGS
+        || free_large_mapping_tables() + 1 != large_before
+    {
+        fatal_kernel_error("m9 fork probe: the child did not get every page in a large table");
+    }
+    for index in 0..pages {
+        let (Some(from), Some(to)) = (parent.user_mapping_at(index), child.user_mapping_at(index))
+        else {
+            fatal_kernel_error("m9 fork probe: mapping index out of range");
+        };
+        let same_bytes = unsafe {
+            core::slice::from_raw_parts(
+                phys_to_virt(from.frame_address) as *const u8,
+                PAGE_SIZE as usize,
+            ) == core::slice::from_raw_parts(
+                phys_to_virt(to.frame_address) as *const u8,
+                PAGE_SIZE as usize,
+            )
+        };
+        if from.virtual_address != to.virtual_address
+            || from.frame_address == to.frame_address
+            || !same_bytes
+        {
+            fatal_kernel_error("m9 fork probe: a child page is not a private copy");
+        }
+    }
+    for va in samples {
+        unsafe {
+            if word(child.root_frame, va).read_volatile() != MARK ^ va {
+                fatal_kernel_error("m9 fork probe: a sampled child page lost the parent's bytes");
+            }
+            word(child.root_frame, va).write_volatile(!MARK);
+            if word(parent.root_frame, va).read_volatile() != MARK ^ va {
+                fatal_kernel_error("m9 fork probe: a child write reached the parent");
+            }
+        }
+    }
+
+    if destroy_process_address_space(&child, allocator).is_err() {
+        fatal_kernel_error("m9 fork probe: destroying the child failed");
+    }
+    drop(child);
+    let frames_after = allocator.stats().free_pages;
+    kernel_log_fmt(format_args!(
+        "[M9.C] fork probe pages={pages} free_frames before={frames_before} forked={frames_forked} after={frames_after}\n"
+    ));
+    if frames_after != frames_before || free_large_mapping_tables() != large_before {
+        fatal_kernel_error("m9 fork probe: the child's frames or mapping table were not returned");
+    }
+    kernel_log_line(M9_LARGE_FORK_MARKER);
 }
 
 pub(crate) fn observe_syscall_fail_closed(reason: &'static str, torn_down_pid: u64) {

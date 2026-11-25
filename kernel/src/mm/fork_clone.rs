@@ -1,10 +1,15 @@
-//! Bounded eager user mapping clone for Linux `fork` (#102).
+//! Bounded eager user mapping clone for Linux `fork` (#102, #297).
+//!
+//! The child gets its own copy of every parent page. Copy-on-write is not
+//! worth its fault path and frame reference counts yet: QEMU lanes have
+//! 512 MiB, and the programs that fork (BusyBox `sh`) exec right after.
 
 #![cfg_attr(not(feature = "m9-linux-proc-self-test"), allow(dead_code))]
 
 use super::address_space::{
-    create_process_address_space, destroy_process_address_space, map_process_page,
-    unmap_last_user_mapping, ProcessAddressSpace,
+    create_process_address_space, destroy_process_address_space, free_large_mapping_tables,
+    map_process_page, unmap_last_user_mapping, ProcessAddressSpace,
+    MAX_ADDRESS_SPACE_USER_MAPPINGS, SMALL_ADDRESS_SPACE_USER_MAPPINGS,
 };
 use super::frame_allocator::PageAllocator;
 use super::phys_to_virt;
@@ -12,8 +17,9 @@ use super::PAGE_SIZE;
 use x86_64::structures::paging::{PageTableFlags, Translate};
 use x86_64::VirtAddr;
 
-/// BusyBox static image + stack + brk headroom (4 MiB); see `readelf.txt` + traces.
-pub(crate) const LINUX_FORK_MAX_PAGES: usize = 1024;
+/// Every page an address space can track (64 MiB), so any process within its
+/// Linux memory budget (#293) can fork.
+pub(crate) const LINUX_FORK_MAX_PAGES: usize = MAX_ADDRESS_SPACE_USER_MAPPINGS;
 
 pub(crate) fn clone_user_mappings_for_fork(
     parent: &ProcessAddressSpace,
@@ -24,6 +30,15 @@ pub(crate) fn clone_user_mappings_for_fork(
     let count = parent.user_mapping_count();
     if count > max_pages {
         return Err("fork exceeded LINUX_FORK_MAX_PAGES");
+    }
+    // Refuse up front what cannot finish, instead of copying tens of MiB and
+    // rolling it back. Page-table frames are not counted: a shortfall there
+    // still fails cleanly through the rollback below.
+    if (allocator.stats().free_pages as usize) < count {
+        return Err("fork child would not fit in free frames");
+    }
+    if count > SMALL_ADDRESS_SPACE_USER_MAPPINGS && free_large_mapping_tables() == 0 {
+        return Err("fork child needs a large mapping table and none is free");
     }
     let mut copied = 0usize;
     for index in 0..count {

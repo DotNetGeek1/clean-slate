@@ -159,7 +159,10 @@ slot and halt the kernel on that exit). An exit that finds no slot logs
 `[LNX ] exit pid=… without proc-table slot` and tears the process down anyway. `read(0)` front-end lives in
 `syscall/linux/fd.rs` (`ensure_open_fd`, 1024-byte scratch, kind dispatch); pipe
 bytes use `linux_proc/pipe::read_fd`. `fork` copies each parent user page into a new frame
-(`mm/fork_clone.rs`). The child PTE keeps the parent's present, user, writable,
+(`mm/fork_clone.rs`), up to `LINUX_FORK_MAX_PAGES`, which is the 16,384-page (64 MiB)
+address-space ceiling, so a process within its memory budget can fork (#297). There is no
+copy-on-write. A fork the free frames or the large mapping tables cannot hold fails with
+`ENOMEM` before any page is copied. The child PTE keeps the parent's present, user, writable,
 and no-execute bits (`user_copy_flags`). Capability inheritance is
 `inherit_capabilities_for_fork`: it walks the parent with `list_holder` and
 installs a child record with the same rights. It does not call `delegate` and

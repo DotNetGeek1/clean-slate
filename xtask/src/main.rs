@@ -391,6 +391,7 @@ const M9_SYSCALL_FAIL_CLOSED_CONTAINMENT_GROUP: &[&str] = &[
 const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered(M9_MAP_PROBE_COUNTS),
     MarkerStep::Ordered("[M9.C] failed mmap/brk left free frames and mappings unchanged OK"),
+    MarkerStep::Ordered("[M9.C] fork copied a 56 MiB address space and released it OK"),
     MarkerStep::Ordered("[M9.C] 24 MiB brk and 32 MiB mmap mapped and released OK"),
     MarkerStep::Ordered("[TIME] timer initialized"),
     MarkerStep::UnorderedGroup(M9_SYSCALL_FAIL_CLOSED_CONTAINMENT_GROUP),
