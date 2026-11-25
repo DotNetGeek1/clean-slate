@@ -2,6 +2,7 @@
 //! checks, and the endpoint table. Owns `IPC_ENDPOINT_TABLE`.
 
 use crate::capability::grant_root;
+use crate::capability::handle_family::HandleFamily;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_capability::{HolderId, ResourceRef, Rights};
 
@@ -100,21 +101,31 @@ pub(crate) struct IpcProcessResources {
     pub(crate) held_capabilities: usize,
 }
 
+// The endpoint slot has 8 bits in the handle, below the family tag (#288).
+const _: () = assert!(IPC_ENDPOINT_CAPACITY <= 1 << 8);
+
 impl EndpointCapabilityHandleParts {
+    /// `cap_slot | cap_gen << 16 | ep_slot << 32 | ep_gen << 40`, tagged
+    /// [`HandleFamily::IpcSend`] in bits 56..64 (#288).
     fn encode(self) -> u64 {
-        u64::from(self.capability_slot)
-            | (u64::from(self.capability_generation) << 16)
-            | (u64::from(self.endpoint_slot) << 32)
-            | (u64::from(self.endpoint_generation) << 48)
+        debug_assert!(usize::from(self.endpoint_slot) < IPC_ENDPOINT_CAPACITY);
+        HandleFamily::IpcSend.tag(
+            u64::from(self.capability_slot)
+                | (u64::from(self.capability_generation) << 16)
+                | (u64::from(self.endpoint_slot & 0xff) << 32)
+                | (u64::from(self.endpoint_generation) << 40),
+        )
     }
 
-    fn decode(raw: u64) -> Self {
-        Self {
-            capability_slot: raw as u16,
-            capability_generation: (raw >> 16) as u16,
-            endpoint_slot: (raw >> 32) as u16,
-            endpoint_generation: (raw >> 48) as u16,
-        }
+    /// `None` for a handle of another family.
+    fn decode(raw: u64) -> Option<Self> {
+        let payload = HandleFamily::IpcSend.untag(raw, 0x00ff_ffff_ffff_ffff)?;
+        Some(Self {
+            capability_slot: payload as u16,
+            capability_generation: (payload >> 16) as u16,
+            endpoint_slot: u16::from((payload >> 32) as u8),
+            endpoint_generation: (payload >> 40) as u16,
+        })
     }
 }
 
@@ -303,7 +314,9 @@ impl IpcEndpointTable {
         sender_pid: u64,
         raw_handle: u64,
     ) -> Result<usize, IpcSendError> {
-        let handle = EndpointCapabilityHandleParts::decode(raw_handle);
+        let Some(handle) = EndpointCapabilityHandleParts::decode(raw_handle) else {
+            return Err(IpcSendError::InvalidCapability);
+        };
         let capability = match self.capabilities.get(handle.capability_slot as usize) {
             Some(capability) => capability,
             None => return Err(IpcSendError::InvalidCapability),
@@ -393,7 +406,9 @@ impl IpcEndpointTable {
         if message.is_empty() || message.len() > IPC_MAX_MESSAGE_BYTES {
             return Err(IpcSendError::InvalidMessageLength);
         }
-        let handle = EndpointCapabilityHandleParts::decode(raw_handle);
+        let Some(handle) = EndpointCapabilityHandleParts::decode(raw_handle) else {
+            return Err(IpcSendError::NotConsoleSink);
+        };
         if !self.is_live_console_sink(
             usize::from(handle.endpoint_slot),
             handle.endpoint_generation,
@@ -638,6 +653,65 @@ mod tests {
         assert_eq!(
             table.send_console_message(USERSPACE_IPC_TEST_PID, console_handle, b"x"),
             Ok(1)
+        );
+    }
+
+    /// #288: the console handle's fields, re-tagged as another family or with the tag
+    /// stripped, are refused before any field is looked at, and the real handle still works.
+    #[test]
+    fn console_send_refuses_the_console_handle_under_another_family_tag() {
+        use crate::capability::handle_family::{HandleFamily, SlotGenerationHandle};
+
+        let mut table = IpcEndpointTable::new();
+        let endpoint_slot = table
+            .create_console_sink(KERNEL_PROCESS_ID)
+            .expect("create console sink");
+        let console_handle = table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
+            .expect("grant capability");
+        let parts = EndpointCapabilityHandleParts::decode(console_handle).expect("tagged");
+        assert_eq!(console_handle >> 56, HandleFamily::IpcSend as u64);
+        let payload = console_handle & 0x00ff_ffff_ffff_ffff;
+        let slot_generation = SlotGenerationHandle {
+            capability_slot: parts.capability_slot,
+            capability_generation: parts.capability_generation,
+        };
+        for handle in [
+            payload,
+            HandleFamily::LifecycleControl.tag(payload),
+            HandleFamily::BlockDevice.tag(payload),
+            slot_generation.encode(HandleFamily::LifecycleControl),
+            slot_generation.encode(HandleFamily::BlockDevice),
+        ] {
+            assert_eq!(EndpointCapabilityHandleParts::decode(handle), None);
+            assert_eq!(
+                table.send_console_message(USERSPACE_IPC_TEST_PID, handle, b"x"),
+                Err(IpcSendError::NotConsoleSink),
+                "handle {handle:#x}"
+            );
+            assert_eq!(
+                table.send_message(USERSPACE_IPC_TEST_PID, handle, b"x"),
+                Err(IpcSendError::InvalidCapability),
+                "handle {handle:#x}"
+            );
+        }
+        assert_eq!(
+            table.send_console_message(USERSPACE_IPC_TEST_PID, console_handle, b"x"),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn ipc_handle_fields_round_trip_below_the_tag() {
+        let parts = EndpointCapabilityHandleParts {
+            capability_slot: 0xfedc,
+            capability_generation: 0xba98,
+            endpoint_slot: (IPC_ENDPOINT_CAPACITY - 1) as u16,
+            endpoint_generation: 0xffff,
+        };
+        assert_eq!(
+            EndpointCapabilityHandleParts::decode(parts.encode()),
+            Some(parts)
         );
     }
 
