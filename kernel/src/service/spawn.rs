@@ -712,7 +712,6 @@ pub(crate) fn register_spawned_process_checked(
                 pid,
                 allocator,
                 RegistrationRollback {
-                    revokes_capabilities: true,
                     best_effort: false,
                     process_missing: "supervised launch rollback: process missing from registry",
                     address_space_missing:

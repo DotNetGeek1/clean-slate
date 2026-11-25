@@ -270,6 +270,14 @@ pub(super) fn finalize_process_exit(
     Ok(())
 }
 
+/// A process [`ProcessRegistry::insert_or_return`] refused, handed back with the reason.
+// Only Linux fork reads `process`; the M1/M2/M3 self-test kernels do not build it.
+#[allow(dead_code)]
+pub(crate) struct RejectedInsert {
+    pub(crate) process: Process,
+    pub(crate) reason: &'static str,
+}
+
 pub(crate) struct ProcessRegistry {
     processes: [Process; PROCESS_REGISTRY_CAPACITY],
     next_instance_generation: InstanceGeneration,
@@ -289,32 +297,46 @@ impl ProcessRegistry {
         self.next_instance_generation = InstanceGeneration(1);
     }
 
-    pub(super) fn insert(&mut self, mut process: Process) -> Result<(), &'static str> {
+    pub(super) fn insert(&mut self, process: Process) -> Result<(), &'static str> {
+        self.insert_or_return(process)
+            .map_err(|rejected| rejected.reason)
+    }
+
+    /// Like [`Self::insert`], but a refused `process` comes back to the caller so it can
+    /// free what the record owns (its address space) instead of dropping it (#212).
+    /// A refusal leaves the registry unchanged.
+    // The refused record travels by value either way; boxing it needs an allocator.
+    #[allow(clippy::result_large_err)]
+    pub(super) fn insert_or_return(&mut self, mut process: Process) -> Result<(), RejectedInsert> {
+        let reject = |process, reason| Err(RejectedInsert { process, reason });
         if self
             .processes
             .iter()
             .any(|entry| entry.id == process.id && entry.state != ProcessState::Empty)
         {
-            return Err("process id already existed in registry");
+            return reject(process, "process id already existed in registry");
         }
         if process.instance_generation.0 == 0 {
             process.instance_generation = self.next_instance_generation;
         }
-        if process.instance_generation.0 >= self.next_instance_generation.0 {
-            self.next_instance_generation = InstanceGeneration(
-                process
-                    .instance_generation
-                    .0
-                    .checked_add(1)
-                    .ok_or("process instance generation exhausted")?,
-            );
-        }
-        let slot = self
+        let next_instance_generation =
+            if process.instance_generation.0 >= self.next_instance_generation.0 {
+                match process.instance_generation.0.checked_add(1) {
+                    Some(next) => InstanceGeneration(next),
+                    None => return reject(process, "process instance generation exhausted"),
+                }
+            } else {
+                self.next_instance_generation
+            };
+        let Some(slot) = self
             .processes
             .iter_mut()
             .find(|entry| entry.state == ProcessState::Empty)
-            .ok_or("process registry capacity exceeded")?;
+        else {
+            return reject(process, "process registry capacity exceeded");
+        };
         *slot = process;
+        self.next_instance_generation = next_instance_generation;
         Ok(())
     }
 
@@ -675,6 +697,47 @@ mod tests {
             execution_personality: ExecutionPersonality::Native,
         });
         assert_eq!(result, Err("process instance generation exhausted"));
+    }
+
+    #[test]
+    fn a_refused_insert_hands_the_process_back_and_leaves_the_registry_unchanged() {
+        fn ready(id: u64, root: u64) -> Process {
+            Process {
+                id,
+                instance_generation: InstanceGeneration(0),
+                state: ProcessState::Ready,
+                resource_domain: ResourceDomain::with_root_frame(id, root),
+                live_threads: 1,
+                exit_status: None,
+                execution_personality: ExecutionPersonality::LinuxX86_64,
+            }
+        }
+
+        let mut registry = ProcessRegistry::new();
+        for id in 0..PROCESS_REGISTRY_CAPACITY as u64 {
+            registry
+                .insert(ready(id + 1, 0x1000 * (id + 1)))
+                .expect("fill");
+        }
+        let next_generation = registry.next_instance_generation;
+        let child = PROCESS_REGISTRY_CAPACITY as u64 + 1;
+
+        let rejected = registry
+            .insert_or_return(ready(child, 0xdead_0000))
+            .expect_err("full registry refuses");
+        assert_eq!(rejected.reason, "process registry capacity exceeded");
+        // Fork frees the child's address space through the record it gets back (#212).
+        assert_eq!(rejected.process.id, child);
+        assert_eq!(rejected.process.address_space_root(), 0xdead_0000);
+        assert!(registry.get(child).is_none());
+        assert_eq!(registry.occupied_slots(), PROCESS_REGISTRY_CAPACITY);
+        assert_eq!(registry.next_instance_generation, next_generation);
+
+        let duplicate = registry
+            .insert_or_return(ready(1, 0xbeef_0000))
+            .expect_err("duplicate id refused");
+        assert_eq!(duplicate.reason, "process id already existed in registry");
+        assert_eq!(duplicate.process.address_space_root(), 0xbeef_0000);
     }
 
     #[test]

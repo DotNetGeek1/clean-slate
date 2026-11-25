@@ -1175,7 +1175,6 @@ pub(crate) struct LaunchedLinuxProcess {
 )))]
 pub(crate) const LINUX_LAUNCH_ROLLBACK: super::domain::RegistrationRollback =
     super::domain::RegistrationRollback {
-        revokes_capabilities: true,
         best_effort: false,
         process_missing: "linux launch rollback: process missing from registry",
         address_space_missing: "linux launch rollback: process had no address space",
