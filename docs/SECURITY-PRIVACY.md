@@ -56,7 +56,7 @@ Not ambient: `socket(2)` needs the network client capability and fails with `EAC
 
 ## User-selected object access
 
-**Status: partial.** `kernel/src/capability/object.rs` is the kernel side of `SYSCALL_NR_CAP_OBJECT` and handles `OBJECT_OP_READ` and `OBJECT_OP_WRITE` for one object id. There is no user file picker, and opening a file does not hide the containing directory. Gap: [#224](https://github.com/DotNetGeek1/clean-slate/issues/224).
+**Status: partial.** `kernel/src/capability/object.rs` is the kernel side of `SYSCALL_NR_CAP_OBJECT` and handles `OBJECT_OP_READ`, `OBJECT_OP_WRITE` and `OBJECT_OP_DELETE` for one object id; a capability can be bound to one object epoch, so it cannot reach an object re-created under its id, but no grant is bound yet. There is no user file picker, and opening a file does not hide the containing directory. Gap: [#224](https://github.com/DotNetGeek1/clean-slate/issues/224).
 
 Opening a file should grant access to the selected object, not necessarily the entire containing directory.
 

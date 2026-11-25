@@ -16,8 +16,9 @@ use clean_slate_service_fixtures::{
     BlockTransportOp, BlockTransportRequest, BlockTransportResponse, BlockTransportStatus,
     ObjectServiceRequest, StorageServiceBootstrap, BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES,
     BLOCK_TRANSPORT_REQUEST_BYTES, BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION,
-    OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_SERVICE_REQUEST_BYTES,
-    OBJECT_STATUS_NOT_FOUND, OBJECT_STATUS_OK, OBJECT_STATUS_STORE_ERROR, OBJECT_STATUS_TOO_LARGE,
+    OBJECT_EPOCH_UNBOUND, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_DELETE, OBJECT_OP_READ,
+    OBJECT_OP_WRITE, OBJECT_SERVICE_REQUEST_BYTES, OBJECT_STATUS_NOT_FOUND, OBJECT_STATUS_OK,
+    OBJECT_STATUS_STALE, OBJECT_STATUS_STORE_ERROR, OBJECT_STATUS_TOO_LARGE,
     OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT, STORAGE_BLOCK_DEVICE_ID,
     STORAGE_SERVICE_BOOTSTRAP_ADDRESS as BOOTSTRAP_ADDRESS, STORAGE_SERVICE_MODE_CRASH_ARM_EARLY,
     STORAGE_SERVICE_MODE_CRASH_ARM_LATE, STORAGE_SERVICE_MODE_CRASH_RECOVERY,
@@ -26,10 +27,10 @@ use clean_slate_service_fixtures::{
     STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE, STORAGE_SERVICE_RESULT_ERROR,
     STORAGE_SERVICE_RESULT_OK, STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
 };
+use clean_slate_store::heap::FreeListHeap;
 use clean_slate_store::{ObjectStore, OpenError, Opened, StoreError};
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 const SYSCALL_NR_BLOCK_CAPABILITY: u64 = 6;
 const SYSCALL_NR_BLOCK_REQUEST: u64 = 7;
@@ -49,44 +50,36 @@ const PERSISTENCE_ALPHA_V2: [u8; 900] = [0x22; 900];
 const PERSISTENCE_ALPHA_V3: [u8; 700] = [0x33; 700];
 const CORRUPTED_MEDIA_BYTE: u8 = 0xA5;
 
-struct BumpAllocator;
+/// The service's heap: a free-list allocator, so memory freed after each request and commit
+/// is reused and a long-running service does not run out (#224).
+struct ServiceAllocator(core::cell::UnsafeCell<FreeListHeap>);
+
+// SAFETY: the storage service runs one thread.
+unsafe impl Sync for ServiceAllocator {}
 
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: ServiceAllocator =
+    ServiceAllocator(core::cell::UnsafeCell::new(FreeListHeap::empty()));
 
-static NEXT_HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-const HEAP_BYTES: usize = 64 * 1024;
+/// The image, heap included, must fit `STORAGE_SERVICE_MAX_CODE_PAGES` (64 pages) in the kernel.
+const HEAP_BYTES: usize = 128 * 1024;
 static mut HEAP: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 
-unsafe impl GlobalAlloc for BumpAllocator {
+unsafe impl GlobalAlloc for ServiceAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let align_mask = layout.align().saturating_sub(1);
-        let mut current = NEXT_HEAP_OFFSET.load(Ordering::Relaxed);
-        loop {
-            let aligned = current.saturating_add(align_mask) & !align_mask;
-            let next = match aligned.checked_add(layout.size()) {
-                Some(next) => next,
-                None => return ptr::null_mut(),
-            };
-            if next > HEAP_BYTES {
-                return ptr::null_mut();
-            }
-            match NEXT_HEAP_OFFSET.compare_exchange(
-                current,
-                next,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => {
-                    let heap = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-                    return unsafe { heap.add(aligned) };
-                }
-                Err(observed) => current = observed,
-            }
+        let heap = unsafe { &mut *self.0.get() };
+        if !heap.is_initialized() {
+            unsafe { heap.init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_BYTES) };
         }
+        heap.allocate(layout)
+            .map_or(ptr::null_mut(), |block| block.as_ptr())
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        if let Some(block) = core::ptr::NonNull::new(ptr) {
+            unsafe { (*self.0.get()).free(block) };
+        }
+    }
 }
 
 #[alloc_error_handler]
@@ -201,43 +194,68 @@ fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u6
             )?;
             continue;
         }
-        let status = match request.op {
-            OBJECT_OP_READ => match store.read_object_by_id(request.object_id) {
-                Ok(bytes) => {
-                    let payload = bytes.as_slice();
-                    if payload.len() > OBJECT_MAX_PAYLOAD_BYTES {
-                        OBJECT_STATUS_TOO_LARGE
-                    } else {
-                        object_service_complete_or_abandon(
-                            role_handle,
-                            request.request_id,
-                            OBJECT_STATUS_OK,
-                            payload,
-                        )?;
-                        continue;
-                    }
-                }
-                Err(StoreError::NotFound) => OBJECT_STATUS_NOT_FOUND,
-                Err(_) => OBJECT_STATUS_STORE_ERROR,
-            },
-            OBJECT_OP_WRITE => {
-                if len > OBJECT_MAX_PAYLOAD_BYTES {
-                    OBJECT_STATUS_TOO_LARGE
-                } else {
-                    match store.write_object(request.object_id, "object", &request.payload[..len]) {
-                        Ok(()) => match store.commit() {
-                            Ok(()) => OBJECT_STATUS_OK,
-                            Err(_) => OBJECT_STATUS_STORE_ERROR,
-                        },
-                        Err(StoreError::NotFound) => OBJECT_STATUS_NOT_FOUND,
-                        Err(_) => OBJECT_STATUS_STORE_ERROR,
-                    }
-                }
-            }
-            _ => OBJECT_STATUS_STORE_ERROR,
-        };
-        object_service_complete_or_abandon(role_handle, request.request_id, status, &[])?;
+        let (status, read) = serve(&mut store, &request, len);
+        let payload = read.as_deref().unwrap_or(&[]);
+        object_service_complete_or_abandon(role_handle, request.request_id, status, payload)?;
     }
+}
+
+/// `OBJECT_STATUS_STALE` when the request's capability is bound to an object epoch and the
+/// object it names is gone, or now has another epoch: a capability to a deleted object never
+/// reaches one re-created under its id. `None` lets the request go ahead.
+fn stale_status<D: BlockDevice>(
+    store: &ObjectStore<D>,
+    request: &ObjectServiceRequest,
+) -> Option<u64> {
+    if request.epoch == OBJECT_EPOCH_UNBOUND {
+        return None;
+    }
+    match store.epoch_of(request.object_id) {
+        Ok(epoch) if epoch == request.epoch => None,
+        _ => Some(OBJECT_STATUS_STALE),
+    }
+}
+
+/// Serves one request: its completion status and, for a read, the bytes. A write or delete
+/// is committed before it completes, so `OBJECT_STATUS_OK` means it is durable.
+fn serve<D: BlockDevice>(
+    store: &mut ObjectStore<D>,
+    request: &ObjectServiceRequest,
+    len: usize,
+) -> (u64, Option<alloc::vec::Vec<u8>>) {
+    if let Some(status) = stale_status(store, request) {
+        return (status, None);
+    }
+    let staged = match request.op {
+        OBJECT_OP_READ => {
+            return match store.read_object_by_id(request.object_id) {
+                Ok(bytes) if bytes.len() <= OBJECT_MAX_PAYLOAD_BYTES => {
+                    (OBJECT_STATUS_OK, Some(bytes))
+                }
+                Ok(_) => (OBJECT_STATUS_TOO_LARGE, None),
+                Err(StoreError::NotFound) => (OBJECT_STATUS_NOT_FOUND, None),
+                Err(_) => (OBJECT_STATUS_STORE_ERROR, None),
+            };
+        }
+        OBJECT_OP_WRITE => {
+            let name = object_name(request.object_id);
+            store.write_object(request.object_id, &name, &request.payload[..len])
+        }
+        OBJECT_OP_DELETE => store.delete_object(request.object_id),
+        _ => return (OBJECT_STATUS_STORE_ERROR, None),
+    };
+    let status = match staged.and_then(|()| store.commit()) {
+        Ok(()) => OBJECT_STATUS_OK,
+        Err(StoreError::NotFound) => OBJECT_STATUS_NOT_FOUND,
+        Err(_) => OBJECT_STATUS_STORE_ERROR,
+    };
+    (status, None)
+}
+
+/// The store name of the object the service keeps for `id`: its id in hex, so every id has
+/// its own name.
+fn object_name(id: u64) -> alloc::string::String {
+    alloc::format!("o{id:016x}")
 }
 
 fn object_service_next(role_handle: u64, buffer: &mut [u8]) -> Result<u64, u64> {
