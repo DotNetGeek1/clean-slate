@@ -11,25 +11,32 @@ use clean_slate_block::{
 };
 use clean_slate_capability::syscall_abi::SYSCALL_EINVAL;
 use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
+use clean_slate_service_fixtures::object_churn::{
+    churn_fold, churn_ids, churn_live_version, churn_name, churn_payload, CHURN_ADDED,
+    CHURN_CREATED, CHURN_DELETED, CHURN_FINGERPRINT_SEED, CHURN_FIRST_ID, CHURN_MAX_PAYLOAD,
+    CHURN_RECREATED,
+};
 use clean_slate_service_fixtures::ready_detail::StorageReadyDetail;
 use clean_slate_service_fixtures::{
     BlockTransportOp, BlockTransportRequest, BlockTransportResponse, BlockTransportStatus,
     ObjectServiceRequest, StorageServiceBootstrap, BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES,
     BLOCK_TRANSPORT_REQUEST_BYTES, BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION,
-    OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_SERVICE_REQUEST_BYTES,
-    OBJECT_STATUS_NOT_FOUND, OBJECT_STATUS_OK, OBJECT_STATUS_STORE_ERROR, OBJECT_STATUS_TOO_LARGE,
+    OBJECT_EPOCH_UNBOUND, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_DELETE, OBJECT_OP_READ,
+    OBJECT_OP_WRITE, OBJECT_SERVICE_REQUEST_BYTES, OBJECT_STATUS_NOT_FOUND, OBJECT_STATUS_OK,
+    OBJECT_STATUS_STALE, OBJECT_STATUS_STORE_ERROR, OBJECT_STATUS_TOO_LARGE,
     OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT, STORAGE_BLOCK_DEVICE_ID,
     STORAGE_SERVICE_BOOTSTRAP_ADDRESS as BOOTSTRAP_ADDRESS, STORAGE_SERVICE_MODE_CRASH_ARM_EARLY,
     STORAGE_SERVICE_MODE_CRASH_ARM_LATE, STORAGE_SERVICE_MODE_CRASH_RECOVERY,
     STORAGE_SERVICE_MODE_INTEGRATION_INITIAL, STORAGE_SERVICE_MODE_INTEGRATION_RESTART,
-    STORAGE_SERVICE_MODE_OBJECT_SERVICE, STORAGE_SERVICE_MODE_PERSISTENCE,
-    STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE, STORAGE_SERVICE_RESULT_ERROR,
-    STORAGE_SERVICE_RESULT_OK, STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
+    STORAGE_SERVICE_MODE_OBJECT_CHURN, STORAGE_SERVICE_MODE_OBJECT_SERVICE,
+    STORAGE_SERVICE_MODE_PERSISTENCE, STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE,
+    STORAGE_SERVICE_RESULT_ERROR, STORAGE_SERVICE_RESULT_OK,
+    STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
 };
+use clean_slate_store::heap::FreeListHeap;
 use clean_slate_store::{ObjectStore, OpenError, Opened, StoreError};
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 const SYSCALL_NR_BLOCK_CAPABILITY: u64 = 6;
 const SYSCALL_NR_BLOCK_REQUEST: u64 = 7;
@@ -49,44 +56,36 @@ const PERSISTENCE_ALPHA_V2: [u8; 900] = [0x22; 900];
 const PERSISTENCE_ALPHA_V3: [u8; 700] = [0x33; 700];
 const CORRUPTED_MEDIA_BYTE: u8 = 0xA5;
 
-struct BumpAllocator;
+/// The service's heap: a free-list allocator, so memory freed after each request and commit
+/// is reused and a long-running service does not run out (#224).
+struct ServiceAllocator(core::cell::UnsafeCell<FreeListHeap>);
+
+// SAFETY: the storage service runs one thread.
+unsafe impl Sync for ServiceAllocator {}
 
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: ServiceAllocator =
+    ServiceAllocator(core::cell::UnsafeCell::new(FreeListHeap::empty()));
 
-static NEXT_HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-const HEAP_BYTES: usize = 64 * 1024;
+/// The image, heap included, must fit `STORAGE_SERVICE_MAX_CODE_PAGES` (64 pages) in the kernel.
+const HEAP_BYTES: usize = 128 * 1024;
 static mut HEAP: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 
-unsafe impl GlobalAlloc for BumpAllocator {
+unsafe impl GlobalAlloc for ServiceAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let align_mask = layout.align().saturating_sub(1);
-        let mut current = NEXT_HEAP_OFFSET.load(Ordering::Relaxed);
-        loop {
-            let aligned = current.saturating_add(align_mask) & !align_mask;
-            let next = match aligned.checked_add(layout.size()) {
-                Some(next) => next,
-                None => return ptr::null_mut(),
-            };
-            if next > HEAP_BYTES {
-                return ptr::null_mut();
-            }
-            match NEXT_HEAP_OFFSET.compare_exchange(
-                current,
-                next,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => {
-                    let heap = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-                    return unsafe { heap.add(aligned) };
-                }
-                Err(observed) => current = observed,
-            }
+        let heap = unsafe { &mut *self.0.get() };
+        if !heap.is_initialized() {
+            unsafe { heap.init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_BYTES) };
         }
+        heap.allocate(layout)
+            .map_or(ptr::null_mut(), |block| block.as_ptr())
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        if let Some(block) = core::ptr::NonNull::new(ptr) {
+            unsafe { (*self.0.get()).free(block) };
+        }
+    }
 }
 
 #[alloc_error_handler]
@@ -155,6 +154,7 @@ fn run(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> {
         STORAGE_SERVICE_MODE_CRASH_ARM_LATE => run_crash_arm(bootstrap, 3),
         STORAGE_SERVICE_MODE_CRASH_RECOVERY => run_crash_recovery(bootstrap),
         STORAGE_SERVICE_MODE_OBJECT_SERVICE => run_object_service(bootstrap),
+        STORAGE_SERVICE_MODE_OBJECT_CHURN => run_object_churn(bootstrap),
         _ => Err(0),
     }
 }
@@ -201,43 +201,68 @@ fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u6
             )?;
             continue;
         }
-        let status = match request.op {
-            OBJECT_OP_READ => match store.read_object_by_id(request.object_id) {
-                Ok(bytes) => {
-                    let payload = bytes.as_slice();
-                    if payload.len() > OBJECT_MAX_PAYLOAD_BYTES {
-                        OBJECT_STATUS_TOO_LARGE
-                    } else {
-                        object_service_complete_or_abandon(
-                            role_handle,
-                            request.request_id,
-                            OBJECT_STATUS_OK,
-                            payload,
-                        )?;
-                        continue;
-                    }
-                }
-                Err(StoreError::NotFound) => OBJECT_STATUS_NOT_FOUND,
-                Err(_) => OBJECT_STATUS_STORE_ERROR,
-            },
-            OBJECT_OP_WRITE => {
-                if len > OBJECT_MAX_PAYLOAD_BYTES {
-                    OBJECT_STATUS_TOO_LARGE
-                } else {
-                    match store.write_object(request.object_id, "object", &request.payload[..len]) {
-                        Ok(()) => match store.commit() {
-                            Ok(()) => OBJECT_STATUS_OK,
-                            Err(_) => OBJECT_STATUS_STORE_ERROR,
-                        },
-                        Err(StoreError::NotFound) => OBJECT_STATUS_NOT_FOUND,
-                        Err(_) => OBJECT_STATUS_STORE_ERROR,
-                    }
-                }
-            }
-            _ => OBJECT_STATUS_STORE_ERROR,
-        };
-        object_service_complete_or_abandon(role_handle, request.request_id, status, &[])?;
+        let (status, read) = serve(&mut store, &request, len);
+        let payload = read.as_deref().unwrap_or(&[]);
+        object_service_complete_or_abandon(role_handle, request.request_id, status, payload)?;
     }
+}
+
+/// `OBJECT_STATUS_STALE` when the request's capability is bound to an object epoch and the
+/// object it names is gone, or now has another epoch: a capability to a deleted object never
+/// reaches one re-created under its id. `None` lets the request go ahead.
+fn stale_status<D: BlockDevice>(
+    store: &ObjectStore<D>,
+    request: &ObjectServiceRequest,
+) -> Option<u64> {
+    if request.epoch == OBJECT_EPOCH_UNBOUND {
+        return None;
+    }
+    match store.epoch_of(request.object_id) {
+        Ok(epoch) if epoch == request.epoch => None,
+        _ => Some(OBJECT_STATUS_STALE),
+    }
+}
+
+/// Serves one request: its completion status and, for a read, the bytes. A write or delete
+/// is committed before it completes, so `OBJECT_STATUS_OK` means it is durable.
+fn serve<D: BlockDevice>(
+    store: &mut ObjectStore<D>,
+    request: &ObjectServiceRequest,
+    len: usize,
+) -> (u64, Option<alloc::vec::Vec<u8>>) {
+    if let Some(status) = stale_status(store, request) {
+        return (status, None);
+    }
+    let staged = match request.op {
+        OBJECT_OP_READ => {
+            return match store.read_object_by_id(request.object_id) {
+                Ok(bytes) if bytes.len() <= OBJECT_MAX_PAYLOAD_BYTES => {
+                    (OBJECT_STATUS_OK, Some(bytes))
+                }
+                Ok(_) => (OBJECT_STATUS_TOO_LARGE, None),
+                Err(StoreError::NotFound) => (OBJECT_STATUS_NOT_FOUND, None),
+                Err(_) => (OBJECT_STATUS_STORE_ERROR, None),
+            };
+        }
+        OBJECT_OP_WRITE => {
+            let name = object_name(request.object_id);
+            store.write_object(request.object_id, &name, &request.payload[..len])
+        }
+        OBJECT_OP_DELETE => store.delete_object(request.object_id),
+        _ => return (OBJECT_STATUS_STORE_ERROR, None),
+    };
+    let status = match staged.and_then(|()| store.commit()) {
+        Ok(()) => OBJECT_STATUS_OK,
+        Err(StoreError::NotFound) => OBJECT_STATUS_NOT_FOUND,
+        Err(_) => OBJECT_STATUS_STORE_ERROR,
+    };
+    (status, None)
+}
+
+/// The store name of the object the service keeps for `id`: its id in hex, so every id has
+/// its own name.
+fn object_name(id: u64) -> alloc::string::String {
+    alloc::format!("o{id:016x}")
 }
 
 fn object_service_next(role_handle: u64, buffer: &mut [u8]) -> Result<u64, u64> {
@@ -463,6 +488,126 @@ fn run_persistence(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> 
             Ok(STORAGE_SERVICE_RESULT_OK)
         }
     }
+}
+
+/// The object-churn script (`clean_slate_service_fixtures::object_churn`, #224 stage F).
+///
+/// On a blank disk: create, delete, re-create and add objects over three commits, then
+/// remount and record what the disk holds. On the second boot: record what the mount holds,
+/// delete everything, commit, remount and record that nothing is left.
+///
+/// Recorded in the bootstrap page: `mounted_alpha_len`/`_checksum` and `alpha_len`/
+/// `_checksum` are the live count and fingerprint at mount and after the last remount,
+/// `beta_len` is how many deleted-only ids are absent and `beta_checksum` 1 when every
+/// re-created object's epoch is above every surviving first-commit object's, both checked
+/// at the second boot's mount or the first boot's remount. `pending_len` is the object limit.
+fn run_object_churn(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> {
+    let (mut store, opened) = open_store(bootstrap)?;
+    bootstrap.mounted_generation = store.committed_generation();
+    bootstrap.pending_len = store.max_objects() as u64;
+    let mut buffer = [0u8; CHURN_MAX_PAYLOAD];
+    match opened {
+        Opened::Formatted => {
+            for id in CHURN_FIRST_ID..CHURN_FIRST_ID + CHURN_CREATED {
+                churn_write(&mut store, id, 1, &mut buffer)?;
+            }
+            store.commit().map_err(store_error_code)?;
+            for id in CHURN_FIRST_ID..CHURN_FIRST_ID + CHURN_DELETED {
+                store.delete_object(id).map_err(store_error_code)?;
+            }
+            store.commit().map_err(store_error_code)?;
+            for id in CHURN_FIRST_ID..CHURN_FIRST_ID + CHURN_RECREATED {
+                churn_write(&mut store, id, 2, &mut buffer)?;
+            }
+            let added = CHURN_FIRST_ID + CHURN_CREATED;
+            for id in added..added + CHURN_ADDED {
+                churn_write(&mut store, id, 1, &mut buffer)?;
+            }
+            store.commit().map_err(store_error_code)?;
+            bootstrap.committed_generation = store.committed_generation();
+            let remounted = ObjectStore::mount(store.into_inner()).map_err(store_error_code)?;
+            bootstrap.remounted_generation = remounted.committed_generation();
+            let (live, fingerprint) = churn_contents(&remounted);
+            bootstrap.alpha_len = live;
+            bootstrap.alpha_checksum = fingerprint;
+            record_churn_checks(&remounted, bootstrap);
+            bootstrap.capability_handle = remounted.into_inner().capability_handle();
+        }
+        Opened::Mounted => {
+            let (live, fingerprint) = churn_contents(&store);
+            bootstrap.mounted_alpha_len = live;
+            bootstrap.mounted_alpha_checksum = fingerprint;
+            record_churn_checks(&store, bootstrap);
+            let ids = store
+                .objects()
+                .iter()
+                .map(|object| object.id())
+                .collect::<alloc::vec::Vec<_>>();
+            for id in ids {
+                store.delete_object(id).map_err(store_error_code)?;
+            }
+            store.commit().map_err(store_error_code)?;
+            bootstrap.committed_generation = store.committed_generation();
+            let remounted = ObjectStore::mount(store.into_inner()).map_err(store_error_code)?;
+            bootstrap.remounted_generation = remounted.committed_generation();
+            let (live, fingerprint) = churn_contents(&remounted);
+            bootstrap.alpha_len = live;
+            bootstrap.alpha_checksum = fingerprint;
+        }
+    }
+    Ok(STORAGE_SERVICE_RESULT_OK)
+}
+
+fn churn_write<D: BlockDevice>(
+    store: &mut ObjectStore<D>,
+    id: u64,
+    version: u8,
+    buffer: &mut [u8; CHURN_MAX_PAYLOAD],
+) -> Result<(), u64> {
+    let len = churn_payload(id, version, buffer);
+    let name = churn_name(id);
+    let name = core::str::from_utf8(&name).map_err(|_| 0u64)?;
+    store
+        .write_object(id, name, &buffer[..len])
+        .map_err(store_error_code)
+}
+
+/// Live object count and fingerprint, folding objects in ascending id order.
+fn churn_contents<D: BlockDevice>(store: &ObjectStore<D>) -> (u64, u64) {
+    let mut ids = store
+        .objects()
+        .iter()
+        .map(|object| object.id())
+        .collect::<alloc::vec::Vec<_>>();
+    ids.sort_unstable();
+    let fingerprint = ids.iter().fold(CHURN_FINGERPRINT_SEED, |fingerprint, &id| {
+        let bytes = store.read_object_by_id(id).unwrap_or_default();
+        churn_fold(fingerprint, id, &bytes)
+    });
+    (ids.len() as u64, fingerprint)
+}
+
+fn record_churn_checks<D: BlockDevice>(
+    store: &ObjectStore<D>,
+    bootstrap: &mut StorageServiceBootstrap,
+) {
+    bootstrap.beta_len = churn_ids()
+        .filter(|&id| churn_live_version(id).is_none() && store.epoch_of(id).is_err())
+        .count() as u64;
+    let epochs = |version: u8, first_commit_only: bool| {
+        churn_ids()
+            .filter(move |&id| {
+                churn_live_version(id) == Some(version)
+                    && (!first_commit_only || id < CHURN_FIRST_ID + CHURN_CREATED)
+            })
+            .filter_map(|id| store.epoch_of(id).ok())
+    };
+    let oldest_recreated = epochs(2, false).min();
+    let newest_original = epochs(1, true).max();
+    bootstrap.beta_checksum = match (oldest_recreated, newest_original) {
+        (Some(recreated), Some(original)) => u64::from(recreated > original),
+        _ => 0,
+    };
 }
 
 /// Opens the data disk's store. A refused disk is left untouched and its reason recorded in
@@ -804,6 +949,7 @@ fn store_error_code(error: StoreError) -> u64 {
         StoreError::GenerationExhausted => 18,
         StoreError::Incompatible(_) => 19,
         StoreError::Corrupt(_) => 20,
+        StoreError::EpochExhausted => 22,
     }
 }
 

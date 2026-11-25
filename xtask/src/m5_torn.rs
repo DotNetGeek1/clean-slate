@@ -14,7 +14,7 @@ const BLOCK_BYTES: usize = 512;
 const SLOT_ONE_OFFSET: usize = BLOCK_BYTES;
 const GENERATION_OFFSET: usize = 12;
 /// Must match `SUPERBLOCK_TEAR_OFFSET` in `kernel/src/selftest/m5_storage.rs`.
-pub const SUPERBLOCK_TEAR_OFFSET: usize = 48 + 64;
+pub const SUPERBLOCK_TEAR_OFFSET: usize = 56;
 const ALPHA_ID: u64 = 1;
 const BETA_ID: u64 = 2;
 const ALPHA_V2: [u8; 900] = [0x22; 900];
@@ -26,8 +26,8 @@ pub enum TornWrite {
     /// Generation 3's superblock in slot 1 keeps only its first `SUPERBLOCK_TEAR_OFFSET`
     /// bytes; the rest of the sector still holds generation 1's superblock.
     SuperblockSuffix,
-    /// Only the first of alpha's two generation-3 payload blocks landed; beta's payload
-    /// and the generation-3 superblock landed in full.
+    /// Only the first of alpha's two generation-3 payload blocks landed; beta's payload,
+    /// the object table and the generation-3 superblock landed in full.
     PayloadPrefix,
 }
 

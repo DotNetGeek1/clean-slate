@@ -75,7 +75,7 @@ fn record_commit(generation: u64) -> Vec<BlockOp> {
 }
 
 #[test]
-fn commit_is_payload_then_flush_then_superblock_then_flush() {
+fn commit_is_payload_and_table_then_flush_then_superblock_then_flush() {
     for generation in 1..=2 {
         let ops = record_commit(generation);
         let superblock_slot = generation % SUPERBLOCK_SLOTS;
@@ -93,12 +93,16 @@ fn commit_is_payload_then_flush_then_superblock_then_flush() {
             ],
             "generation {generation}: {ops:?}"
         );
-        assert_eq!(payload.len(), 4, "alpha's 3 blocks and beta's 1: {ops:?}");
+        assert_eq!(
+            payload.len(),
+            5,
+            "alpha's 3 blocks, beta's 1 and the object table's 1: {ops:?}"
+        );
         assert!(
             payload
                 .iter()
                 .all(|op| matches!(op, BlockOp::Write { lba, .. } if *lba >= SUPERBLOCK_SLOTS)),
-            "payload phase must hold only payload writes: {ops:?}"
+            "payload phase must hold only payload and table writes: {ops:?}"
         );
     }
 }

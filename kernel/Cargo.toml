@@ -41,6 +41,8 @@ m7-tls-self-test = [
 m7-tls-fail-closed-self-test = ["m7-tls-self-test"]
 m5-storage-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
 m5-persistence-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
+# The object-churn script (#224 stage F): the persistence boot with another service mode.
+m5-object-churn-self-test = ["m5-persistence-self-test"]
 m5-crash-early-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
 m5-crash-late-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
 m5-crash-recovery-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]

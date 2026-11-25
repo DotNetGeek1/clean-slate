@@ -944,6 +944,22 @@ const M5_PERSISTENCE_WRITE_MARKERS: [&str; 7] = [
     "[STOR] commit generation=1",
     "[TEST] persistence phase=write PASS",
 ];
+/// First object-churn boot (#224 stage F): three commits on a blank disk leave 25 objects.
+/// The kernel prints these only after checking the service's report against the script.
+const M5_OBJECT_CHURN_WRITE_MARKERS: [&str; 4] = [
+    "[BLK ] virtio-block ready blocks=",
+    "[STOR] churn created=20 deleted=10 recreated=5 added=10 generation=3 live=25 limit=",
+    "[STOR] churn absent=5 recreated-epochs=newer",
+    "[TEST] object churn phase=write PASS",
+];
+/// Second object-churn boot: the 25 objects survived the reboot; deleting them all leaves none.
+const M5_OBJECT_CHURN_READ_MARKERS: [&str; 5] = [
+    "[BLK ] virtio-block ready blocks=",
+    "[STOR] churn recovered generation=3 live=25 fingerprint=",
+    "[STOR] churn absent=5 recreated-epochs=newer",
+    "[STOR] churn deleted all generation=4 live=0",
+    "[TEST] object churn phase=read PASS",
+];
 const M5_PERSISTENCE_READ_MARKERS: [&str; 9] = [
     "[BLK ] flush complete",
     "[STOR] recovered generation=1",
@@ -980,8 +996,8 @@ const M5_PRE_CRASH_REPORT: [MarkerStep; 4] = [
         fields: &[("bytes=", "700"), ("checksum=", "00008b74")],
     },
 ];
-/// The generation-3 commit flushes its payload before the superblock write (#224); a
-/// boot stopped at write 3 must have logged that flush after arming.
+/// The generation-3 commit flushes its payload and object table before the superblock
+/// write (#224); a boot stopped at write 4 must have logged that flush after arming.
 const M5_PAYLOAD_FLUSH: MarkerStep = MarkerStep::Ordered("[BLK ] flush complete");
 const M5_CRASH_ARM_EARLY_SPEC: &[MarkerStep] = &[
     MarkerStep::Line {
@@ -997,12 +1013,13 @@ const M5_CRASH_ARM_EARLY_SPEC: &[MarkerStep] = &[
         fields: &[("after-write=", "1")],
     },
 ];
-/// Superblock slots are LBA 0 and 1; generation 3 goes to slot 1, so the third write
-/// landing there is what makes `new-commit` the required late recovery outcome.
+/// Superblock slots are LBA 0 and 1; generation 3 goes to slot 1, so the fourth write
+/// (after alpha's payload, beta's payload and the object table) landing there is what
+/// makes `new-commit` the required late recovery outcome.
 const M5_CRASH_ARM_LATE_SPEC: &[MarkerStep] = &[
     MarkerStep::Line {
         prefix: "[CRSH] armed trigger=",
-        fields: &[("after-write=", "3")],
+        fields: &[("after-write=", "4")],
     },
     M5_PAYLOAD_FLUSH,
     M5_PRE_CRASH_REPORT[0],
@@ -1011,7 +1028,7 @@ const M5_CRASH_ARM_LATE_SPEC: &[MarkerStep] = &[
     M5_PRE_CRASH_REPORT[3],
     MarkerStep::Line {
         prefix: "[CRSH] inject after-write=",
-        fields: &[("after-write=", "3"), ("lba=", "1")],
+        fields: &[("after-write=", "4"), ("lba=", "1")],
     },
 ];
 /// The late crash arm with the superblock write torn by the kernel: the device gets the
@@ -1020,7 +1037,7 @@ const M5_CRASH_ARM_LATE_SPEC: &[MarkerStep] = &[
 const M5_CRASH_TORN_SUPERBLOCK_SPEC: &[MarkerStep] = &[
     MarkerStep::Line {
         prefix: "[CRSH] armed trigger=",
-        fields: &[("after-write=", "3"), ("tear=", "superblock-suffix")],
+        fields: &[("after-write=", "4"), ("tear=", "superblock-suffix")],
     },
     M5_PAYLOAD_FLUSH,
     M5_PRE_CRASH_REPORT[0],
@@ -1030,23 +1047,23 @@ const M5_CRASH_TORN_SUPERBLOCK_SPEC: &[MarkerStep] = &[
     MarkerStep::Line {
         prefix: "[CRSH] torn superblock write=",
         fields: &[
-            ("write=", "3"),
+            ("write=", "4"),
             ("lba=", "1"),
-            ("new-bytes=", "112"),
-            ("stale-bytes=", "400"),
+            ("new-bytes=", "56"),
+            ("stale-bytes=", "456"),
         ],
     },
     MarkerStep::Line {
         prefix: "[CRSH] inject after-write=",
-        fields: &[("after-write=", "3"), ("lba=", "1")],
+        fields: &[("after-write=", "4"), ("lba=", "1")],
     },
 ];
 /// The late crash arm with alpha's two-block payload write torn to its first block;
-/// beta's payload and the superblock then complete before the stop.
+/// beta's payload, the object table and the superblock then complete before the stop.
 const M5_CRASH_TORN_PAYLOAD_SPEC: &[MarkerStep] = &[
     MarkerStep::Line {
         prefix: "[CRSH] armed trigger=",
-        fields: &[("after-write=", "3"), ("tear=", "payload-prefix")],
+        fields: &[("after-write=", "4"), ("tear=", "payload-prefix")],
     },
     MarkerStep::Line {
         prefix: "[CRSH] torn payload write=",
@@ -1059,7 +1076,7 @@ const M5_CRASH_TORN_PAYLOAD_SPEC: &[MarkerStep] = &[
     M5_PRE_CRASH_REPORT[3],
     MarkerStep::Line {
         prefix: "[CRSH] inject after-write=",
-        fields: &[("after-write=", "3"), ("lba=", "1")],
+        fields: &[("after-write=", "4"), ("lba=", "1")],
     },
 ];
 /// Read-back evidence for `beta`, which no crash phase rewrites.
@@ -1094,8 +1111,8 @@ const M5_CRASH_RECOVERY_EARLY_SPEC: &[MarkerStep] = &[
     },
     MarkerStep::Ordered("[TEST] crash recovery PASS"),
 ];
-/// The third write of the generation-3 commit is its superblock (alpha data, beta data,
-/// flush, superblock, flush). The device completed it before the crash, so recovery must
+/// The fourth write of the generation-3 commit is its superblock (alpha data, beta data,
+/// object table, flush, superblock, flush). The device completed it before the crash, so recovery must
 /// mount the new commit even though the final flush never ran.
 const M5_CRASH_RECOVERY_LATE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[BLK ] virtio-block ready blocks="),
@@ -1793,7 +1810,7 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
     let run_result = (|| -> Result<(), XtaskError> {
         prepare_m5_data_disk_image(options.reuse_disk)?;
         let config = m5_storage_vm_config();
-        println!("[M5.P] phase 1/2 boot");
+        println!("[M5.P] phase 1/4 boot");
         run_vm_inner_with_config(
             false,
             false,
@@ -1809,7 +1826,7 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
             reason: error.to_string(),
         })?;
         println!("[TEST] rebooting with persistent disk");
-        println!("[M5.P] phase 2/2 boot");
+        println!("[M5.P] phase 2/4 boot");
         run_vm_inner_with_config(
             false,
             false,
@@ -1818,10 +1835,44 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
                 MarkerSet::Ordered(&M5_PERSISTENCE_READ_MARKERS),
                 M5_PERSISTENCE_BOOT_TIMEOUT,
             )),
-            config,
+            config.clone(),
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
             phase: "persistence boot 2".to_owned(),
+            reason: error.to_string(),
+        })?;
+        // Object churn (#224 stage F) on a blank disk: create, delete and re-create objects
+        // past the old seven-object limit, then reboot and check them.
+        prepare_m5_data_disk_image(false)?;
+        println!("[M5.P] phase 3/4 object churn boot");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m5-object-churn-self-test"],
+            Some((
+                MarkerSet::Ordered(&M5_OBJECT_CHURN_WRITE_MARKERS),
+                M5_PERSISTENCE_BOOT_TIMEOUT,
+            )),
+            config.clone(),
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "object churn boot 1".to_owned(),
+            reason: error.to_string(),
+        })?;
+        println!("[TEST] rebooting with persistent disk");
+        println!("[M5.P] phase 4/4 object churn boot");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m5-object-churn-self-test"],
+            Some((
+                MarkerSet::Ordered(&M5_OBJECT_CHURN_READ_MARKERS),
+                M5_PERSISTENCE_BOOT_TIMEOUT,
+            )),
+            config,
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "object churn boot 2".to_owned(),
             reason: error.to_string(),
         })?;
         println!("[M5.P] PASS");

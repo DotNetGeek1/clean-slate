@@ -9,8 +9,8 @@ use clean_slate_capability::{
 };
 use clean_slate_native_abi::status::STATUS_ETIMEDOUT;
 use clean_slate_service_fixtures::{
-    ObjectServiceRequest, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_READ, OBJECT_OP_WRITE,
-    OBJECT_POLL_NO_DEADLINE, OBJECT_REQUEST_SLOTS, OBJECT_SERVICE_REQUEST_BYTES,
+    ObjectServiceRequest, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_DELETE, OBJECT_OP_READ,
+    OBJECT_OP_WRITE, OBJECT_POLL_NO_DEADLINE, OBJECT_REQUEST_SLOTS, OBJECT_SERVICE_REQUEST_BYTES,
     OBJECT_SERVICE_ROLE_ID, OBJECT_STATUS_PENDING, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT,
     OBJECT_SUBOP_POLL, OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT,
     OBJECT_SUBOP_SUBMIT,
@@ -47,6 +47,8 @@ struct ObjectRequestSlot {
     request_id: u64,
     op: u64,
     object_id: u64,
+    /// The authorizing capability's object epoch, passed to the storage service.
+    epoch: u64,
     len: usize,
     payload: [u8; OBJECT_MAX_PAYLOAD_BYTES],
     status: u64,
@@ -60,6 +62,7 @@ impl ObjectRequestSlot {
             request_id: 0,
             op: 0,
             object_id: 0,
+            epoch: 0,
             len: 0,
             payload: [0; OBJECT_MAX_PAYLOAD_BYTES],
             status: 0,
@@ -91,6 +94,7 @@ impl ObjectRequestQueue {
         client: HolderId,
         op: u64,
         object_id: u64,
+        epoch: u64,
         payload: &[u8],
     ) -> Result<u64, SyscallQueueError> {
         let slot_index = self
@@ -106,6 +110,7 @@ impl ObjectRequestQueue {
         slot.request_id = request_id;
         slot.op = op;
         slot.object_id = object_id;
+        slot.epoch = epoch;
         slot.len = len;
         slot.payload[..len].copy_from_slice(payload);
         self.slots[slot_index] = slot;
@@ -160,6 +165,7 @@ impl ObjectRequestQueue {
         let slot = &self.slots[index];
         let mut request =
             ObjectServiceRequest::new(slot.request_id, slot.op, slot.object_id, slot.len as u64);
+        request.epoch = slot.epoch;
         request.payload[..slot.len].copy_from_slice(&slot.payload[..slot.len]);
         Some(request)
     }
@@ -228,6 +234,15 @@ pub(crate) fn object_request_wait_key(request_id: u64) -> WaitKey {
     WaitKey(0x46_u64 << 56 | (request_id & 0x00FF_FFFF_FFFF_FFFF))
 }
 
+/// The right an object op needs. Deleting an object needs `WRITE`, like changing its bytes.
+fn required_rights(op: u64) -> Option<Rights> {
+    match op {
+        OBJECT_OP_READ => Some(Rights::READ),
+        OBJECT_OP_WRITE | OBJECT_OP_DELETE => Some(Rights::WRITE),
+        _ => None,
+    }
+}
+
 /// Wait key the storage service blocks on in `OBJECT_SUBOP_SERVICE_NEXT` while no
 /// request is `Pending`; woken by every submit and by a service-exit requeue.
 const OBJECT_SERVICE_WORK_KEY: WaitKey = WaitKey(0x47_u64 << 56);
@@ -240,17 +255,13 @@ pub(crate) fn authorize_holder_object_op(
     object_id: u64,
     op: u64,
 ) -> Result<(), SyscallQueueError> {
-    let required = match op {
-        OBJECT_OP_READ => Rights::READ,
-        OBJECT_OP_WRITE => Rights::WRITE,
-        _ => return Err(SyscallQueueError::InvalidRequest),
-    };
+    let required = required_rights(op).ok_or(SyscallQueueError::InvalidRequest)?;
     if super::holder_has_resource_rights(holder, ResourceRef::object(object_id), required) {
         Ok(())
     } else {
         log_deny(holder, object_id, op, CapabilityError::UnauthorizedHolder);
         #[cfg(feature = "m9-userspace-self-test")]
-        crate::selftest::m9_userspace::observe_object_denial(op == OBJECT_OP_WRITE);
+        crate::selftest::m9_userspace::observe_object_denial(op != OBJECT_OP_READ);
         Err(SyscallQueueError::UnauthorizedHolder)
     }
 }
@@ -263,7 +274,14 @@ pub(crate) fn object_queue_submit(
     payload: &[u8],
 ) -> Result<u64, SyscallQueueError> {
     authorize_holder_object_op(client, object_id, op)?;
-    queue_mut().submit(client, op, object_id, payload)
+    // Holder grants to `/tmp` objects name the object id only, not an epoch.
+    queue_mut().submit(
+        client,
+        op,
+        object_id,
+        clean_slate_service_fixtures::OBJECT_EPOCH_UNBOUND,
+        payload,
+    )
 }
 
 /// Object request slots not yet released by their client.
@@ -378,6 +396,7 @@ fn op_name(op: u64) -> &'static str {
     match op {
         OBJECT_OP_READ => "read",
         OBJECT_OP_WRITE => "write",
+        OBJECT_OP_DELETE => "delete",
         _ => "unknown",
     }
 }
@@ -481,19 +500,17 @@ pub(crate) fn register_pending_bootstrap_grant(
     Ok(())
 }
 
-fn authorize_object_op(raw_handle: u64, object_id: u64, op: u64) -> Result<(), CapabilityError> {
+/// Authorizes `op` on `object_id` and returns the object epoch the capability is bound to
+/// (its resource's `instance_generation`; 0 for an unbound capability).
+fn authorize_object_op(raw_handle: u64, object_id: u64, op: u64) -> Result<u64, CapabilityError> {
     let holder = current_holder().map_err(|_| CapabilityError::UnauthorizedHolder)?;
-    let required = match op {
-        OBJECT_OP_READ => Rights::READ,
-        OBJECT_OP_WRITE => Rights::WRITE,
-        _ => return Err(CapabilityError::InvalidHandle),
-    };
+    let required = required_rights(op).ok_or(CapabilityError::InvalidHandle)?;
     let record = authorize_current_class(raw_handle, ResourceClass::PersistentObject, required)?;
     if record.resource.id != object_id {
         return Err(CapabilityError::WrongResource);
     }
     log_allowed(holder, object_id, op);
-    Ok(())
+    Ok(record.resource.instance_generation)
 }
 
 fn authorize_service_role(raw_handle: u64) -> Result<(), CapabilityError> {
@@ -556,17 +573,20 @@ fn handle_submit(frame: &mut SyscallContext) {
             return;
         }
     };
-    if let Err(error) = authorize_object_op(raw_handle, object_id, op) {
-        log_deny(holder, object_id, op, error);
-        frame.rax = error.syscall_status();
-        return;
-    }
+    let epoch = match authorize_object_op(raw_handle, object_id, op) {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            log_deny(holder, object_id, op, error);
+            frame.rax = error.syscall_status();
+            return;
+        }
+    };
     let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
     if len > 0 && copy_from_user(&mut payload[..len], frame.r8).is_err() {
         frame.rax = SYSCALL_EINVAL;
         return;
     }
-    match queue_mut().submit(holder, op, object_id, &payload[..len]) {
+    match queue_mut().submit(holder, op, object_id, epoch, &payload[..len]) {
         Ok(request_id) => frame.rax = request_id,
         Err(error) => frame.rax = error.syscall_status(),
     }
@@ -790,11 +810,7 @@ mod tests {
         object_id: u64,
         op: u64,
     ) -> Result<(), CapabilityError> {
-        let required = match op {
-            OBJECT_OP_READ => Rights::READ,
-            OBJECT_OP_WRITE => Rights::WRITE,
-            _ => return Err(CapabilityError::InvalidHandle),
-        };
+        let required = required_rights(op).ok_or(CapabilityError::InvalidHandle)?;
         let decoded = CapabilityHandle::decode(handle)?;
         let record =
             table.authorize_class(holder, decoded, ResourceClass::PersistentObject, required)?;
@@ -802,6 +818,38 @@ mod tests {
             return Err(CapabilityError::WrongResource);
         }
         Ok(())
+    }
+
+    #[test]
+    fn delete_needs_the_write_right() {
+        let mut table = CapabilityTable::<8>::new();
+        let client = HolderId(3);
+        let read_only = grant_read(&mut table, client, 7);
+        assert_eq!(
+            authorize_submit(&table, client, read_only, 7, OBJECT_OP_DELETE),
+            Err(CapabilityError::MissingRight)
+        );
+        let read_write = grant_write_read(&mut table, client, 8);
+        assert!(authorize_submit(&table, client, read_write, 8, OBJECT_OP_DELETE).is_ok());
+        assert_eq!(required_rights(OBJECT_OP_DELETE), Some(Rights::WRITE));
+        assert_eq!(required_rights(99), None);
+    }
+
+    #[test]
+    fn the_service_sees_the_capabilitys_epoch() {
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(3);
+        queue
+            .submit(client, OBJECT_OP_DELETE, 7, 0x42, &[])
+            .unwrap();
+        queue.submit(client, OBJECT_OP_READ, 8, 0, &[]).unwrap();
+        let first = queue.service_next().unwrap();
+        assert_eq!(
+            (first.op, first.object_id, first.epoch),
+            (OBJECT_OP_DELETE, 7, 0x42)
+        );
+        let second = queue.service_next().unwrap();
+        assert_eq!((second.object_id, second.epoch), (8, 0));
     }
 
     #[test]
@@ -813,7 +861,7 @@ mod tests {
         let mut queue = ObjectRequestQueue::new();
         assert_eq!(
             queue
-                .submit(client, OBJECT_OP_WRITE, 7, b"alpha-v1")
+                .submit(client, OBJECT_OP_WRITE, 7, 0, b"alpha-v1")
                 .unwrap(),
             1
         );
@@ -837,7 +885,7 @@ mod tests {
         let mut queue = ObjectRequestQueue::new();
         let owner = HolderId(1);
         let other = HolderId(2);
-        let request_id = queue.submit(owner, OBJECT_OP_READ, 7, &[]).unwrap();
+        let request_id = queue.submit(owner, OBJECT_OP_READ, 7, 0, &[]).unwrap();
         let mut out = [0u8; 8];
         assert_eq!(
             queue.poll(other, request_id, &mut out),
@@ -875,10 +923,10 @@ mod tests {
         let mut queue = ObjectRequestQueue::new();
         let client = HolderId(7);
         for _ in 0..OBJECT_REQUEST_SLOTS {
-            queue.submit(client, OBJECT_OP_READ, 1, &[]).unwrap();
+            queue.submit(client, OBJECT_OP_READ, 1, 0, &[]).unwrap();
         }
         assert_eq!(
-            queue.submit(client, OBJECT_OP_READ, 1, &[]),
+            queue.submit(client, OBJECT_OP_READ, 1, 0, &[]),
             Err(SyscallQueueError::QueueFull)
         );
         assert_eq!(
@@ -972,7 +1020,7 @@ mod tests {
         ];
         let mut request_ids = [0u64; OBJECT_REQUEST_SLOTS];
         for index in 0..OBJECT_REQUEST_SLOTS {
-            request_ids[index] = queue.submit(client, OBJECT_OP_READ, 1, &[]).unwrap();
+            request_ids[index] = queue.submit(client, OBJECT_OP_READ, 1, 0, &[]).unwrap();
             let status = error_statuses[index % error_statuses.len()];
             assert_eq!(
                 complete_next_with_status(&mut queue, status),
@@ -980,7 +1028,7 @@ mod tests {
             );
         }
         assert_eq!(
-            queue.submit(client, OBJECT_OP_READ, 1, &[]),
+            queue.submit(client, OBJECT_OP_READ, 1, 0, &[]),
             Err(SyscallQueueError::QueueFull)
         );
         let mut out = [0u8; 8];
@@ -992,7 +1040,7 @@ mod tests {
             );
         }
         for _ in 0..OBJECT_REQUEST_SLOTS {
-            queue.submit(client, OBJECT_OP_READ, 2, &[]).unwrap();
+            queue.submit(client, OBJECT_OP_READ, 2, 0, &[]).unwrap();
         }
     }
 
@@ -1000,7 +1048,7 @@ mod tests {
     fn poll_after_consumed_error_completion_returns_invalid_request() {
         let mut queue = ObjectRequestQueue::new();
         let client = HolderId(31);
-        let request_id = queue.submit(client, OBJECT_OP_READ, 1, &[]).unwrap();
+        let request_id = queue.submit(client, OBJECT_OP_READ, 1, 0, &[]).unwrap();
         complete_next_with_status(&mut queue, OBJECT_STATUS_NOT_FOUND);
         let mut out = [0u8; 8];
         assert_eq!(
@@ -1018,7 +1066,7 @@ mod tests {
         let mut queue = ObjectRequestQueue::new();
         let client = HolderId(20);
         for _ in 0..OBJECT_REQUEST_SLOTS {
-            queue.submit(client, OBJECT_OP_READ, 1, &[]).unwrap();
+            queue.submit(client, OBJECT_OP_READ, 1, 0, &[]).unwrap();
         }
         queue.service_next().expect("pending request");
         let second = queue.service_next().expect("second pending");
@@ -1027,7 +1075,7 @@ mod tests {
             .unwrap();
         assert_eq!(queue.reclaim_for_holder(client), OBJECT_REQUEST_SLOTS);
         for _ in 0..OBJECT_REQUEST_SLOTS {
-            queue.submit(client, OBJECT_OP_READ, 2, &[]).unwrap();
+            queue.submit(client, OBJECT_OP_READ, 2, 0, &[]).unwrap();
         }
     }
 
@@ -1035,7 +1083,7 @@ mod tests {
     fn service_complete_fails_after_holder_reclaim() {
         let mut queue = ObjectRequestQueue::new();
         let client = HolderId(21);
-        let request_id = queue.submit(client, OBJECT_OP_READ, 1, &[]).unwrap();
+        let request_id = queue.submit(client, OBJECT_OP_READ, 1, 0, &[]).unwrap();
         queue.service_next().expect("dequeue");
         assert_eq!(queue.reclaim_for_holder(client), 1);
         assert_eq!(
@@ -1049,7 +1097,7 @@ mod tests {
         let mut queue = ObjectRequestQueue::new();
         let client = HolderId(22);
         queue
-            .submit(client, OBJECT_OP_WRITE, 7, b"payload")
+            .submit(client, OBJECT_OP_WRITE, 7, 0, b"payload")
             .unwrap();
         let first = queue.service_next().expect("first dequeue");
         assert_eq!(queue.requeue_in_service(), 1);
@@ -1088,7 +1136,7 @@ mod tests {
     fn poll_timeout_leaves_the_request_queued_for_a_later_poll() {
         let mut queue = ObjectRequestQueue::new();
         let client = HolderId(40);
-        let request_id = queue.submit(client, OBJECT_OP_READ, 7, &[]).unwrap();
+        let request_id = queue.submit(client, OBJECT_OP_READ, 7, 0, &[]).unwrap();
         let mut out = [0u8; 8];
         assert_eq!(
             queue.poll(client, request_id, &mut out),
@@ -1115,7 +1163,7 @@ mod tests {
         let client = HolderId(42);
         let mut out = [0u8; 8];
         for _ in 0..2 * MAX_WAITERS {
-            let request_id = queue.submit(client, OBJECT_OP_READ, 7, &[]).unwrap();
+            let request_id = queue.submit(client, OBJECT_OP_READ, 7, 0, &[]).unwrap();
             let request = queue.service_next().expect("pending");
             queue
                 .service_complete(request.request_id, 0, b"ok")

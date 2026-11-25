@@ -12,6 +12,9 @@ pub const OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT: u64 = 5;
 
 pub const OBJECT_OP_READ: u64 = 1;
 pub const OBJECT_OP_WRITE: u64 = 2;
+/// Removes the object; it takes effect at the storage service's next commit, which the
+/// service runs before completing the request. Needs `Rights::WRITE`, like a write.
+pub const OBJECT_OP_DELETE: u64 = 3;
 
 pub const OBJECT_MAX_PAYLOAD_BYTES: usize = 512;
 pub const OBJECT_REQUEST_SLOTS: usize = 4;
@@ -23,6 +26,13 @@ pub const OBJECT_STATUS_OK: u64 = 0;
 pub const OBJECT_STATUS_NOT_FOUND: u64 = 1;
 pub const OBJECT_STATUS_STORE_ERROR: u64 = 2;
 pub const OBJECT_STATUS_TOO_LARGE: u64 = 3;
+/// The request's capability is bound to an object epoch, and the object it names is gone
+/// or was deleted and re-created under the same id with a later epoch.
+pub const OBJECT_STATUS_STALE: u64 = 4;
+
+/// [`ObjectServiceRequest::epoch`] for a capability not bound to one object epoch: it
+/// reaches whatever object currently has the id.
+pub const OBJECT_EPOCH_UNBOUND: u64 = 0;
 
 pub const OBJECT_SERVICE_ROLE_ID: u64 = u64::MAX;
 
@@ -33,6 +43,10 @@ pub struct ObjectServiceRequest {
     pub op: u64,
     pub object_id: u64,
     pub len: u64,
+    /// The object epoch the authorizing capability is bound to (its resource's
+    /// `instance_generation`), or [`OBJECT_EPOCH_UNBOUND`]. Set by the kernel, never by
+    /// the client.
+    pub epoch: u64,
     pub payload: [u8; OBJECT_MAX_PAYLOAD_BYTES],
 }
 
@@ -45,6 +59,7 @@ impl ObjectServiceRequest {
             op,
             object_id,
             len,
+            epoch: OBJECT_EPOCH_UNBOUND,
             payload: [0; OBJECT_MAX_PAYLOAD_BYTES],
         }
     }
@@ -55,7 +70,8 @@ impl ObjectServiceRequest {
         bytes[8..16].copy_from_slice(&self.op.to_le_bytes());
         bytes[16..24].copy_from_slice(&self.object_id.to_le_bytes());
         bytes[24..32].copy_from_slice(&self.len.to_le_bytes());
-        bytes[32..32 + OBJECT_MAX_PAYLOAD_BYTES].copy_from_slice(&self.payload);
+        bytes[32..40].copy_from_slice(&self.epoch.to_le_bytes());
+        bytes[40..40 + OBJECT_MAX_PAYLOAD_BYTES].copy_from_slice(&self.payload);
         bytes
     }
 
@@ -70,13 +86,15 @@ impl ObjectServiceRequest {
         if len > OBJECT_MAX_PAYLOAD_BYTES as u64 {
             return Err(ObjectServiceDecodeError::LengthOutOfRange);
         }
+        let epoch = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
         let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
-        payload.copy_from_slice(&bytes[32..32 + OBJECT_MAX_PAYLOAD_BYTES]);
+        payload.copy_from_slice(&bytes[40..40 + OBJECT_MAX_PAYLOAD_BYTES]);
         Ok(Self {
             request_id,
             op,
             object_id,
             len,
+            epoch,
             payload,
         })
     }
@@ -94,7 +112,7 @@ mod tests {
 
     #[test]
     fn object_service_request_size_matches_repr_c() {
-        assert_eq!(OBJECT_SERVICE_REQUEST_BYTES, 32 + OBJECT_MAX_PAYLOAD_BYTES);
+        assert_eq!(OBJECT_SERVICE_REQUEST_BYTES, 40 + OBJECT_MAX_PAYLOAD_BYTES);
     }
 
     #[test]
@@ -109,10 +127,30 @@ mod tests {
     #[test]
     fn object_service_request_round_trip() {
         let mut request = ObjectServiceRequest::new(9, OBJECT_OP_WRITE, 7, 4);
+        request.epoch = 0x1234_5678_9abc;
         request.payload[..4].copy_from_slice(b"test");
         let bytes = request.encode();
         let decoded = ObjectServiceRequest::decode(&bytes).expect("decode");
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn object_ops_and_statuses_are_stable() {
+        assert_eq!(
+            [OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_OP_DELETE],
+            [1, 2, 3]
+        );
+        assert_eq!(
+            [
+                OBJECT_STATUS_OK,
+                OBJECT_STATUS_NOT_FOUND,
+                OBJECT_STATUS_STORE_ERROR,
+                OBJECT_STATUS_TOO_LARGE,
+                OBJECT_STATUS_STALE
+            ],
+            [0, 1, 2, 3, 4]
+        );
+        assert_eq!(OBJECT_EPOCH_UNBOUND, 0);
     }
 
     #[test]
