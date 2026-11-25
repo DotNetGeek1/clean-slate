@@ -5,7 +5,9 @@
 //! serial marker and batches stay at [`MAX_EVENTS_PER_COMMAND`] or fewer.
 //! The PS/2 mouse emits one packet per command with the button state at the
 //! end of the command, which is why a press and its release must be two
-//! commands.
+//! commands. It emits nothing when its 16-byte queue has no room for a packet,
+//! and only the button state survives until the next command: a press and
+//! release sent while the guest is behind on reading are lost together (#240).
 
 use std::time::Duration;
 

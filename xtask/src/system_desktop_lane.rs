@@ -51,7 +51,13 @@ const LANE_TIMEOUT: Duration = Duration::from_secs(600);
 const STEP_TIMEOUT: Duration = Duration::from_secs(60);
 /// QEMU queues a PS/2 mouse packet only while its 16-byte queue has room for it, and keeps
 /// motion it could not queue until the next input event; buttons ride on whichever packet goes
-/// next. Four 3-byte packets always fit once the guest has drained the queue.
+/// next. Four packets (4 bytes each with the IntelliMouse Explorer protocol the guest selects)
+/// always fit once the guest has drained the queue.
+///
+/// A button edge sent while the queue is full is kept only as button state, so a release sent
+/// before the guest drains erases the press and the click never reaches the guest at all (#240:
+/// a busy host leaves the guest behind on a burst of motion). Every edge is therefore sent only
+/// once the guest has reported the pointer settled, which means it has read every queued byte.
 const PACKETS_PER_BATCH: usize = 4;
 /// How long a batch may take to settle where it should before the lane corrects from where the
 /// guest says the pointer is.
@@ -118,9 +124,15 @@ struct Lane {
     planned: Vec<PlannedCapture>,
 }
 
+/// `segment` up to its last newline: a line the guest is still printing can parse as a number
+/// it is not (`y=22` of `y=223`).
+fn complete_lines(segment: &str) -> &str {
+    segment.rfind('\n').map_or("", |end| &segment[..=end])
+}
+
 /// The last complete `[INPT] pointer settled` position in `segment`.
 fn last_settled(segment: &str) -> Option<Point> {
-    lines(segment)
+    lines(complete_lines(segment))
         .filter_map(|line| line.find(SETTLED).map(|at| &line[at..]))
         .filter_map(|line| {
             Some(Point {
@@ -143,6 +155,24 @@ fn button_edge(segment: &str, edge: &str) -> Option<(Point, String)> {
         },
         field(&rest, "hit")?.to_owned(),
     ))
+}
+
+/// What the guest last said about the pointer in `transcript`, for a failure message: where it
+/// last settled and its last button edge, so a click that never arrived (#240) shows whether
+/// the guest saw the pointer where the lane put it.
+fn pointer_report(transcript: &str) -> String {
+    let settled = last_settled(transcript).map_or_else(
+        || "never reported the pointer settled".to_owned(),
+        |at| format!("last reported the pointer settled at x={} y={}", at.x, at.y),
+    );
+    let edge = lines(complete_lines(transcript))
+        .filter_map(|line| line.find("[INPT] button ").map(|at| &line[at..]))
+        .last()
+        .map_or_else(
+            || "no button edge".to_owned(),
+            |line| format!("last button edge {line:?}"),
+        );
+    format!("the guest {settled}, {edge}")
 }
 
 impl Lane {
@@ -237,14 +267,21 @@ impl Lane {
             }],
         )?;
         let waiting = format!("{what}: button {edge}");
-        let (at, hit) = self.session.wait(&waiting, EDGE_WAIT, &mut |segment| {
+        let polled = self.session.poll(&waiting, EDGE_WAIT, &mut |segment| {
             button_edge(segment, edge).ok_or_else(|| {
                 format!(
-                    "the guest has not reported [INPT] button left {edge} (pointer at x={} y={})",
+                    "the guest has not reported [INPT] button left {edge} with the pointer settled at x={} y={}",
                     expected.x, expected.y
                 )
             })
         })?;
+        let (at, hit) = match polled {
+            Ok(found) => found,
+            Err(reason) => {
+                let report = pointer_report(&self.session.transcript());
+                return self.fail(format!("timed out in {waiting:?}: {reason}; {report}"));
+            }
+        };
         if at != expected || !hits.contains(&hit.as_str()) {
             return self.fail(format!(
                 "{what}: the guest reported the left button {edge} at x={} y={} hit={hit}, expected x={} y={} hit={}",
@@ -271,13 +308,18 @@ impl Lane {
     /// Waits for the current app to log `state` (the fields after `state=changed`).
     fn await_app_input(&mut self, what: &str, state: &str) -> Result<(), XtaskError> {
         let line = format!("[IPC ] console pid={}: {APP_INPUT}{state}", self.app_pid());
-        self.session.wait(what, STEP_TIMEOUT, &mut |segment| {
+        let polled = self.session.poll(what, STEP_TIMEOUT, &mut |segment| {
             if lines(segment).any(|l| l == line) {
                 Ok(())
             } else {
                 Err(format!("no {line:?}"))
             }
-        })
+        })?;
+        if let Err(reason) = polled {
+            let report = pointer_report(&self.session.transcript());
+            return self.fail(format!("timed out in {what:?}: {reason}; {report}"));
+        }
+        Ok(())
     }
 
     /// Clicks the current app's increment button at its window `origin`; its fresh state must
@@ -674,7 +716,37 @@ pub(crate) fn run() -> Result<(), XtaskError> {
 
 #[cfg(test)]
 mod tests {
-    use super::check_rows;
+    use super::{check_rows, last_settled, pointer_report};
+    use clean_slate_graphics::Point;
+
+    #[test]
+    fn a_settled_line_still_being_printed_is_not_read() {
+        let printing = "[IPC ] console pid=4: [INPT] pointer settled x=185 y=223\n\
+                        [IPC ] console pid=4: [INPT] pointer settled x=401 y=4";
+        assert_eq!(last_settled(printing), Some(Point { x: 185, y: 223 }));
+        assert_eq!(
+            last_settled(&format!("{printing}9\n")),
+            Some(Point { x: 401, y: 49 })
+        );
+    }
+
+    #[test]
+    fn a_missing_click_reports_where_the_guest_saw_the_pointer() {
+        let transcript = "[IPC ] console pid=4: [INPT] pointer settled x=299 y=268\n\
+                          [IPC ] console pid=4: [INPT] button left down x=299 y=268 hit=title\n\
+                          [IPC ] console pid=4: [INPT] button left up x=401 y=49 hit=title\n\
+                          [IPC ] console pid=4: [INPT] pointer settled x=721 y=58\n\
+                          [IDLE ] quiet ms=500 presents=0 seq=20\n";
+        assert_eq!(
+            pointer_report(transcript),
+            "the guest last reported the pointer settled at x=721 y=58, last button edge \
+             \"[INPT] button left up x=401 y=49 hit=title\""
+        );
+        assert_eq!(
+            pointer_report("[IDLE ] quiet ms=500 presents=0 seq=7\n"),
+            "the guest never reported the pointer settled, no button edge"
+        );
+    }
 
     /// Compositor restart from a soak run: the desktop shell reports ready and init launches
     /// the app before the compositor logs the shell's second surface; the app connects after.
