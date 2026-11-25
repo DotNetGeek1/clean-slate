@@ -97,16 +97,34 @@ impl LinuxProcessTable {
         Ok(())
     }
 
-    /// When a parent exits, reap any child still recorded (zombie or not yet reaped).
+    /// When a parent exits, reap its zombie children and orphan its running ones.
+    ///
+    /// A running child keeps its own slot: it is still a live process and will call
+    /// `exit` later, which needs that slot (#215: retiring it here let a hostile
+    /// `fork(); exit_group()` in the parent halt the kernel on the child's exit).
+    /// Orphans are re-parented to pid 0, so their exit reaps them at once, as a
+    /// launched process's does.
     pub(crate) fn finalize_children_on_parent_exit(&mut self, parent: ProcId) {
         let Some(parent_index) = self.slot_index(parent) else {
             return;
         };
         let children = self.slots[parent_index].children;
         for entry in children.iter().flatten() {
-            if !matches!(entry.state, ChildState::Reaped) {
-                self.reap_zombie(entry.child);
+            match entry.state {
+                ChildState::Reaped => {}
+                ChildState::Zombie { .. } => self.reap_zombie(entry.child),
+                ChildState::Running => self.orphan(entry.child),
             }
+        }
+        self.slots[parent_index].children = [None; LINUX_PROC_MAX_CHILDREN_PER_PARENT];
+    }
+
+    fn orphan(&mut self, child: ProcId) {
+        if let Some(index) = self.slot_index(child) {
+            self.slots[index].parent = ProcId {
+                pid: 0,
+                generation: InstanceGeneration(0),
+            };
         }
     }
 
@@ -400,6 +418,47 @@ mod tests {
         assert_eq!(found.1, 768);
         table.reap_zombie(child);
         assert!(!table.has_child_in_wait_set(parent, -1));
+    }
+
+    /// #215: `fork(); exit_group()` in the parent must leave the running child's slot,
+    /// so the child's own exit still finds it, and orphan it so that exit reaps it.
+    #[test]
+    fn parent_exit_group_orphans_running_child_and_reaps_zombie() {
+        let mut table = LinuxProcessTable::new();
+        let root = ProcId {
+            pid: 0,
+            generation: InstanceGeneration(0),
+        };
+        let parent = ProcId {
+            pid: 31,
+            generation: InstanceGeneration(1),
+        };
+        let running = ProcId {
+            pid: 32,
+            generation: InstanceGeneration(1),
+        };
+        let zombie = ProcId {
+            pid: 33,
+            generation: InstanceGeneration(1),
+        };
+        table.register(parent, root).unwrap();
+        table.register(running, parent).unwrap();
+        table.register(zombie, parent).unwrap();
+        table.publish_exit(zombie, w_exitcode(0));
+
+        // `publish_linux_exit` order: children, then the parent's own zombie.
+        table.finalize_children_on_parent_exit(parent);
+        table.publish_exit(parent, w_exitcode(0));
+        table.retire_slot(parent);
+
+        assert!(table.require_proc_slot(running).is_ok());
+        assert_eq!(table.parent_of(running), Some(root));
+        assert!(table.require_proc_slot(zombie).is_err());
+
+        table.publish_exit(running, w_exitcode(7));
+        table.retire_slot(running);
+        assert!(table.require_proc_slot(running).is_err());
+        assert_eq!(table.occupied(), 0);
     }
 
     #[test]

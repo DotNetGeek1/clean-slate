@@ -186,6 +186,8 @@ pub(crate) fn dispatch_with(
         ctx.frame.rax = encode_rax(result);
         return;
     }
+    // Unreachable from user mode (#215): only an immediate wake in `block_linux_syscall`
+    // returns the restart sentinel, and a `RestartSyscall` block never wakes immediately.
     crate::diagnostics::qemu::fatal_kernel_error("linux dispatch block restart budget exhausted");
 }
 
@@ -219,6 +221,7 @@ pub(crate) fn complete_timed_out_linux_wait(pid: u64, nr: u64) {
     if nr != SYS_NANOSLEEP && nr != SYS_POLL {
         return;
     }
+    // Runs on the resumed thread itself, so `pid` is the running process (#215).
     let Some(generation) = crate::process::live_instance_generation(pid) else {
         crate::diagnostics::qemu::fatal_kernel_error("timed-out linux wait without live process");
     };

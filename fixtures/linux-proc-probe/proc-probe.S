@@ -19,6 +19,9 @@ msg_pipe_ok_len = . - msg_pipe_ok
 msg_exec_ok:
     .ascii  "[M9.I] exec OK\n"
 msg_exec_ok_len = . - msg_exec_ok
+msg_orphan_ok:
+    .ascii  "[M9.I] orphan exit OK\n"
+msg_orphan_ok_len = . - msg_orphan_ok
 msg_fork_bomb_ok:
     .ascii  "[M9.I] fork-bomb EAGAIN OK\n"
 msg_fork_bomb_ok_len = . - msg_fork_bomb_ok
@@ -295,6 +298,95 @@ test_exec_fork:
     mov     rdi, 97
     syscall
 
+test_orphan_exit:
+    /* #215: child A forks grandchild B and calls exit_group while B still runs; B's own
+       exit must find its proc-table slot. G=gate (B reads to EOF, so it exits only after
+       A has gone), D=done (only B keeps the write end; EOF tells the parent B exited). */
+    mov     rax, 22
+    lea     rdi, [rsp - 16]
+    syscall
+    test    rax, rax
+    js      .Lbad_exit
+    mov     r12d, [rsp - 16] /* G read */
+    mov     r13d, [rsp - 12] /* G write */
+    mov     rax, 22
+    lea     rdi, [rsp - 32]
+    syscall
+    test    rax, rax
+    js      .Lbad_exit
+    mov     r14d, [rsp - 32] /* D read */
+    mov     r15d, [rsp - 28] /* D write */
+    mov     rax, 57
+    syscall
+    test    rax, rax
+    js      .Lbad_exit
+    jz      .Lorphan_child_a
+    mov     rbx, rax         /* A's pid */
+    mov     rdi, r13
+    mov     rax, 3
+    syscall                  /* close G.w */
+    mov     rdi, r12
+    mov     rax, 3
+    syscall                  /* close G.r */
+    mov     rdi, r15
+    mov     rax, 3
+    syscall                  /* close D.w */
+    mov     rax, 61
+    mov     rdi, rbx
+    lea     rsi, [rsp - 40]
+    xor     rdx, rdx
+    xor     r10, r10
+    syscall                  /* reap A */
+    cmp     rax, rbx
+    jne     .Lbad_exit
+    mov     eax, [rsp - 40]
+    test    eax, eax
+    jnz     .Lbad_exit
+.Lorphan_drain:
+    mov     rax, 0
+    mov     rdi, r14
+    lea     rsi, [rsp - 48]
+    mov     rdx, 8
+    syscall                  /* EOF once B has exited */
+    test    rax, rax
+    js      .Lbad_exit
+    jnz     .Lorphan_drain
+    mov     rdi, r14
+    mov     rax, 3
+    syscall
+    lea     rsi, [rip + msg_orphan_ok]
+    mov     rdx, msg_orphan_ok_len
+    call    write_lit
+    ret
+.Lorphan_child_a:
+    mov     rax, 57
+    syscall
+    test    rax, rax
+    js      .Lbad_exit
+    jz      .Lorphan_child_b
+    mov     rax, 231         /* A leaves B running */
+    xor     rdi, rdi
+    syscall
+.Lorphan_child_b:
+    mov     rdi, r13
+    mov     rax, 3
+    syscall                  /* close G.w */
+    mov     rdi, r14
+    mov     rax, 3
+    syscall                  /* close D.r */
+.Lorphan_gate:
+    mov     rax, 0
+    mov     rdi, r12
+    lea     rsi, [rsp - 48]
+    mov     rdx, 8
+    syscall                  /* blocks until A's exit closes the last G.w */
+    test    rax, rax
+    js      .Lbad_exit
+    jnz     .Lorphan_gate
+    mov     rax, 231
+    xor     rdi, rdi
+    syscall
+
 test_fork_bomb:
     xor     r15, r15
 .Lfork_loop:
@@ -357,6 +449,7 @@ _start:
     call    test_pipe_epipe
     call    test_pipe_fork_wait
     call    test_exec_fork
+    call    test_orphan_exit
     call    test_fork_bomb
     lea     rsi, [rip + msg_pass]
     mov     rdx, msg_pass_len

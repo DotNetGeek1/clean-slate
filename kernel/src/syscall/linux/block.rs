@@ -79,6 +79,9 @@ pub(crate) fn block_linux_syscall(
         timeout_rax: on_timeout.encode(),
     };
     let frame: *mut _ = ctx.frame;
+    // A `RestartSyscall` block always yields and the scheduler completes the syscall, so
+    // none of the `Ok` arms is taken; `Err` is a wait-table invariant (see
+    // `block_current_thread_with_resume`). None is reachable from user mode (#215).
     match block_current_thread_with_resume(frame, key, deadline, resume) {
         Ok(WaitOutcome::Woken) => {
             ctx.frame.user_rip = ctx

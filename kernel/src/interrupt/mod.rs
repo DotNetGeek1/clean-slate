@@ -639,6 +639,14 @@ fn report_identity_hole_fault(
     qemu_exit(QEMU_EXIT_FAILURE)
 }
 
+/// Tears down the CPL3 process that faulted and returns the next thread to run.
+///
+/// The `fatal_kernel_error` calls here are kernel invariants, not outcomes the faulting
+/// process chose (#215): resolving the faulting pid reads scheduler and registry state the
+/// kernel set at dispatch, the lifecycle controller and process table are the kernel's own
+/// records, and a teardown error is its own accounting disagreeing. The process is already
+/// being failed, so there is nothing smaller to fail. When it was the last thread, the
+/// kernel idles instead of halting.
 pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
     let pid = current_userspace_fault_pid().unwrap_or_else(|message| fatal_kernel_error(message));
     #[cfg(feature = "m4-recovery-self-test")]
@@ -769,9 +777,16 @@ pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> 
             feature = "m10-shared-buffer-self-test"
         )))]
         {
-            // Nothing on the idle path can create a thread here, so an empty run queue is final.
-            fatal_kernel_error("no runnable thread remained after userspace fault");
+            // The faulting process was the last thread (#215). Its death is contained, not a
+            // kernel failure: park in the idle thread instead of halting the machine.
+            let idle_stack_pointer = crate::sched::idle::idle_after_last_thread("userspace fault")
+                .unwrap_or_else(|message| fatal_kernel_error(message));
+            crate::sched::dispatch::prepare_current_scheduler_thread_dispatch()
+                .unwrap_or_else(|message| fatal_kernel_error(message));
+            idle_stack_pointer
         }
+        // The checklist kernel expects its shell to outlive every command it runs, so an
+        // empty run queue there is a self-test failure, not a contained fault.
         #[cfg(feature = "m9-userspace-self-test")]
         {
             fatal_kernel_error("no runnable thread remained after userspace fault");

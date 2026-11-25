@@ -152,7 +152,11 @@ blocking (`WaitKey` namespace `0x50 << 56`: pipe reader
 `0x50<<56 | 0x01<<48 | index<<32 | gen`, writer `0x02<<48`, parent wait
 `0x50<<56 | pid`). Empty/full pipes and `wait4` block via `block_linux_syscall`
 (idempotent restart; no spin, no `EAGAIN`). Pipe `write` with no readers returns
-`EPIPE` (no `SIGPIPE` delivery in M9). `read(0)` front-end lives in
+`EPIPE` (no `SIGPIPE` delivery in M9). A parent's `exit_group` reaps its zombie
+children and orphans its running ones: an orphan keeps its proc-table slot and is
+re-parented to pid 0, so its own exit later reaps it at once (#215; it used to lose the
+slot and halt the kernel on that exit). An exit that finds no slot logs
+`[LNX ] exit pid=… without proc-table slot` and tears the process down anyway. `read(0)` front-end lives in
 `syscall/linux/fd.rs` (`ensure_open_fd`, 1024-byte scratch, kind dispatch); pipe
 bytes use `linux_proc/pipe::read_fd`. `fork` copies each parent user page into a new frame
 (`mm/fork_clone.rs`). The child PTE keeps the parent's present, user, writable,
@@ -179,7 +183,8 @@ does not contain `linux_mem_clone_for_fork_stub` or
 ### Acceptance
 
 - Fixture: `fixtures/linux-proc-probe/linux-proc-probe-x86_64` (raw syscalls: pipe +
-  fork/wait, exec marker, `ECHILD`/`EBADF`/`EPIPE`, fork-bomb `EAGAIN`).
+  fork/wait, exec marker, `ECHILD`/`EBADF`/`EPIPE`, a grandchild that outlives its
+  parent's `exit_group` and then exits (`[M9.I] orphan exit OK`, #215), fork-bomb `EAGAIN`).
 - QEMU: `cargo xtask test-m9-linux-proc` (`m9-linux-proc-self-test`) — eight probe
   cycles with `[M9.I] PASS`, logging `pipe_pool_live`, `proc_table_live`, and open
   description pool occupancy each cycle.
@@ -611,7 +616,7 @@ The loop is the pure function `write_chunked(count, fetch, deliver)`; host tests
 - Recorded exit status is `status & 0xff` (`LINUX_EXIT_STATUS_MASK`; what a parent would see via `WEXITSTATUS`). Higher bits are discarded by contract; `exit(-1)` records 255.
 - Logs one bounded line `[LNX ] exit pid=<pid> status=<n>`.
 - Terminates through the **production** path: `process::domain::teardown_current_process(allocator, kernel_root_frame(), status, false)` with the allocator from `service_lifecycle_syscall_allocator_mut()` — the same call and arguments the userspace fault handler uses. That path retires the thread, reclaims the address space, IPC endpoints/capabilities, capability-space and network holdings, and calls `linux_fd::release_for_process` (#95 hook). Nothing is reimplemented; if the torn-down pid differs from the caller the kernel fails closed.
-- **Never returns to userspace.** The SYSCALL stub restores the `SyscallContext` frame the dispatcher returns and executes `sysretq`, so an interrupt-style frame cannot be handed back through it. The handler therefore switches itself, exactly like the fault path and kernel task exit: `teardown_current_process` already selected the next runnable thread and activated its CR3 / TSS / syscall stacks (`prepare_current_scheduler_thread_dispatch`); the handler then does `restore_task_context(next_frame)` (`iretq`), or `start_first_task` when the scheduler returned `FRESH_TASK_SENTINEL` for a never-started kernel thread, or `fatal_kernel_error` when no runnable thread remains (mirrors the fault path's fail-closed behaviour). Every branch diverges, so the `LinuxSyscallResult` return type is satisfied by `!` coercion and `encode_rax` is never reached for `exit`. IF is masked for the whole path (IA32_FMASK) and the code runs on the exiting thread's static per-slot kernel stack, the same situation as a fault on that thread.
+- **Never returns to userspace.** The SYSCALL stub restores the `SyscallContext` frame the dispatcher returns and executes `sysretq`, so an interrupt-style frame cannot be handed back through it. The handler therefore switches itself, exactly like the fault path and kernel task exit: `teardown_current_process` already selected the next runnable thread and activated its CR3 / TSS / syscall stacks (`prepare_current_scheduler_thread_dispatch`); the handler then does `restore_task_context(next_frame)` (`iretq`), or `start_first_task` when the scheduler returned `FRESH_TASK_SENTINEL` for a never-started kernel thread, or, when no runnable thread remains, the idle thread (`sched::idle::idle_after_last_thread` logs `[KERN] no runnable thread remained after …; idling`, as the fault path does; #215). Every branch diverges, so the `LinuxSyscallResult` return type is satisfied by `!` coercion and `encode_rax` is never reached for `exit`. IF is masked for the whole path (IA32_FMASK) and the code runs on the exiting thread's static per-slot kernel stack, the same situation as a fault on that thread.
 
 ### QEMU proof (`cargo xtask test-m8-linux-dispatch`)
 

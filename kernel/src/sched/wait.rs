@@ -116,6 +116,8 @@ pub(crate) fn apply_blocked_resume(
     }
 }
 
+// Unreachable from user mode: syscall entry rejects a non-canonical or kernel RIP, and the
+// saved RIP is past a two-byte `syscall`, so it is at least 2 (#215).
 fn restart_syscall(frame: &mut SyscallContext, nr: u64) {
     frame.user_rip = frame
         .user_rip
@@ -320,6 +322,11 @@ pub(crate) fn block_current_thread(
 ///
 /// Only returns (with `Ok(Woken)`) when no yield was necessary; the caller then
 /// applies the same completion it would have received from the scheduler.
+///
+/// `Err` is a kernel invariant violation, so callers treat it as fatal (#215): the caller
+/// is the running thread of a live process, because it is in that process's syscall, and
+/// the waiter table has one slot per scheduler thread (`MAX_WAITERS == TASK_COUNT`), freed
+/// on wake, expiry and teardown (`cancel_waiters_for_process`), so a block cannot find it full.
 pub(crate) fn block_current_thread_with_resume(
     frame: *mut SyscallContext,
     key: WaitKey,
@@ -368,6 +375,7 @@ pub(crate) enum BlockCheck {
 ///
 /// Returns the ready `RAX` without yielding; otherwise the thread blocks and the scheduler
 /// completes the syscall per `resume`. `check` may mutate and wake, but must not block.
+/// `Err` is the same kernel invariant violation as in [`block_current_thread_with_resume`].
 pub(crate) fn block_current_thread_unless(
     frame: *mut SyscallContext,
     key: WaitKey,

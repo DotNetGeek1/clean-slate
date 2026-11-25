@@ -74,6 +74,9 @@ pub(crate) fn handle_sys_exit(
     #[cfg(clean_slate_system_init)]
     crate::service::system_shell::publish_linux_service_exit(pid);
 
+    // Kernel invariants (#215): the allocator is installed before any process runs, and a
+    // teardown error is the kernel's own accounting disagreeing; the caller is already the
+    // process being torn down, so there is nothing smaller to fail.
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()
         .unwrap_or_else(|| {

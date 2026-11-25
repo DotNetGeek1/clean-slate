@@ -40,6 +40,8 @@ fn idle_thread_one_wait() {
     crate::selftest::m9_block_wake::on_idle_loop_wake();
     #[cfg(feature = "m4-service-lifecycle-self-test")]
     crate::selftest::m4_lifecycle_wait::on_idle_loop_wake();
+    #[cfg(feature = "m9-syscall-fail-closed-self-test")]
+    crate::selftest::m9_syscall_fail_closed::on_idle_loop_wake();
     #[cfg(feature = "m9-linux-runtime-self-test")]
     crate::selftest::m9_linux_runtime_latency::observe_idle_halt();
     #[cfg(feature = "system-test-hooks")]
@@ -127,6 +129,8 @@ pub(crate) fn ensure_idle_thread_configured() -> Result<(), &'static str> {
 /// Thread exit found nothing runnable. While other threads are still blocked on an
 /// interrupt, deadline, or wake key, that is not lost work: park in the idle thread
 /// until one of them wakes. Returns `None` only when no thread remains blocked.
+// Used by the m6, m7 and m10 self-test fixtures that drive their own teardown.
+#[allow(dead_code)]
 pub(crate) fn idle_handoff_while_threads_blocked() -> Result<Option<u64>, &'static str> {
     without_interrupts(|| {
         if unsafe { scheduler_mut() }.has_blocked_threads() {
@@ -134,6 +138,23 @@ pub(crate) fn idle_handoff_while_threads_blocked() -> Result<Option<u64>, &'stat
         } else {
             Ok(None)
         }
+    })
+}
+
+/// The last user thread is gone and nothing is blocked (#215). A user process dying,
+/// however it died, is not a kernel failure: log once and park in the idle thread, which
+/// keeps taking interrupts, instead of halting the machine. Builds that launch init never
+/// get here while init lives, because init is itself a thread; init's own death is fatal
+/// on its own path (`service::system_init`).
+pub(crate) fn idle_after_last_thread(after: &'static str) -> Result<u64, &'static str> {
+    without_interrupts(|| {
+        if unsafe { scheduler_mut() }.has_blocked_threads() {
+            return handoff_to_idle_thread();
+        }
+        crate::diagnostics::log::kernel_log_fmt(format_args!(
+            "[KERN] no runnable thread remained after {after}; idling\n"
+        ));
+        handoff_to_idle_thread()
     })
 }
 
