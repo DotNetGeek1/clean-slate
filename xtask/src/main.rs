@@ -239,8 +239,14 @@ thread_local! {
     static M9_RUNTIME_SERIAL: RefCell<String> = const { RefCell::new(String::new()) };
 }
 const M9_LINUX_RUNTIME_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
-const M9_LINUX_PROC_ACCEPTANCE_MARKERS: [&str; 3] =
-    ["[M9.I] creating", "[M9.I] cycle=0 baseline", "[M9.I] PASS"];
+// The orphan line is the probe's own: a grandchild that outlived its parent's `exit_group`
+// exited without halting the kernel (#215).
+const M9_LINUX_PROC_ACCEPTANCE_MARKERS: [&str; 4] = [
+    "[M9.I] creating",
+    "[M9.I] cycle=0 baseline",
+    "[M9.I] orphan exit OK",
+    "[M9.I] PASS",
+];
 const M9_LINUX_PROC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_ROOTFS_ACCEPTANCE_MARKERS: [&str; 2] = ["[RFS ] rootfs entries=", "[M9.K] PASS"];
 const M9_ROOTFS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -390,6 +396,10 @@ const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[M9.C] non-canonical syscall rsp terminated native offender OK"),
     MarkerStep::Ordered("[M9.C] arch_prctl(ARCH_SET_FS, non-canonical) returned EPERM OK"),
     MarkerStep::Ordered("[M9.C] non-canonical syscall rsp terminated linux offender OK"),
+    // #215: the sibling then faults as the last user thread; the kernel idles, not halts.
+    MarkerStep::Ordered("[PROC] fault pid="),
+    MarkerStep::Ordered("[KERN] no runnable thread remained after userspace fault; idling"),
+    MarkerStep::Ordered("[M9.C] last user thread fault left the kernel idling wakes="),
     MarkerStep::Ordered("[M9.C] PASS"),
 ];
 const M9_BLOCK_WAKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(45);

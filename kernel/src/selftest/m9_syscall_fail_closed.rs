@@ -4,7 +4,9 @@
 //! `syscall` with a non-canonical RSP; a Linux process checks that
 //! `arch_prctl(ARCH_SET_FS, 1 << 63)` returns `-EPERM` and then does the same.
 //! Both must be terminated through the CPL3 fault path while the native sibling
-//! keeps running; any `[FAIL]` or halt fails the lane.
+//! keeps running; any `[FAIL]` or halt fails the lane. Once they are gone the
+//! sibling itself faults, as the last user thread, and the kernel must go on
+//! taking timer ticks in the idle thread instead of halting.
 
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
@@ -83,12 +85,19 @@ const OFFENDER_SYSCALL_CODE: [u8; 7] = [
     0xEB, 0xFE, // jmp $-2
 ];
 
-/// Native sibling: version syscall loop (same as M8.3 dispatch proof).
-const NATIVE_PROGRESS_CODE: [u8; 7] = [
-    0x48, 0x31, 0xC0, // xor rax, rax
+/// Native sibling: version syscall loop (as in the M8.3 dispatch proof) until the kernel
+/// answers VERSION with 0, then `ud2`, so its fault leaves no user thread (#215).
+const NATIVE_PROGRESS_CODE: [u8; 12] = [
+    0x48, 0x31, 0xC0, // loop: xor rax, rax
     0x0F, 0x05, // syscall
-    0xEB, 0xF9, // jmp loop
+    0x48, 0x85, 0xC0, // test rax, rax
+    0x75, 0xF6, // jnz loop
+    0x0F, 0x0B, // ud2
 ];
+
+/// Idle-loop wakes the lane waits for after the last thread's fault; a halted CPU
+/// takes none.
+const IDLE_WAKES_AFTER_LAST_FAULT: u64 = 16;
 
 /// Native hostile offender: VERSION syscall with RSP = 1 << 63.
 const NATIVE_NONCANONICAL_RSP_CODE: [u8; 17] = [
@@ -127,6 +136,10 @@ static M9_NATIVE_HOSTILE_PID: AtomicU64 = AtomicU64::new(0);
 static M9_LINUX_HOSTILE_PID: AtomicU64 = AtomicU64::new(0);
 static M9_NATIVE_HOSTILE_CONTAINED: AtomicBool = AtomicBool::new(false);
 static M9_LINUX_HOSTILE_CONTAINED: AtomicBool = AtomicBool::new(false);
+static M9_SIBLING_TOLD_TO_FAULT: AtomicBool = AtomicBool::new(false);
+static M9_SIBLING_PID: AtomicU64 = AtomicU64::new(0);
+static M9_IDLE_START_TICKS: AtomicU64 = AtomicU64::new(0);
+static M9_IDLE_WAKES: AtomicU64 = AtomicU64::new(0);
 
 fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
     reset_process_scheduler_world();
@@ -139,6 +152,10 @@ fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
     M9_LINUX_HOSTILE_PID.store(0, Ordering::Relaxed);
     M9_NATIVE_HOSTILE_CONTAINED.store(false, Ordering::Relaxed);
     M9_LINUX_HOSTILE_CONTAINED.store(false, Ordering::Relaxed);
+    M9_SIBLING_TOLD_TO_FAULT.store(false, Ordering::Relaxed);
+    M9_SIBLING_PID.store(0, Ordering::Relaxed);
+    M9_IDLE_START_TICKS.store(0, Ordering::Relaxed);
+    M9_IDLE_WAKES.store(0, Ordering::Relaxed);
 
     let stacks = unsafe { &*task_stacks_mut() };
     let offender = spawn_native_userspace_process_with_code(
@@ -156,6 +173,7 @@ fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
         &NATIVE_PROGRESS_CODE,
         USER_TEST_PROCESS_STACK_ADDRESS,
     )?;
+    M9_SIBLING_PID.store(sibling.process_id, Ordering::Relaxed);
 
     let native_hostile = spawn_native_userspace_process_with_code(
         allocator,
@@ -425,9 +443,13 @@ fn is_registered(pid: u64) -> bool {
     unsafe { process_registry_mut().get(pid) }.is_some()
 }
 
-pub(crate) fn observe_native_sibling_progress() {
+/// Returns `true` once every offender is gone: the sibling is then told to fault.
+pub(crate) fn observe_native_sibling_progress() -> bool {
+    if M9_SIBLING_TOLD_TO_FAULT.load(Ordering::Relaxed) {
+        return true;
+    }
     if !M9_FAIL_CLOSED_OBSERVED.load(Ordering::Relaxed) {
-        return;
+        return false;
     }
     let linux_hostile = M9_LINUX_HOSTILE_PID.load(Ordering::Relaxed);
     let linux_contained = M9_LINUX_HOSTILE_CONTAINED.load(Ordering::Relaxed);
@@ -435,7 +457,7 @@ pub(crate) fn observe_native_sibling_progress() {
         fatal_kernel_error("m9 linux offender exited without containment (arch_prctl not EPERM?)");
     }
     if !M9_NATIVE_HOSTILE_CONTAINED.load(Ordering::Relaxed) || !linux_contained {
-        return;
+        return false;
     }
     for pid in [
         M9_OFFENDER_PID.load(Ordering::Relaxed),
@@ -450,6 +472,50 @@ pub(crate) fn observe_native_sibling_progress() {
     kernel_log_line(M9_NONCANONICAL_NATIVE_MARKER);
     kernel_log_line(M9_ARCH_SET_FS_EPERM_MARKER);
     kernel_log_line(M9_NONCANONICAL_LINUX_MARKER);
+    M9_SIBLING_TOLD_TO_FAULT.store(true, Ordering::Relaxed);
+    true
+}
+
+/// Idle-loop hook: after the sibling, the last user thread, faulted, the kernel must keep
+/// waking from `hlt` on timer ticks. Before #215 it halted on
+/// `no runnable thread remained after userspace fault`.
+pub(crate) fn on_idle_loop_wake() {
+    if !M9_SIBLING_TOLD_TO_FAULT.load(Ordering::Relaxed) {
+        return;
+    }
+    let sibling = M9_SIBLING_PID.load(Ordering::Relaxed);
+    if is_registered(sibling) {
+        return;
+    }
+    let ticks = crate::interrupt::timer::kernel_ticks();
+    let wakes = M9_IDLE_WAKES.fetch_add(1, Ordering::Relaxed);
+    if wakes == 0 {
+        M9_IDLE_START_TICKS.store(ticks, Ordering::Relaxed);
+        return;
+    }
+    if wakes < IDLE_WAKES_AFTER_LAST_FAULT {
+        return;
+    }
+    let start = M9_IDLE_START_TICKS.load(Ordering::Relaxed);
+    if ticks <= start {
+        fatal_kernel_error("m9 idle loop woke without timer ticks after the last thread died");
+    }
+    let threads = unsafe { scheduler_mut() }
+        .threads
+        .iter()
+        .filter(|thread| {
+            thread.kind == ThreadKind::User && thread.state != crate::sched::ThreadState::Empty
+        })
+        .count();
+    kernel_log_fmt(format_args!(
+        "[M9.C] last user thread fault left the kernel idling wakes={} ticks={} user-threads={} OK\n",
+        wakes,
+        ticks - start,
+        threads
+    ));
+    if threads != 0 {
+        fatal_kernel_error("m9 user thread left in the scheduler after the last fault");
+    }
     kernel_log_line(M9_SYSCALL_FAIL_CLOSED_PASS_MARKER);
     qemu_exit(QEMU_EXIT_SUCCESS);
 }

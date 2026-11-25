@@ -167,6 +167,7 @@ mod enabled {
         crate::process::linux_proc::exit_publish::publish_linux_exit(id, status as u32, true);
         #[cfg(clean_slate_system_init)]
         crate::service::system_shell::publish_linux_service_exit(pid);
+        // Kernel invariants, as in `handle_sys_exit` (#215).
         let allocator = service_lifecycle_syscall_allocator_mut()
             .as_mut()
             .unwrap_or_else(|| fatal_kernel_error("linux exit_group: allocator missing"));

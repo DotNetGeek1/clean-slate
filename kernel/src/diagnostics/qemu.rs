@@ -29,6 +29,10 @@ pub(crate) fn halt_loop() -> ! {
     }
 }
 
+/// Stops the machine. For kernel invariants only (#215): a value derived from a user
+/// register or user memory, or any outcome a user process can cause, must fail that
+/// process (an errno, or the CPL3 fault teardown), never reach this. A call site on a
+/// syscall or user-fault path says in a comment why user mode cannot reach it.
 pub(crate) fn fatal_kernel_error(message: &'static str) -> ! {
     serial_write_fmt(format_args!("[FAIL] {message}\n"));
     qemu_exit_failure()

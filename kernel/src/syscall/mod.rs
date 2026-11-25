@@ -799,6 +799,8 @@ fn log_unresolved_syscall_caller(reason: &'static str) {
 /// Contain the current userspace execution context when caller resolution failed.
 fn fail_closed_unresolved_syscall_caller(reason: &'static str) -> ! {
     log_unresolved_syscall_caller(reason);
+    // Only a CPL3 thread reaches `syscall`, so these two reasons are scheduler invariants;
+    // every other reason fails the caller below (#215).
     if matches!(
         reason,
         "scheduler had no current thread to dispatch" | "syscall caller thread was not userspace"
@@ -874,11 +876,14 @@ fn dispatch_native(frame: &mut SyscallContext) {
                 crate::syscall::linux::M8_NATIVE_PROGRESS.fetch_add(1, Ordering::Relaxed);
                 crate::selftest::m8_linux_dispatch::maybe_complete_m8_linux_dispatch();
             }
-            #[cfg(feature = "m9-syscall-fail-closed-self-test")]
-            crate::selftest::m9_syscall_fail_closed::observe_native_sibling_progress();
             #[cfg(feature = "m9-userspace-self-test")]
             crate::selftest::m9_userspace::observe_native_progress();
             frame.rax = SYSCALL_ABI_VERSION;
+            // A zero VERSION tells the sibling to fault, so it is the last thread (#215).
+            #[cfg(feature = "m9-syscall-fail-closed-self-test")]
+            if crate::selftest::m9_syscall_fail_closed::observe_native_sibling_progress() {
+                frame.rax = 0;
+            }
         }
         #[cfg(feature = "m3-syscall-self-test")]
         SYSCALL_NR_READ_U64 => handle_syscall_read_u64(frame),

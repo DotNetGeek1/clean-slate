@@ -405,6 +405,8 @@ M3.4 separates process ownership from thread scheduling state:
 
 PID/TID assignment is monotonic and non-reusing for the life of a boot session. On userspace faults, ownership-aware diagnostics identify the faulting PID and the kernel transitions that process/thread through faulted → exited → reaped cleanup while preserving kernel control flow and unrelated runnable work.
 
+**User processes cannot stop the kernel (#215).** `fatal_kernel_error` is for kernel invariants only. Anything derived from a user register or user memory, and any outcome a user process can cause, fails that process instead: an errno, or the CPL3 fault teardown (a bad RSP or RIP at `syscall` entry is a user-mode #GP). A `fatal_kernel_error` on a syscall or user-fault path carries a comment saying why user mode cannot reach it. When the last user thread exits or faults and nothing is blocked, the kernel logs `[KERN] no runnable thread remained after …; idling` and runs the idle thread, which keeps taking interrupts; it does not halt. In builds that launch init that cannot happen while init lives, and init's own death stays fatal by design.
+
 ## M3.5 initial capability-authorized IPC direction
 
 The first IPC primitive should keep policy narrow and explicit:
