@@ -88,9 +88,64 @@ fn claim_usable_region_table() -> Result<&'static mut UsableRegionTable, &'stati
     )))
 }
 
+/// Frames the free-frame bitmap covers: 4 GiB of usable memory, 128 KiB of
+/// `.bss`. With more usable memory than this the allocator falls back to
+/// walking the free list for its double-free check.
+const FREE_FRAME_BITS_CAPACITY: usize = 1 << 20;
+
+/// One bit per usable frame, set while the frame is on the free list (#293).
+///
+/// `free_run` refuses a frame that is already free. Walking the free list
+/// for that made each free O(free list), and freeing a 64 MiB process
+/// O(n^2): tens of seconds under QEMU TCG. The bitmap makes it O(1).
+struct FreeFrameBits {
+    /// Bit index of each usable region's first frame.
+    region_first_bit: [u64; MAX_MEMORY_REGIONS],
+    words: [u64; FREE_FRAME_BITS_CAPACITY / 64],
+}
+
+impl core::fmt::Debug for FreeFrameBits {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("FreeFrameBits")
+    }
+}
+
+#[cfg(not(test))]
+fn claim_free_frame_bits() -> Result<&'static mut FreeFrameBits, &'static str> {
+    struct ClaimableFreeFrameBits {
+        is_claimed: bool,
+        bits: FreeFrameBits,
+    }
+    static BITS: GlobalCell<ClaimableFreeFrameBits> = GlobalCell::new(ClaimableFreeFrameBits {
+        is_claimed: false,
+        bits: FreeFrameBits {
+            region_first_bit: [0; MAX_MEMORY_REGIONS],
+            words: [0; FREE_FRAME_BITS_CAPACITY / 64],
+        },
+    });
+    let bits = unsafe { &mut *BITS.get() };
+    if bits.is_claimed {
+        return Err("page allocator free-frame bitmap is already owned by an allocator");
+    }
+    bits.is_claimed = true;
+    bits.bits.words.fill(0);
+    Ok(&mut bits.bits)
+}
+
+#[cfg(test)]
+fn claim_free_frame_bits() -> Result<&'static mut FreeFrameBits, &'static str> {
+    // Zeroed on the heap, not built on the test thread's stack first.
+    let layout = std::alloc::Layout::new::<FreeFrameBits>();
+    let bits = unsafe { std::alloc::alloc_zeroed(layout) } as *mut FreeFrameBits;
+    assert!(!bits.is_null(), "free-frame bitmap allocation failed");
+    Ok(unsafe { &mut *bits })
+}
+
 #[derive(Debug)]
 pub(crate) struct PageAllocator {
     usable_regions: &'static mut UsableRegionTable,
+    /// `None` when usable memory exceeds [`FREE_FRAME_BITS_CAPACITY`].
+    free_bits: Option<&'static mut FreeFrameBits>,
     usable_region_count: usize,
     current_region: usize,
     next_page: u64,
@@ -112,6 +167,7 @@ impl PageAllocator {
     pub(crate) fn new(memory_map: &NormalizedMemoryMap) -> Result<Self, &'static str> {
         let mut allocator = Self {
             usable_regions: claim_usable_region_table()?,
+            free_bits: None,
             usable_region_count: 0,
             current_region: 0,
             next_page: 0,
@@ -147,6 +203,18 @@ impl PageAllocator {
 
         allocator.next_page = allocator.usable_regions[0].start;
         allocator.available_pages = allocator.total_pages;
+        if allocator.total_pages <= FREE_FRAME_BITS_CAPACITY as u64 {
+            let bits = claim_free_frame_bits()?;
+            let mut first_bit = 0u64;
+            for (index, region) in allocator.usable_regions[..allocator.usable_region_count]
+                .iter()
+                .enumerate()
+            {
+                bits.region_first_bit[index] = first_bit;
+                first_bit += (region.end - region.start) / PAGE_SIZE;
+            }
+            allocator.free_bits = Some(bits);
+        }
         Ok(allocator)
     }
 
@@ -276,7 +344,18 @@ impl PageAllocator {
         if !self.was_ever_allocated(end - PAGE_SIZE) {
             return Err("attempted to free a frame that was never allocated");
         }
-        if self.free_list_intersects(base, end) {
+        let already_free = if self.free_bits.is_some() {
+            let mut frame = base;
+            let mut any = false;
+            while frame < end && !any {
+                any = self.is_marked_free(region, frame);
+                frame += PAGE_SIZE;
+            }
+            any
+        } else {
+            self.free_list_intersects(base, end)
+        };
+        if already_free {
             return Err("attempted to free an already-free frame");
         }
         let mut frame = base;
@@ -288,7 +367,39 @@ impl PageAllocator {
         Ok(())
     }
 
+    /// Bit position of `frame`, which lies in usable region `region`.
+    fn free_bit(&self, region: usize, frame: u64) -> Option<(usize, u64)> {
+        let bits = self.free_bits.as_ref()?;
+        let start = self.usable_regions[region].start;
+        let index = bits.region_first_bit[region] + (frame - start) / PAGE_SIZE;
+        Some(((index / 64) as usize, 1u64 << (index % 64)))
+    }
+
+    fn is_marked_free(&self, region: usize, frame: u64) -> bool {
+        match (self.free_bit(region, frame), self.free_bits.as_ref()) {
+            (Some((word, mask)), Some(bits)) => bits.words[word] & mask != 0,
+            _ => false,
+        }
+    }
+
+    fn mark_free(&mut self, frame: u64, is_free: bool) {
+        let Some(region) = self.region_index_containing(frame) else {
+            return;
+        };
+        let Some((word, mask)) = self.free_bit(region, frame) else {
+            return;
+        };
+        if let Some(bits) = self.free_bits.as_mut() {
+            if is_free {
+                bits.words[word] |= mask;
+            } else {
+                bits.words[word] &= !mask;
+            }
+        }
+    }
+
     fn push_free_page(&mut self, frame: u64) {
+        self.mark_free(frame, true);
         #[cfg(not(debug_assertions))]
         {
             let node_ptr = physical_frame_ptr(frame) as *mut FreePageNode;
@@ -332,6 +443,7 @@ impl PageAllocator {
         let node_ptr = physical_frame_ptr(frame) as *const FreePageNode;
         let node = unsafe { ptr::read(node_ptr) };
         self.free_list_head = node.next;
+        self.mark_free(frame, false);
         #[cfg(debug_assertions)]
         if self.free_list_head.is_none() {
             self.free_list_tail = None;
@@ -497,6 +609,48 @@ mod tests {
         }
         let second_free = unsafe { allocator.free_page(frame) };
         assert_eq!(second_free, Err("attempted to free an already-free frame"));
+    }
+
+    #[test]
+    fn free_frame_bits_follow_each_frame_across_regions() {
+        #[repr(align(4096))]
+        struct EightPages([u8; (PAGE_SIZE as usize) * 8]);
+        let mut pages = EightPages([0; (PAGE_SIZE as usize) * 8]);
+        let base = pages.0.as_mut_ptr() as u64;
+        // Two usable regions with a reserved page between them.
+        let descriptors = [
+            descriptor(MemoryType::CONVENTIONAL, base, 3),
+            descriptor(MemoryType::RESERVED, base + 3 * PAGE_SIZE, 1),
+            descriptor(MemoryType::CONVENTIONAL, base + 4 * PAGE_SIZE, 4),
+        ];
+        let map = normalize_memory_map_boxed(descriptors.iter(), &[]).expect("normalize map");
+        let mut allocator = PageAllocator::new(&map).expect("allocator");
+        assert!(allocator.free_bits.is_some());
+
+        let frames: Vec<u64> = (0..7)
+            .map(|_| allocator.allocate_page().expect("page"))
+            .collect();
+        assert!(
+            frames.contains(&(base + 4 * PAGE_SIZE)),
+            "second region in use"
+        );
+        for frame in &frames {
+            unsafe { allocator.free_page(*frame).expect("first free") };
+        }
+        for frame in &frames {
+            assert_eq!(
+                unsafe { allocator.free_page(*frame) },
+                Err("attempted to free an already-free frame")
+            );
+        }
+        // Taking a frame off the free list clears its bit: it can be freed once more.
+        let again = allocator.allocate_page().expect("reused page");
+        unsafe { allocator.free_page(again).expect("free after reuse") };
+        assert_eq!(
+            unsafe { allocator.free_page(again) },
+            Err("attempted to free an already-free frame")
+        );
+        assert_eq!(allocator.stats().free_pages, 7);
     }
 
     #[test]

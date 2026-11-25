@@ -468,6 +468,7 @@ pub(crate) fn launch_linux_process_with_authority(
         launched.instance_generation,
         &prepared.layout,
         prepared.brk_initial,
+        crate::process::linux_mem::LinuxMemoryBudget::DEFAULT,
     )
     .map_err(|_| LinuxImageError::Registry("linux launch: brk init failed"))?;
     if authority.network {
@@ -556,6 +557,8 @@ fn commit_exec_unmeasured(
         if process.resource_domain.address_space().is_none() {
             return Err(LinuxImageError::Registry("exec commit: no address space"));
         }
+        // Like rlimits, the memory budget survives exec.
+        let budget = crate::process::linux_mem::memory_budget(pid, live_gen);
         crate::process::linux_mem::reset_for_exec(pid, live_gen, allocator);
         crate::process::linux_signal::reset_for_exec(pid, live_gen);
         let exec_slot = unsafe { crate::sched::scheduler_mut() }
@@ -573,7 +576,7 @@ fn commit_exec_unmeasured(
         if linux_fd::close_on_exec(pid, live_gen).is_err() {
             fatal_kernel_error("exec commit: close_on_exec failed after address-space swap");
         }
-        crate::process::linux_mem::init_for_image(pid, live_gen, &layout, brk_initial)
+        crate::process::linux_mem::init_for_image(pid, live_gen, &layout, brk_initial, budget)
             .map_err(|_| LinuxImageError::Registry("exec commit: linux_mem init failed"))?;
         if destroy_old_exec_address_space(old, allocator).is_err() {
             fatal_kernel_error("exec commit: destroying the old address space failed");

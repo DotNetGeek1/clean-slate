@@ -3,6 +3,7 @@
 use crate::arch::x86_64::msr::write_msr;
 use crate::mm::address_space::{
     map_process_page, translate_address_in_root, unmap_process_page_at, ProcessAddressSpace,
+    MAX_ADDRESS_SPACE_USER_MAPPINGS,
 };
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::zero_page;
@@ -23,10 +24,56 @@ use x86_64::VirtAddr;
 
 const IA32_FS_BASE: u32 = 0xC000_0100;
 
-pub(crate) const LINUX_BRK_MAX_BYTES: u64 = 4 * 1024 * 1024;
-pub(crate) const LINUX_MMAP_MAX_REGIONS: usize = 16;
-pub(crate) const LINUX_MMAP_MAX_PAGES: u64 = 512;
+/// Region records per process: the most `mmap` regions any budget may allow.
+pub(crate) const LINUX_MMAP_MAX_REGIONS: usize = 64;
 pub(crate) const LINUX_MEM_MAX_PROCESSES: usize = TASK_COUNT;
+
+/// Per-process memory limits for the Linux personality (#293).
+///
+/// Set at launch ([`LinuxMemoryBudget::DEFAULT`] unless the launcher calls
+/// [`set_memory_budget`]), kept across `execve` the way rlimits are, and
+/// copied by `fork`. Every tracked page also counts against the address
+/// space's mapping table ([`MAX_ADDRESS_SPACE_USER_MAPPINGS`]), so image,
+/// stack, brk and mmap together never pass that ceiling whatever the budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxMemoryBudget {
+    /// Largest `brk - brk_base`, in bytes.
+    pub(crate) brk_bytes: u64,
+    /// Pages all live `mmap` regions may cover, `PROT_NONE` reservations included.
+    pub(crate) mmap_pages: u64,
+    /// Live `mmap` regions, at most [`LINUX_MMAP_MAX_REGIONS`].
+    pub(crate) mmap_regions: usize,
+}
+
+impl LinuxMemoryBudget {
+    /// Sized for a static Doom-class program: a 32 MiB heap through brk and
+    /// 48 MiB of anonymous mappings. The mapping table caps the sum at 64 MiB.
+    pub(crate) const DEFAULT: Self = Self {
+        brk_bytes: 32 * 1024 * 1024,
+        mmap_pages: 12 * 1024,
+        mmap_regions: LINUX_MMAP_MAX_REGIONS,
+    };
+
+    /// Refuses a budget the kernel could never honour: more regions than the
+    /// record table holds, or more pages than one address space can track.
+    pub(crate) fn validate(self) -> Result<Self, LinuxErrno> {
+        let max_pages = MAX_ADDRESS_SPACE_USER_MAPPINGS as u64;
+        if self.mmap_regions > LINUX_MMAP_MAX_REGIONS
+            || self.mmap_pages > max_pages
+            || self.brk_bytes > max_pages * PAGE_SIZE
+        {
+            return Err(EINVAL);
+        }
+        Ok(self)
+    }
+}
+
+const _: () = assert!(
+    LinuxMemoryBudget::DEFAULT.mmap_regions <= LINUX_MMAP_MAX_REGIONS
+        && LinuxMemoryBudget::DEFAULT.mmap_pages <= MAX_ADDRESS_SPACE_USER_MAPPINGS as u64
+        && LinuxMemoryBudget::DEFAULT.brk_bytes
+            <= MAX_ADDRESS_SPACE_USER_MAPPINGS as u64 * PAGE_SIZE
+);
 
 /// Anonymous mmap window below the conventional stack reservation (#142 / M9_ADDRESS_SPACE.md).
 pub(crate) const LINUX_MMAP_WINDOW_TOP: u64 = 0x0000_0000_0060_0000;
@@ -64,6 +111,7 @@ pub(crate) struct LinuxMemState {
     stack_pages: u64,
     mmap_regions: [MmapRegion; LINUX_MMAP_MAX_REGIONS],
     mmap_pages: u64,
+    budget: LinuxMemoryBudget,
     fs_base: u64,
     tid_address: u64,
     pending_sleep_deadline: Option<Deadline>,
@@ -81,6 +129,7 @@ impl LinuxMemState {
         stack_pages: 0,
         mmap_regions: [MmapRegion::EMPTY; LINUX_MMAP_MAX_REGIONS],
         mmap_pages: 0,
+        budget: LinuxMemoryBudget::DEFAULT,
         fs_base: 0,
         tid_address: 0,
         pending_sleep_deadline: None,
@@ -195,9 +244,12 @@ pub(crate) fn init_for_image(
     generation: InstanceGeneration,
     layout: &LinuxImageLayout,
     brk_initial: u64,
+    budget: LinuxMemoryBudget,
 ) -> Result<(), LinuxErrno> {
+    let budget = budget.validate()?;
     let index = registry_mut().ensure(pid, generation)?;
     let slot = registry_mut().slots[index].as_mut().expect("slot");
+    slot.state.budget = budget;
     slot.state.brk_base = brk_initial;
     slot.state.brk_end = brk_initial;
     slot.state.mmap_window_lo = layout.window_base;
@@ -205,6 +257,50 @@ pub(crate) fn init_for_image(
     slot.state.stack_top = layout.stack_top;
     slot.state.stack_base = layout.stack_base;
     slot.state.stack_pages = layout.stack_pages;
+    Ok(())
+}
+
+/// The process's budget; [`LinuxMemoryBudget::DEFAULT`] when it has no slot
+/// yet. `execve` reads it before the old image goes, so the new image keeps it.
+pub(crate) fn memory_budget(pid: u64, generation: InstanceGeneration) -> LinuxMemoryBudget {
+    let registry = registry_mut();
+    registry
+        .find(pid, generation)
+        .and_then(|index| registry.slots[index].as_ref())
+        .map_or(LinuxMemoryBudget::DEFAULT, |slot| slot.state.budget)
+}
+
+/// Replaces the process's budget. Refused with `EINVAL` when the budget is
+/// beyond what the kernel can track, and with `ENOMEM` when the process
+/// already uses more than the new budget allows; nothing changes then.
+#[cfg_attr(
+    not(any(
+        feature = "m9-syscall-fail-closed-self-test",
+        feature = "m9-linux-runtime-self-test"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn set_memory_budget(
+    pid: u64,
+    generation: InstanceGeneration,
+    budget: LinuxMemoryBudget,
+) -> Result<(), LinuxErrno> {
+    let budget = budget.validate()?;
+    let index = registry_mut().ensure(pid, generation)?;
+    let state = &mut registry_mut().slots[index].as_mut().ok_or(EINVAL)?.state;
+    set_budget_in(state, budget)
+}
+
+fn set_budget_in(state: &mut LinuxMemState, budget: LinuxMemoryBudget) -> Result<(), LinuxErrno> {
+    let live_regions = state.mmap_regions.iter().filter(|r| r.is_live()).count();
+    let brk_bytes = state.brk_end.saturating_sub(state.brk_base);
+    if state.mmap_pages > budget.mmap_pages
+        || live_regions > budget.mmap_regions
+        || brk_bytes > budget.brk_bytes
+    {
+        return Err(ENOMEM);
+    }
+    state.budget = budget;
     Ok(())
 }
 
@@ -301,12 +397,14 @@ fn unmap_all(
     allocator: &mut PageAllocator,
 ) -> Result<(), LinuxErrno> {
     shrink_brk_to(state.brk_base, state.brk_end, domain, allocator)?;
-    for region in state.mmap_regions.iter().filter(|r| r.is_live()) {
+    for region in state.mmap_regions.iter().rev().filter(|r| r.is_live()) {
         unmap_range(region.start, region.end, domain, allocator)?;
     }
     Ok(())
 }
 
+/// Unmaps the brk pages of `[brk_base, brk_end)`, both rounded up to a page
+/// (a partly used page below `brk_base` stays), from the top down.
 fn shrink_brk_to(
     brk_base: u64,
     brk_end: u64,
@@ -335,16 +433,19 @@ fn unmap_one_page(
     Ok(())
 }
 
+/// High to low: a region's pages were recorded low to high, so each one is
+/// then near the end of the mapping table and its lookup is short.
 fn unmap_range(
     start: u64,
     end: u64,
     domain: &mut ProcessAddressSpace,
     allocator: &mut PageAllocator,
 ) -> Result<(), LinuxErrno> {
-    let mut va = align_down(start, PAGE_SIZE);
-    while va < end {
+    let low = align_down(start, PAGE_SIZE);
+    let mut va = align_up(end, PAGE_SIZE);
+    while va > low {
+        va -= PAGE_SIZE;
         unmap_one_page(va, domain, allocator)?;
-        va = va.checked_add(PAGE_SIZE).ok_or(EINVAL)?;
     }
     Ok(())
 }
@@ -525,16 +626,25 @@ pub(crate) fn sys_brk(
         return Ok(old_end);
     }
     let new_bytes = addr.checked_sub(brk_base).ok_or(EINVAL)?;
-    if new_bytes > LINUX_BRK_MAX_BYTES {
+    let brk_budget = registry_mut().slots[index]
+        .as_ref()
+        .expect("slot")
+        .state
+        .budget
+        .brk_bytes;
+    if new_bytes > brk_budget {
         return Err(ENOMEM);
     }
     if addr == old_end {
         return Ok(old_end);
     }
     if addr < old_end {
+        // Releases the pages above the new break, `[addr, old_end)` rounded
+        // out to pages, and returns the new break as Linux does (#293; this
+        // used to unmap `[brk_base, addr)`, the part being kept).
         let allocator = syscall_page_allocator()?;
         with_address_space(pid, generation, allocator, |domain, allocator| {
-            shrink_brk_to(brk_base, addr, domain, allocator)?;
+            shrink_brk_to(addr, old_end, domain, allocator)?;
             Ok(())
         })?;
         registry_mut().slots[index]
@@ -542,7 +652,7 @@ pub(crate) fn sys_brk(
             .expect("slot")
             .state
             .brk_end = addr;
-        return Ok(old_end);
+        return Ok(addr);
     }
     let grow_start = align_up(old_end, PAGE_SIZE);
     let grow_end = align_up(addr, PAGE_SIZE);
@@ -639,11 +749,6 @@ pub(crate) fn sys_mmap(
         return Err(EINVAL);
     }
     let page_count = len.checked_add(PAGE_SIZE - 1).ok_or(EINVAL)? / PAGE_SIZE;
-    if page_count > LINUX_MMAP_MAX_PAGES {
-        #[cfg(feature = "m9-userspace-self-test")]
-        log_m9_mmap_enomem(pid, "single-map-page-cap", addr, len, prot, flags);
-        return Err(ENOMEM);
-    }
     if prot != PROT_NONE && (prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0 {
         return Err(EINVAL);
     }
@@ -710,8 +815,12 @@ fn plan_mmap(
         .mmap_pages
         .checked_add(page_count)
         .ok_or((ENOMEM, "process-mmap-page-budget"))?;
-    if budget_after > LINUX_MMAP_MAX_PAGES {
+    if budget_after > state.budget.mmap_pages {
         return Err((ENOMEM, "process-mmap-page-budget"));
+    }
+    let live_regions = state.mmap_regions.iter().filter(|r| r.is_live()).count();
+    if live_regions >= state.budget.mmap_regions {
+        return Err((ENOMEM, "region-table-full"));
     }
     let slot = state
         .mmap_regions
@@ -1021,15 +1130,32 @@ mod tests {
 
     #[test]
     fn mmap_budget_and_region_table_are_checked_up_front() {
+        let small = LinuxMemoryBudget {
+            brk_bytes: 0,
+            mmap_pages: 512,
+            mmap_regions: 4,
+        };
         let mut state = mmap_state();
+        state.budget = small;
         assert_eq!(
-            plan_mmap(&state, 0, LINUX_MMAP_MAX_PAGES + 1, false),
+            plan_mmap(&state, 0, 513, false),
             Err((ENOMEM, "process-mmap-page-budget"))
         );
-        commit(&mut state, 0, LINUX_MMAP_MAX_PAGES - 1, false);
+        commit(&mut state, 0, 511, false);
         assert_eq!(
             plan_mmap(&state, 0, 2, false),
             Err((ENOMEM, "process-mmap-page-budget"))
+        );
+
+        // The budget's region count is the limit, not the record table.
+        let mut state = mmap_state();
+        state.budget = small;
+        for index in 0..4 {
+            commit(&mut state, WINDOW_LO + index * 2 * PAGE_SIZE, 1, true);
+        }
+        assert_eq!(
+            plan_mmap(&state, 0, 1, false),
+            Err((ENOMEM, "region-table-full"))
         );
 
         let mut state = mmap_state();
@@ -1077,6 +1203,92 @@ mod tests {
             reservation.start - PAGE_SIZE,
             reservation.start + 1
         ));
+    }
+
+    #[test]
+    fn default_budget_reaches_tens_of_mib() {
+        let budget = LinuxMemoryBudget::DEFAULT;
+        assert_eq!(budget.validate(), Ok(budget));
+        assert!(budget.brk_bytes >= 32 * 1024 * 1024);
+        assert!(budget.mmap_pages * PAGE_SIZE >= 32 * 1024 * 1024);
+
+        // One mmap can take the whole page budget when the window has room.
+        let mut state = LinuxMemState {
+            mmap_window_lo: 0x1_0000_0000,
+            mmap_window_hi: 0x2_0000_0000,
+            ..LinuxMemState::EMPTY
+        };
+        let plan = commit(&mut state, 0, budget.mmap_pages, false);
+        assert_eq!(
+            plan.end, 0x2_0000_0000,
+            "anonymous maps grow down from the top"
+        );
+        assert_eq!(state.mmap_pages, budget.mmap_pages);
+        assert_eq!(
+            plan_mmap(&state, 0, 1, false),
+            Err((ENOMEM, "process-mmap-page-budget"))
+        );
+    }
+
+    #[test]
+    fn budgets_beyond_what_the_kernel_tracks_are_refused() {
+        let max_pages = MAX_ADDRESS_SPACE_USER_MAPPINGS as u64;
+        let ok = LinuxMemoryBudget {
+            brk_bytes: max_pages * PAGE_SIZE,
+            mmap_pages: max_pages,
+            mmap_regions: LINUX_MMAP_MAX_REGIONS,
+        };
+        assert_eq!(ok.validate(), Ok(ok));
+        for bad in [
+            LinuxMemoryBudget {
+                brk_bytes: max_pages * PAGE_SIZE + 1,
+                ..ok
+            },
+            LinuxMemoryBudget {
+                mmap_pages: max_pages + 1,
+                ..ok
+            },
+            LinuxMemoryBudget {
+                mmap_regions: LINUX_MMAP_MAX_REGIONS + 1,
+                ..ok
+            },
+        ] {
+            assert_eq!(bad.validate(), Err(EINVAL), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_budget_below_current_use_is_refused_and_changes_nothing() {
+        let mut state = mmap_state();
+        state.brk_base = 0x10_0000;
+        state.brk_end = 0x10_0000 + 8 * PAGE_SIZE;
+        commit(&mut state, 0, 4, false);
+        commit(&mut state, 0, 4, false);
+        let before = state.budget;
+        for tight in [
+            LinuxMemoryBudget {
+                mmap_pages: 7,
+                ..before
+            },
+            LinuxMemoryBudget {
+                mmap_regions: 1,
+                ..before
+            },
+            LinuxMemoryBudget {
+                brk_bytes: 8 * PAGE_SIZE - 1,
+                ..before
+            },
+        ] {
+            assert_eq!(set_budget_in(&mut state, tight), Err(ENOMEM), "{tight:?}");
+            assert_eq!(state.budget, before);
+        }
+        let exact = LinuxMemoryBudget {
+            brk_bytes: 8 * PAGE_SIZE,
+            mmap_pages: 8,
+            mmap_regions: 2,
+        };
+        assert_eq!(set_budget_in(&mut state, exact), Ok(()));
+        assert_eq!(state.budget, exact);
     }
 
     #[test]

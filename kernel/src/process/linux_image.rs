@@ -77,6 +77,8 @@ const _: () = assert!(LINUX_USER_WINDOW_END <= USER_CANONICAL_TOP_EXCLUSIVE);
 const PAGE_TABLE_SPAN: u64 = PAGE_SIZE * 512;
 /// Virtual span covered by one page directory (512 page tables).
 const PAGE_DIRECTORY_SPAN: u64 = PAGE_TABLE_SPAN * 512;
+/// Span of one PDPT (one PML4 slot, 512 GiB).
+const PAGE_POINTER_TABLE_SPAN: u64 = PAGE_DIRECTORY_SPAN * 512;
 
 /// Linux user stack size in pages (8 KiB).
 ///
@@ -90,6 +92,13 @@ pub(crate) const LINUX_STACK_PAGES: u64 = 2;
 /// ~0x2838-byte frames — see `fixtures/busybox/frozen/traces/nslookup-fixture.strace`).
 pub(crate) const LINUX_CONVENTIONAL_EXEC_STACK_PAGES: u64 = 8;
 const _: () = assert!(LINUX_CONVENTIONAL_EXEC_STACK_PAGES <= 8);
+
+/// Stack top for conventional low-VA images: the last page below the
+/// canonical user top, as on Linux (#293). The image and brk grow up from
+/// low addresses, anonymous mmap grows down from the stack guard, and the
+/// two meet only when the process has used most of its budget. The stack's
+/// own PDPT, PD and PT cost three page-table frames.
+pub(crate) const LINUX_CONVENTIONAL_STACK_TOP: u64 = USER_CANONICAL_TOP_EXCLUSIVE - PAGE_SIZE;
 /// Exclusive top of the mapped stack. The last page of the slot is deliberately
 /// left unmapped so the stack never abuts the slot boundary.
 pub(crate) const LINUX_STACK_TOP: u64 = LINUX_USER_WINDOW_END - PAGE_SIZE;
@@ -221,16 +230,13 @@ impl LinuxImageLayout {
 
     #[cfg(any(feature = "m9-low-va-self-test", test))]
     pub(crate) const fn conventional(user_region_base: u64) -> Self {
-        // Stack a few MiB above typical `0x400000` ET_EXEC mappings so image and
-        // stack share page-table depth (same GiB / 2 MiB region as the M8 budget).
-        const CONVENTIONAL_STACK_TOP: u64 = 0x0000_0000_0080_0000;
-        let stack_base = CONVENTIONAL_STACK_TOP - LINUX_STACK_PAGES * PAGE_SIZE;
+        let stack_base = LINUX_CONVENTIONAL_STACK_TOP - LINUX_STACK_PAGES * PAGE_SIZE;
         let stack_guard_page = stack_base - PAGE_SIZE;
         Self {
             user_region_base,
             window_base: LINUX_CONVENTIONAL_LOAD_POLICY.user_va_lo,
             window_end: USER_CANONICAL_TOP_EXCLUSIVE,
-            stack_top: CONVENTIONAL_STACK_TOP,
+            stack_top: LINUX_CONVENTIONAL_STACK_TOP,
             stack_base,
             stack_guard_page,
             stack_reservation_start: stack_guard_page,
@@ -250,11 +256,10 @@ impl LinuxImageLayout {
                 StackLayoutError::BufferTooSmall,
             ));
         }
-        const CONVENTIONAL_STACK_TOP: u64 = 0x0000_0000_0080_0000;
         let stack_span = stack_pages
             .checked_mul(PAGE_SIZE)
             .ok_or(LinuxImageError::VaddrOverflow)?;
-        let stack_base = CONVENTIONAL_STACK_TOP
+        let stack_base = LINUX_CONVENTIONAL_STACK_TOP
             .checked_sub(stack_span)
             .ok_or(LinuxImageError::VaddrOverflow)?;
         let stack_guard_page = stack_base
@@ -264,7 +269,7 @@ impl LinuxImageLayout {
             user_region_base,
             window_base,
             window_end: USER_CANONICAL_TOP_EXCLUSIVE,
-            stack_top: CONVENTIONAL_STACK_TOP,
+            stack_top: LINUX_CONVENTIONAL_STACK_TOP,
             stack_base,
             stack_guard_page,
             stack_reservation_start: stack_guard_page,
@@ -736,16 +741,20 @@ impl DistinctGranules {
 pub(crate) fn page_table_frame_demand(ranges: &[(u64, u64)]) -> Result<usize, LinuxImageError> {
     let mut tables = DistinctGranules::new();
     let mut directories = DistinctGranules::new();
+    let mut pointer_tables = DistinctGranules::new();
     for &(start, end) in ranges {
         if start >= end {
             continue;
         }
         tables.insert_range(start, end, PAGE_TABLE_SPAN)?;
         directories.insert_range(start, end, PAGE_DIRECTORY_SPAN)?;
+        pointer_tables.insert_range(start, end, PAGE_POINTER_TABLE_SPAN)?;
     }
-    // root + PDPT
-    2usize
-        .checked_add(tables.len)
+    // root + one PDPT per 512 GiB slot touched (at least one, as before #293:
+    // callers subtract the slot-0 PDPT that the carve-out attach provides).
+    1usize
+        .checked_add(pointer_tables.len.max(1))
+        .and_then(|total| total.checked_add(tables.len))
         .and_then(|total| total.checked_add(directories.len))
         .ok_or(LinuxImageError::PageTableBudgetExceeded)
 }
@@ -1658,9 +1667,10 @@ mod tests {
         let first = load_plan.iter_segments().next().expect("one PT_LOAD");
         assert_eq!(first.vaddr, LOW_VA_FIXTURE_IMAGE_BASE);
         assert!(first.vaddr >= LINUX_CONVENTIONAL_LOAD_POLICY.user_va_lo);
-        // Stack sits above the image in the same GiB and never touches page zero.
+        // Stack sits at the top of the user half, far above the image (#293).
         assert!(plan.layout.stack_guard_page > LOW_VA_FIXTURE_IMAGE_BASE);
-        assert!(plan.layout.stack_top <= 1 << 30);
+        assert_eq!(plan.layout.stack_top, LINUX_CONVENTIONAL_STACK_TOP);
+        assert!(plan.layout.stack_top < USER_CANONICAL_TOP_EXCLUSIVE);
         assert!(
             plan.page_table_frames + KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES
                 <= MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES

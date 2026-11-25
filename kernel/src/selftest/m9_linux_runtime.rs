@@ -48,6 +48,8 @@ static BASELINE_FD: AtomicU32 = AtomicU32::new(0);
 static WALL_TICKS_START: AtomicU64 = AtomicU64::new(0);
 static WALL_TSC_START: AtomicU64 = AtomicU64::new(0);
 const WALL_REQUESTED_NS: u64 = 5 * 200_000_000;
+/// `BRK_MAX` in `fixtures/linux-runtime-probe/probe.S`.
+const RUNTIME_PROBE_BRK_BYTES: u64 = 0x40_0000;
 
 fn launch_probe(allocator: &mut PageAllocator) -> u64 {
     crate::process::linux_exec::reset_prepare_linux_image_scratch();
@@ -80,6 +82,17 @@ fn launch_probe(allocator: &mut PageAllocator) -> u64 {
         .unwrap_or_else(|| fatal_kernel_error("m9 linux runtime generation"));
     linux_fd::grant_console_stdio_for_process(launched.pid, generation)
         .unwrap_or_else(|_| fatal_kernel_error("m9 linux runtime stdio"));
+    // The frozen probe expects `brk(base + 4 MiB + 1)` to fail with ENOMEM
+    // (`BRK_MAX` in probe.S), so this lane launches it with that budget (#293).
+    linux_mem::set_memory_budget(
+        launched.pid,
+        generation,
+        linux_mem::LinuxMemoryBudget {
+            brk_bytes: RUNTIME_PROBE_BRK_BYTES,
+            ..linux_mem::LinuxMemoryBudget::DEFAULT
+        },
+    )
+    .unwrap_or_else(|_| fatal_kernel_error("m9 linux runtime memory budget"));
     RUNTIME_PID.store(launched.pid, Ordering::Relaxed);
     RUNTIME_GENERATION.store(generation.0, Ordering::Relaxed);
     m9_linux_runtime_latency::begin_probe_cycle(launched.pid);
