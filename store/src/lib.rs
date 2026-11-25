@@ -415,6 +415,23 @@ impl<D: BlockDevice> ObjectStore<D> {
         Ok(())
     }
 
+    /// Stages the removal of object `id`. Like a write, it takes effect at the next
+    /// [`commit`](Self::commit): the committed generation that follows simply has no entry for
+    /// it, so the store keeps no tombstone and the payload's blocks are free in the arena that
+    /// commit writes. Until then a crash leaves the object as last committed.
+    ///
+    /// The id and name are free again at once: a later staged write may create a different
+    /// object under either, and the commit applies the delete and that write together.
+    pub fn delete_object(&mut self, id: u64) -> Result<(), StoreError> {
+        let index = self
+            .objects
+            .iter()
+            .position(|object| object.id == id)
+            .ok_or(StoreError::NotFound)?;
+        self.objects.remove(index);
+        Ok(())
+    }
+
     pub fn read_object_by_id(&self, id: u64) -> Result<Vec<u8>, StoreError> {
         self.objects
             .iter()
@@ -1233,6 +1250,105 @@ mod tests {
                 max_objects: MAX_OBJECTS,
             })
         );
+    }
+
+    #[test]
+    fn delete_commits_and_survives_a_reboot() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", b"hello").unwrap();
+        store.write_object(2, "beta", b"world").unwrap();
+        store.commit().unwrap();
+
+        store.delete_object(1).unwrap();
+        assert_eq!(store.read_object_by_id(1), Err(StoreError::NotFound));
+        assert_eq!(
+            store.read_object_by_name("alpha"),
+            Err(StoreError::NotFound)
+        );
+        store.commit().unwrap();
+
+        let store = reboot(store);
+        assert_eq!(store.committed_generation(), 2);
+        assert_eq!(store.read_object_by_id(1), Err(StoreError::NotFound));
+        assert_eq!(store.read_object_by_id(2).unwrap(), b"world");
+        assert_eq!(store.objects().len(), 1);
+    }
+
+    #[test]
+    fn staged_delete_is_not_durable_until_commit() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", b"kept").unwrap();
+        store.commit().unwrap();
+
+        store.delete_object(1).unwrap();
+        let store = reboot(store);
+        assert_eq!(store.read_object_by_id(1).unwrap(), b"kept");
+    }
+
+    #[test]
+    fn delete_of_an_absent_object_is_not_found_and_changes_nothing() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", b"a").unwrap();
+        assert_eq!(store.delete_object(9), Err(StoreError::NotFound));
+        store.delete_object(1).unwrap();
+        assert_eq!(store.delete_object(1), Err(StoreError::NotFound));
+        assert!(store.objects().is_empty());
+    }
+
+    #[test]
+    fn delete_frees_a_table_entry_and_a_name_for_reuse() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        for index in 0..MAX_OBJECTS as u64 {
+            store
+                .write_object(index, &format!("obj{index}"), &[index as u8])
+                .unwrap();
+        }
+        store.commit().unwrap();
+        assert!(matches!(
+            store.write_object(99, "extra", b"x"),
+            Err(StoreError::ObjectTableFull { .. })
+        ));
+
+        // One commit deletes obj0, then gives its name to a new id and its id to a new name.
+        store.delete_object(0).unwrap();
+        store.write_object(99, "obj0", b"new-name-owner").unwrap();
+        store.delete_object(1).unwrap();
+        store.write_object(1, "renamed", b"new-id-owner").unwrap();
+        store.commit().unwrap();
+
+        let store = reboot(store);
+        assert_eq!(store.objects().len(), MAX_OBJECTS);
+        assert_eq!(
+            store.read_object_by_name("obj0").unwrap(),
+            b"new-name-owner"
+        );
+        assert_eq!(store.read_object_by_id(0), Err(StoreError::NotFound));
+        assert_eq!(store.read_object_by_id(1).unwrap(), b"new-id-owner");
+        assert_eq!(store.read_object_by_name("obj1"), Err(StoreError::NotFound));
+    }
+
+    #[test]
+    fn deleted_payload_space_is_free_for_the_next_commit() {
+        // Each arena of the tiny disk holds one block.
+        let device = FakeBlockDevice::new(tiny_geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", &[0x11; 512]).unwrap();
+        store.commit().unwrap();
+        store.write_object(2, "beta", &[0x22; 512]).unwrap();
+        assert!(matches!(
+            store.commit(),
+            Err(StoreError::StorageFull { .. })
+        ));
+
+        store.delete_object(1).unwrap();
+        store.commit().unwrap();
+        let store = reboot(store);
+        assert_eq!(store.read_object_by_id(1), Err(StoreError::NotFound));
+        assert_eq!(store.read_object_by_id(2).unwrap(), [0x22; 512]);
     }
 
     #[test]
