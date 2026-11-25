@@ -244,6 +244,56 @@ userspace fs service — this lane is a broker, not a VFS.
 
 QEMU acceptance: `cargo xtask test-m9-linux-fs` (`fixtures/linux-fs-probe/`).
 
+## #304 — persistent `/home` (stage 1)
+
+`/home` is one flat, writable directory that survives reboots, sized for what a Linux Doom
+port writes: up to six save games of at most 180 KiB, its config file, and optional
+screenshots and demos. It is not a filesystem; the object store stays a boot/config and
+`/tmp` store, and a real filesystem is a later milestone item.
+
+Each file is one storage-service object (`0x4D_0001` + slot), and a 512-byte name table
+(object `0x4D_0000`, magic `CSHOME01`, 15 entries of length + name) lists them. The kernel
+code is `process::linux_fs::home_table` (layout, pure) and `home_backend` (requests).
+
+| Limit | Value |
+|-------|-------|
+| Files | 15 (`HOME_MAX_FILES`) |
+| Name bytes | 27 (`HOME_NAME_MAX`); longer is `ENAMETOOLONG` |
+| Bytes per file | 1 MiB (`HOME_MAX_FILE_BYTES`) |
+| Live bytes in the store | a third of the storage service's 8 MiB heap; past it, `ENOSPC` |
+| Bytes per `read` | 512 (one `READ_AT`; callers loop, as on any short read) |
+
+**Protocol.** The object capability gains `READ_AT`, `WRITE_AT` and `TRUNCATE`, which
+carry an `offset` (request bytes 40..48; the payload moves to 48). `WRITE_AT` and
+`TRUNCATE` are staged, not committed; the next whole-object `WRITE` or `DELETE` commits
+them with it. The new ops are only reachable from the kernel's `/home` broker, which
+authorises every request against the caller's right on the table object: native
+`SYSCALL_NR_CAP_OBJECT` submissions of them are `EINVAL`. The storage service answers
+`NO_SPACE` (status 5) past its live-bytes budget or a full object table.
+
+**Durability.** Writing the table, with every file's current length, commits the table
+and all staged file bytes together. It is written on create, rename and unlink, and by
+`close` of a written fd, `fsync` and `fdatasync`. A crash loses writes since the last
+commit, never the agreement between the table's lengths and the bytes.
+
+**Syscalls.** `open` (`O_CREAT`, `O_TRUNC`; `O_APPEND` and `O_EXCL` stay `EINVAL`), `read`, `write` (any
+length; file writes are no longer clamped to 4096 bytes), `lseek`, `close`, `stat`,
+`lstat`, and the new `fstat`, `fsync`, `fdatasync`, `ftruncate`, `rename` and `unlink`.
+`mkdir` under `/home` is `EPERM` (it is flat), `mkdir /home` is `EEXIST`, a rename into or
+out of `/home` is `EXDEV`, and exec of a `/home` file is `EACCES`. The Linux grant
+(`TmpObjects`) now also carries `READ`/`WRITE` on the table object, so the shell's
+authority line reads `tmp-objects=5`.
+
+**Known gaps.** A file unlinked while open is gone at once (its open fds fail). A process
+that exits without closing a written file leaves the change staged until the next commit.
+No subdirectories, locking, permissions or timestamps.
+
+QEMU acceptance: `cargo xtask test-m9-linux-fs` boots twice on one disk. The first boot runs
+`fixtures/linux-home-probe/` on an empty `/home`: one 184320-byte `write` of a save, read
+back, a config written, `fsync`ed and `ftruncate`d, and a write-then-rename-then-unlink. The
+second boot finds `[HOME] loaded files=2 bytes=184324`, checks both files byte for byte,
+and removes them.
+
 ## M9 #146 — Linux exec / process image substrate
 
 `kernel/src/process/linux_exec.rs` generalizes the M8 loader into a bounded,
@@ -538,7 +588,7 @@ In the default image the system manifest's shell row (`SYSTEM_SHELL_SPEC`, servi
 - `TmpObjects`: read and write capabilities on the four `/tmp` backing objects (`0x4C0000`–`0x4C0003`), so `/tmp` is writable. Storage serves them.
 - `NetworkClient`: the network client entitlement, and through it a client capability for the live network instance (see [Network client](#network-client-218-s7a)).
 
-Being a Linux process adds the Linux personality (`linux=1`). It gets no other network authority, no block device, no object-service role, no lifecycle control and no IPC endpoints. The launch-time authority audit counts all of this; the shell's line must read `console=1 net-client=1 net-client-entitlement=1 tmp-objects=4 linux=1 console-input=1` with every other count 0 while a network instance is live, and `net-client=0` while none is. `for_grants` derives that expectation from the row's image and grants, and from whether a network instance is live, as for every other row. The process line ends `net-client=1` when the row grants `NetworkClient`, whether or not a client capability was issued.
+Being a Linux process adds the Linux personality (`linux=1`). It gets no other network authority, no block device, no object-service role, no lifecycle control and no IPC endpoints. The launch-time authority audit counts all of this; the shell's line must read `console=1 net-client=1 net-client-entitlement=1 tmp-objects=5 linux=1 console-input=1` with every other count 0 while a network instance is live, and `net-client=0` while none is. `for_grants` derives that expectation from the row's image and grants, and from whether a network instance is live, as for every other row. The process line ends `net-client=1` when the row grants `NetworkClient`, whether or not a client capability was issued.
 
 **fd 0.** Only a launch whose row carries `ConsoleInput` installs it. Every other process, and every other build, keeps fd 0 closed as before. Writing to fd 0 is `EBADF`. `read(0)`:
 

@@ -508,6 +508,101 @@ impl<D: BlockDevice> ObjectStore<D> {
         Ok(())
     }
 
+    /// Length in bytes of the live (possibly staged) object `id`.
+    pub fn object_len(&self, id: u64) -> Result<usize, StoreError> {
+        self.objects
+            .iter()
+            .find(|object| object.id == id)
+            .map(StoredObject::len)
+            .ok_or(StoreError::NotFound)
+    }
+
+    /// Total payload bytes of every live (possibly staged) object.
+    pub fn live_bytes(&self) -> usize {
+        self.objects.iter().map(StoredObject::len).sum()
+    }
+
+    /// Copies the bytes of object `id` from `offset` into `out`, returning how many it
+    /// copied: fewer than `out.len()` at the object's end, and 0 at or past it.
+    pub fn read_object_at(
+        &self,
+        id: u64,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<usize, StoreError> {
+        let object = self
+            .objects
+            .iter()
+            .find(|object| object.id == id)
+            .ok_or(StoreError::NotFound)?;
+        let Ok(start) = usize::try_from(offset) else {
+            return Ok(0);
+        };
+        if start >= object.data.len() {
+            return Ok(0);
+        }
+        let take = (object.data.len() - start).min(out.len());
+        out[..take].copy_from_slice(&object.data[start..start + take]);
+        Ok(take)
+    }
+
+    /// Stages `data` at `offset` in object `id`, creating the object under `name` when it
+    /// is missing and zero-filling any gap past its end. Like
+    /// [`write_object`](Self::write_object) it takes effect at the next commit; an
+    /// existing object keeps its epoch.
+    pub fn write_object_at(
+        &mut self,
+        id: u64,
+        name: &str,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), StoreError> {
+        let end = offset
+            .checked_add(data.len() as u64)
+            .filter(|end| *end <= u64::from(u32::MAX))
+            .ok_or(StoreError::ObjectTooLarge {
+                len: usize::MAX,
+                max: u32::MAX,
+            })?;
+        let index = self.index_or_create(id, name)?;
+        let bytes = &mut self.objects[index].data;
+        let start = offset as usize;
+        let end = end as usize;
+        if bytes.len() < end {
+            bytes.resize(end, 0);
+        }
+        bytes[start..end].copy_from_slice(data);
+        Ok(())
+    }
+
+    /// Stages object `id` cut or zero-extended to `len` bytes, creating it under `name`
+    /// when it is missing. It takes effect at the next commit.
+    pub fn truncate_object(&mut self, id: u64, name: &str, len: u64) -> Result<(), StoreError> {
+        if len > u64::from(u32::MAX) {
+            return Err(StoreError::ObjectTooLarge {
+                len: usize::MAX,
+                max: u32::MAX,
+            });
+        }
+        let index = self.index_or_create(id, name)?;
+        let bytes = &mut self.objects[index].data;
+        bytes.truncate(len as usize);
+        bytes.resize(len as usize, 0);
+        Ok(())
+    }
+
+    /// Index of object `id`, staging an empty object under `name` when there is none.
+    fn index_or_create(&mut self, id: u64, name: &str) -> Result<usize, StoreError> {
+        if let Some(index) = self.objects.iter().position(|object| object.id == id) {
+            return Ok(index);
+        }
+        self.write_object(id, name, &[])?;
+        self.objects
+            .iter()
+            .position(|object| object.id == id)
+            .ok_or(StoreError::NotFound)
+    }
+
     pub fn read_object_by_id(&self, id: u64) -> Result<Vec<u8>, StoreError> {
         self.objects
             .iter()
@@ -1439,6 +1534,98 @@ mod tests {
         assert_eq!(store.read_object_by_name("beta").unwrap(), b"world!");
         assert_eq!(store.objects().len(), 2);
         assert_eq!(store.committed_generation(), 1);
+    }
+
+    #[test]
+    fn offset_writes_build_an_object_that_survives_a_reboot() {
+        let geometry = BlockGeometry::new(BlockDeviceId::new(14), 512, 1024, 8, false).unwrap();
+        let device = FakeBlockDevice::new(geometry).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+
+        // 512-byte writes in order, as the Linux `/home` projection sends them.
+        let expected: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8).collect();
+        for (index, chunk) in expected.chunks(512).enumerate() {
+            store
+                .write_object_at(7, "save", (index * 512) as u64, chunk)
+                .unwrap();
+        }
+        assert_eq!(store.object_len(7).unwrap(), expected.len());
+        assert_eq!(store.live_bytes(), expected.len());
+        store.commit().unwrap();
+
+        let store = reboot(store);
+        assert_eq!(store.read_object_by_id(7).unwrap(), expected);
+        let mut out = [0u8; 512];
+        assert_eq!(store.read_object_at(7, 69_900, &mut out).unwrap(), 100);
+        assert_eq!(&out[..100], &expected[69_900..]);
+        assert_eq!(store.read_object_at(7, 70_000, &mut out).unwrap(), 0);
+        assert_eq!(store.read_object_at(7, u64::MAX, &mut out).unwrap(), 0);
+        assert_eq!(
+            store.read_object_at(8, 0, &mut out),
+            Err(StoreError::NotFound)
+        );
+    }
+
+    #[test]
+    fn offset_write_past_the_end_zero_fills_and_keeps_the_epoch() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", b"abc").unwrap();
+        let epoch = store.epoch_of(1).unwrap();
+
+        store.write_object_at(1, "alpha", 6, b"xy").unwrap();
+        assert_eq!(store.read_object_by_id(1).unwrap(), b"abc\0\0\0xy");
+        store.write_object_at(1, "alpha", 1, b"Z").unwrap();
+        assert_eq!(store.read_object_by_id(1).unwrap(), b"aZc\0\0\0xy");
+        assert_eq!(store.epoch_of(1).unwrap(), epoch);
+    }
+
+    #[test]
+    fn truncate_cuts_extends_and_creates() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", b"abcdef").unwrap();
+
+        store.truncate_object(1, "alpha", 2).unwrap();
+        assert_eq!(store.read_object_by_id(1).unwrap(), b"ab");
+        store.truncate_object(1, "alpha", 4).unwrap();
+        assert_eq!(store.read_object_by_id(1).unwrap(), b"ab\0\0");
+        store.truncate_object(2, "beta", 0).unwrap();
+        assert_eq!(store.object_len(2).unwrap(), 0);
+        store.commit().unwrap();
+
+        let store = reboot(store);
+        assert_eq!(store.read_object_by_id(1).unwrap(), b"ab\0\0");
+        assert_eq!(store.read_object_by_id(2).unwrap(), b"");
+    }
+
+    #[test]
+    fn staged_offset_writes_are_lost_without_a_commit() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", b"kept").unwrap();
+        store.commit().unwrap();
+
+        store.write_object_at(1, "alpha", 0, b"LOST").unwrap();
+        store.write_object_at(2, "beta", 0, b"gone").unwrap();
+        let store = reboot(store);
+        assert_eq!(store.read_object_by_id(1).unwrap(), b"kept");
+        assert_eq!(store.object_len(2), Err(StoreError::NotFound));
+    }
+
+    #[test]
+    fn offset_writes_refuse_objects_past_u32_bytes() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        assert!(matches!(
+            store.write_object_at(1, "alpha", u64::from(u32::MAX), b"x"),
+            Err(StoreError::ObjectTooLarge { .. })
+        ));
+        assert!(matches!(
+            store.truncate_object(1, "alpha", u64::from(u32::MAX) + 1),
+            Err(StoreError::ObjectTooLarge { .. })
+        ));
+        assert!(store.objects().is_empty());
     }
 
     #[test]

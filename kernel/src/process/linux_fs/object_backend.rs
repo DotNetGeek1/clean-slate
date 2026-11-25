@@ -53,6 +53,10 @@ pub(crate) fn reset_tmp_store_for_host_tests() {
     *store_mut() = TmpStore::new();
 }
 
+/// Objects a Linux process holds `READ | WRITE` on for its file projections: every `/tmp`
+/// backing object, and the `/home` table object, which authorises every `/home` file (#304).
+pub(crate) const LINUX_FILE_OBJECT_GRANTS: usize = LINUX_TMP_MAX_FILES + 1;
+
 pub(crate) fn grant_linux_tmp_object_capabilities(pid: u64) -> Result<(), &'static str> {
     let holder = HolderId(pid);
     for index in 0..LINUX_TMP_MAX_FILES {
@@ -60,6 +64,15 @@ pub(crate) fn grant_linux_tmp_object_capabilities(pid: u64) -> Result<(), &'stat
         if grant_object_capability(holder, object_id, Rights::READ.union(Rights::WRITE)).is_err() {
             return Err("linux tmp object grant failed");
         }
+    }
+    if grant_object_capability(
+        holder,
+        super::home_table::HOME_TABLE_OBJECT_ID,
+        Rights::READ.union(Rights::WRITE),
+    )
+    .is_err()
+    {
+        return Err("linux home object grant failed");
     }
     Ok(())
 }
@@ -157,10 +170,12 @@ pub(crate) fn tmp_file_by_object_id(object_id: u64) -> Option<TmpFileState> {
     None
 }
 
-/// Whether `object_id` is one of the `/tmp` backing objects (launch-time authority audit).
+/// Whether `object_id` is one of the objects [`grant_linux_tmp_object_capabilities`]
+/// grants: a `/tmp` backing object or the `/home` table (launch-time authority audit).
 #[cfg(clean_slate_system_init)]
 pub(crate) fn is_tmp_object(object_id: u64) -> bool {
     slot_index_for_object(object_id).is_some()
+        || object_id == super::home_table::HOME_TABLE_OBJECT_ID
 }
 
 fn slot_index_for_object(object_id: u64) -> Option<usize> {

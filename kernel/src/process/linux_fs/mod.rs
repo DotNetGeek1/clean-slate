@@ -1,6 +1,8 @@
 //! Linux filesystem/path projection (#101).
 #![allow(dead_code)]
 
+pub(crate) mod home_backend;
+pub(crate) mod home_table;
 pub(crate) mod namespace;
 pub(crate) mod object_backend;
 pub(crate) mod path;

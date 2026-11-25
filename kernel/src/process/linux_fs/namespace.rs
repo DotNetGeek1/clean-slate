@@ -1,5 +1,6 @@
 //! Bounded Linux namespace node table (#101).
 
+use super::home_backend;
 use super::object_backend::{
     tmp_file_by_object_id, tmp_file_create, tmp_file_lookup_by_path, LINUX_TMP_MAX_ENTRIES,
 };
@@ -25,9 +26,19 @@ pub(crate) enum NodeKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NodeBackend {
-    Rootfs { entry_index: u16 },
-    Object { object_id: u64 },
+    Rootfs {
+        entry_index: u16,
+    },
+    Object {
+        object_id: u64,
+    },
     TmpDir,
+    /// The persistent `/home` directory (#304), whatever the root image holds there.
+    HomeDir,
+    /// A file in `/home`: its slot in the `/home` table.
+    Home {
+        slot: u8,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -169,6 +180,22 @@ impl NodeTable {
         child_path[pos..pos + name.len()].copy_from_slice(name);
         pos += name.len();
         let child_path = &child_path[..pos];
+        if parent.index == self.root_index && name == b"home" {
+            return self.attach_node(parent.index, name, NodeKind::Dir, NodeBackend::HomeDir);
+        }
+        if self.nodes[parent.index as usize].backend == NodeBackend::HomeDir {
+            // `/home` holds only its table's files; the syscall loaded the table first.
+            if !home_backend::is_loaded() {
+                return Err(ENOENT);
+            }
+            let slot = home_backend::table().find(name).ok_or(ENOENT)?;
+            return self.attach_node(
+                parent.index,
+                name,
+                NodeKind::File,
+                NodeBackend::Home { slot: slot as u8 },
+            );
+        }
         if let Some(tmp) = tmp_file_lookup_by_path(child_path) {
             return self.attach_tmp_file_node(parent.index, name, tmp);
         }
@@ -205,6 +232,22 @@ impl NodeTable {
         name: &[u8],
         object_id: u64,
     ) -> Result<NodeId, LinuxErrno> {
+        self.attach_node(
+            parent_index,
+            name,
+            NodeKind::File,
+            NodeBackend::Object { object_id },
+        )
+    }
+
+    /// The node `name` under `parent_index`, created with `kind` and `backend` if absent.
+    fn attach_node(
+        &mut self,
+        parent_index: u16,
+        name: &[u8],
+        kind: NodeKind,
+        backend: NodeBackend,
+    ) -> Result<NodeId, LinuxErrno> {
         for index in 0..LINUX_FS_MAX_NODES {
             let node = &self.nodes[index];
             if node.live
@@ -219,14 +262,45 @@ impl NodeTable {
             }
         }
         let index = self.alloc_node()?;
-        self.fill_node(
-            index,
-            parent_index,
-            name,
-            NodeKind::File,
-            NodeBackend::Object { object_id },
-        );
+        self.fill_node(index, parent_index, name, kind, backend);
         Ok(node_id(self, index))
+    }
+
+    /// The slot of a `/home` file node.
+    pub fn home_slot_for_node(&self, id: NodeId) -> Result<usize, LinuxErrno> {
+        self.check_node(id)?;
+        match self.nodes[id.index as usize].backend {
+            NodeBackend::Home { slot } => Ok(slot as usize),
+            _ => Err(clean_slate_linux_abi::EINVAL),
+        }
+    }
+
+    fn home_node_index(&self, slot: usize) -> Option<usize> {
+        self.nodes
+            .iter()
+            .position(|node| node.live && node.backend == NodeBackend::Home { slot: slot as u8 })
+    }
+
+    /// Drops the node of `/home` file `slot` after an unlink or a replacing rename: open
+    /// fds on it then fail with `EBADF`, and the slot can hold another file.
+    pub fn evict_home_file(&mut self, slot: usize) {
+        if let Some(index) = self.home_node_index(slot) {
+            let node = &mut self.nodes[index];
+            node.live = false;
+            node.generation = node.generation.wrapping_add(1);
+            self.live_count = self.live_count.saturating_sub(1);
+        }
+    }
+
+    /// Gives the node of `/home` file `slot` its new name after a rename; open fds keep it.
+    pub fn rename_home_file(&mut self, slot: usize, name: &[u8]) {
+        if let Some(index) = self.home_node_index(slot) {
+            let len = name.len().min(NAME_MAX);
+            let node = &mut self.nodes[index];
+            node.name = [0; NAME_MAX];
+            node.name[..len].copy_from_slice(&name[..len]);
+            node.name_len = len as u8;
+        }
     }
 
     fn maybe_follow_link(
@@ -255,6 +329,13 @@ impl NodeTable {
         let norm = &norm[..len];
         if norm == b"/" {
             return Err(EEXIST);
+        }
+        if norm == home_backend::LINUX_HOME_PATH {
+            return Err(EEXIST);
+        }
+        if home_backend::is_home_path(norm) {
+            // `/home` is one flat directory (#304).
+            return Err(clean_slate_linux_abi::EPERM);
         }
         if !norm.starts_with(b"/tmp/") && norm != b"/tmp" {
             return Err(EROFS);
@@ -390,7 +471,11 @@ impl NodeTable {
                 let len = tmp_file_by_object_id(object_id).map(|f| f.len).unwrap_or(0);
                 (len as i64, S_IFREG | 0o644)
             }
-            NodeBackend::TmpDir => (0, S_IFDIR | 0o755),
+            NodeBackend::TmpDir | NodeBackend::HomeDir => (0, S_IFDIR | 0o755),
+            NodeBackend::Home { slot } => (
+                home_backend::file_len(slot as usize) as i64,
+                S_IFREG | 0o644,
+            ),
         };
         Ok(LinuxStatFields {
             st_dev: 1,
@@ -452,9 +537,31 @@ impl NodeTable {
             .position(|&b| b == 0)
             .unwrap_or(LINUX_PATH_MAX);
         let dir_path = &dir_path[..dir_len];
+        if dir.index == self.root_index && count < out.len() {
+            let home = self.descend(dir, b"home", image)?;
+            out[count] = (home, dirent_type(NodeKind::Dir));
+            count += 1;
+        }
+        if self.nodes[dir.index as usize].backend == NodeBackend::HomeDir
+            && home_backend::is_loaded()
+        {
+            let table = *home_backend::table();
+            for (_, entry) in table.live() {
+                if count >= out.len() {
+                    break;
+                }
+                let id = self.descend(dir, entry.name(), image)?;
+                out[count] = (id, dirent_type(NodeKind::File));
+                count += 1;
+            }
+        }
         for child in image.children(dir_path) {
             if count >= out.len() {
                 break;
+            }
+            if child.path == home_backend::LINUX_HOME_PATH || home_backend::is_home_path(child.path)
+            {
+                continue;
             }
             let id = self.lookup_path(child.path, image, false)?;
             let kind = self.nodes[id.index as usize].kind;
@@ -696,7 +803,7 @@ pub(crate) fn check_write_allowed(path: &[u8], flags: u32) -> Result<(), LinuxEr
     let mut norm = [0u8; LINUX_PATH_MAX];
     let len = normalize_path(path, &mut norm)?;
     let norm = &norm[..len];
-    if open_write_intent(flags) && !norm.starts_with(b"/tmp") {
+    if open_write_intent(flags) && !norm.starts_with(b"/tmp") && !home_backend::is_home_path(norm) {
         return Err(EROFS);
     }
     Ok(())
@@ -743,6 +850,6 @@ pub(crate) fn resolve_executable_bytes<'a>(
             Ok(entry.data)
         }
         NodeBackend::Object { .. } => Err(EACCES),
-        NodeBackend::TmpDir => Err(EACCES),
+        NodeBackend::TmpDir | NodeBackend::HomeDir | NodeBackend::Home { .. } => Err(EACCES),
     }
 }

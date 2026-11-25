@@ -84,7 +84,7 @@ In the default image the kernel launches userspace init instead of the two kerne
 [IPC ] console pid=1: [INIT] service=20736 ready; starting service=21504
 [SVC ] shell process pid=5 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1
 [SVC ] console input so far lines=0 eofs=0 deferred=0 edit-overflow=0 refused=0 eof-dropped=0 control-dropped=0 irqs=0 spurious=0 bytes=0 max-drained=0 overruns=0 line-errors=0 rearms=0 stale=0 wakes=0 woken=0 committed=0 deferred-line=0
-[SVC ] authority service=21504 pid=5 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1
+[SVC ] authority service=21504 pid=5 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1
 [SVC ] launch service=21504 pid=5 gen=1
 [IPC ] console pid=1: [INIT] service=21760 ready gen=1
 [SVC ] ready service=20992 pid=4 gen=1 source=live-instance kernel-observed raw-backend=loopback service-reported link-up=1

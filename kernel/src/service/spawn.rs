@@ -44,7 +44,8 @@ use clean_slate_service_fixtures::{
     feature = "m2-timer-self-test"
 )))]
 use clean_slate_service_fixtures::{
-    StorageServiceBootstrap, STORAGE_SERVICE_BOOTSTRAP_ADDRESS, STORAGE_SERVICE_ID,
+    StorageServiceBootstrap, STORAGE_SERVICE_BOOTSTRAP_ADDRESS, STORAGE_SERVICE_HEAP_ADDRESS,
+    STORAGE_SERVICE_HEAP_BYTES, STORAGE_SERVICE_ID, STORAGE_SERVICE_MODE_OBJECT_SERVICE,
     STORAGE_UNAUTHORIZED_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::InstanceGeneration;
@@ -119,8 +120,10 @@ const _: () = assert!(STORAGE_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDR
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
-const STORAGE_SERVICE_MAPPED_PAGES: usize =
-    STORAGE_USERSPACE_MAPPED_CODE_PAGES + STORAGE_SERVICE_STACK_PAGES as usize + 1;
+const STORAGE_SERVICE_MAPPED_PAGES: usize = STORAGE_USERSPACE_MAPPED_CODE_PAGES
+    + STORAGE_SERVICE_STACK_PAGES as usize
+    + 1
+    + (STORAGE_SERVICE_HEAP_BYTES / PAGE_SIZE) as usize;
 #[cfg(not(any(
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",
@@ -129,6 +132,31 @@ const STORAGE_SERVICE_MAPPED_PAGES: usize =
 const _: () = assert!(
     STORAGE_SERVICE_MAPPED_PAGES <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
 );
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+const _: () = assert!(
+    STORAGE_SERVICE_HEAP_ADDRESS
+        >= STORAGE_SERVICE_STACK_ADDRESS + STORAGE_SERVICE_STACK_PAGES * PAGE_SIZE
+);
+
+/// Heap pages the kernel maps for a storage service started in `mode`: the object service's
+/// [`STORAGE_SERVICE_HEAP_BYTES`], and none for the fixture modes, which use the heap in
+/// their image.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+const fn storage_service_heap_pages(mode: u64) -> u64 {
+    if mode == STORAGE_SERVICE_MODE_OBJECT_SERVICE {
+        STORAGE_SERVICE_HEAP_BYTES / PAGE_SIZE
+    } else {
+        0
+    }
+}
 
 #[cfg(clean_slate_system_init)]
 include!(concat!(env!("OUT_DIR"), "/init_userspace_entry.rs"));
@@ -1269,11 +1297,28 @@ fn launch_storage_userspace_service(
                 STORAGE_SERVICE_STACK_ADDRESS,
                 STORAGE_SERVICE_STACK_PAGES,
             )?;
+            // The object service holds every object in memory and copies them on each
+            // commit, so it gets a heap of its own here, outside the 64-page image (#304).
+            // The fixture modes keep the small heap in the image.
+            let heap_pages = storage_service_heap_pages(spec.mode);
+            if heap_pages != 0 {
+                map_user_stack_pages(
+                    address_space,
+                    allocator,
+                    STORAGE_SERVICE_HEAP_ADDRESS,
+                    heap_pages,
+                )
+                .map_err(|_| "allocator could not provide the storage service heap")?;
+            }
             let data_frame = allocator
                 .allocate_page()
                 .ok_or("allocator could not provide a storage bootstrap page")?;
             zero_page(data_frame);
             let mut bootstrap = StorageServiceBootstrap::new(spec.mode, context.previous_handle);
+            if heap_pages != 0 {
+                bootstrap.heap_address = STORAGE_SERVICE_HEAP_ADDRESS;
+                bootstrap.heap_bytes = heap_pages * PAGE_SIZE;
+            }
             let handles = apply_bootstrap_grants(spec.grants, pid, &mut KernelBootstrapGrants)?;
             if let Some(handle) = handles.object_service_role {
                 bootstrap.object_role_handle = handle;

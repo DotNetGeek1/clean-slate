@@ -100,7 +100,8 @@ pub enum Grant {
     /// Serial console input, installed as fd 0 (stdin). Requires `Console` earlier in the row,
     /// because fd 0 is added to the fd table `Console` creates.
     ConsoleInput,
-    /// `READ | WRITE` on every `/tmp` backing object, so `/tmp` is writable.
+    /// `READ | WRITE` on every `/tmp` backing object and the `/home` table object, so `/tmp`
+    /// and the persistent `/home` (#304) are writable.
     TmpObjects,
     /// Entitlement to the network service's client authority (Linux sockets). The entitlement
     /// itself authorises nothing; the kernel derives a client capability bound to the live

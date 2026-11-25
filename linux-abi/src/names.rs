@@ -3,7 +3,8 @@
 /// Human-readable syscall name for known numbers, or `UNKNOWN(nr)`.
 pub const fn linux_syscall_name(nr: u64) -> SyscallName {
     use crate::fs::{
-        SYS_GETCWD, SYS_GETDENTS64, SYS_LSEEK, SYS_LSTAT, SYS_MKDIR, SYS_OPEN, SYS_READ, SYS_STAT,
+        SYS_FDATASYNC, SYS_FSTAT, SYS_FSYNC, SYS_FTRUNCATE, SYS_GETCWD, SYS_GETDENTS64, SYS_LSEEK,
+        SYS_LSTAT, SYS_MKDIR, SYS_OPEN, SYS_READ, SYS_RENAME, SYS_STAT, SYS_UNLINK,
     };
     use crate::process::{SYS_EXIT_GROUP, SYS_FORK, SYS_GETPPID, SYS_PIPE, SYS_WAIT4};
     use crate::socket::{SYS_BIND, SYS_CONNECT, SYS_SENDTO, SYS_SOCKET};
@@ -17,6 +18,7 @@ pub const fn linux_syscall_name(nr: u64) -> SyscallName {
         SYS_OPEN => SyscallName::Known("open"),
         SYS_CLOSE => SyscallName::Known("close"),
         SYS_STAT => SyscallName::Known("stat"),
+        SYS_FSTAT => SyscallName::Known("fstat"),
         SYS_LSTAT => SyscallName::Known("lstat"),
         SYS_LSEEK => SyscallName::Known("lseek"),
         SYS_EXECVE => SyscallName::Known("execve"),
@@ -29,6 +31,11 @@ pub const fn linux_syscall_name(nr: u64) -> SyscallName {
         SYS_FCNTL => SyscallName::Known("fcntl"),
         SYS_GETCWD => SyscallName::Known("getcwd"),
         SYS_MKDIR => SyscallName::Known("mkdir"),
+        SYS_FSYNC => SyscallName::Known("fsync"),
+        SYS_FDATASYNC => SyscallName::Known("fdatasync"),
+        SYS_FTRUNCATE => SyscallName::Known("ftruncate"),
+        SYS_RENAME => SyscallName::Known("rename"),
+        SYS_UNLINK => SyscallName::Known("unlink"),
         SYS_GETDENTS64 => SyscallName::Known("getdents64"),
         SYS_SOCKET => SyscallName::Known("socket"),
         SYS_CONNECT => SyscallName::Known("connect"),

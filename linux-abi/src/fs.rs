@@ -3,10 +3,16 @@
 pub const SYS_READ: u64 = 0;
 pub const SYS_OPEN: u64 = 2;
 pub const SYS_STAT: u64 = 4;
+pub const SYS_FSTAT: u64 = 5;
 pub const SYS_LSTAT: u64 = 6;
 pub const SYS_LSEEK: u64 = 8;
+pub const SYS_FSYNC: u64 = 74;
+pub const SYS_FDATASYNC: u64 = 75;
+pub const SYS_FTRUNCATE: u64 = 77;
 pub const SYS_GETCWD: u64 = 79;
+pub const SYS_RENAME: u64 = 82;
 pub const SYS_MKDIR: u64 = 83;
+pub const SYS_UNLINK: u64 = 87;
 pub const SYS_GETDENTS64: u64 = 217;
 
 pub const O_RDONLY: u32 = 0;
@@ -23,6 +29,9 @@ pub const O_NONBLOCK: u32 = 0o4000;
 pub const S_IFDIR: u32 = 0o040000;
 pub const S_IFREG: u32 = 0o100000;
 pub const S_IFLNK: u32 = 0o120000;
+pub const S_IFCHR: u32 = 0o020000;
+pub const S_IFIFO: u32 = 0o010000;
+pub const S_IFSOCK: u32 = 0o140000;
 
 pub const DT_UNKNOWN: u8 = 0;
 pub const DT_DIR: u8 = 4;
@@ -36,6 +45,7 @@ pub const SEEK_END: u32 = 2;
 use crate::LinuxErrno;
 
 pub const EEXIST: LinuxErrno = LinuxErrno(17);
+pub const EXDEV: LinuxErrno = LinuxErrno(18);
 pub const ENOTDIR: LinuxErrno = LinuxErrno(20);
 pub const EISDIR: LinuxErrno = LinuxErrno(21);
 pub const ENOSPC: LinuxErrno = LinuxErrno(28);
