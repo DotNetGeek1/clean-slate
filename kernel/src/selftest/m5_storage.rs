@@ -65,14 +65,14 @@ const PERSISTENCE_ALPHA_V1: [u8; 1300] = [0x11; 1300];
 const PERSISTENCE_ALPHA_V2: [u8; 900] = [0x22; 900];
 const PERSISTENCE_ALPHA_V3: [u8; 700] = [0x33; 700];
 const CRASH_AFTER_WRITE_EARLY: u64 = 1;
-const CRASH_AFTER_WRITE_LATE: u64 = 3;
+const CRASH_AFTER_WRITE_LATE: u64 = 4;
 const SYSCALL_ESTALE: u64 = u64::MAX - 116;
 /// Logical block size of the M5 QEMU disk; the store's superblock is one block.
 const SUPERBLOCK_BYTES: usize = 512;
 const SUPERBLOCK_SLOT_ONE_LBA: u64 = 1;
-/// Start of the superblock's second object-table entry (48-byte header, one 64-byte entry):
-/// the torn copy carries generation 3's header and alpha entry and slot 1's old beta entry.
-const SUPERBLOCK_TEAR_OFFSET: usize = 48 + 64;
+/// Start of the superblock's object-table extent: the torn copy carries generation 3's
+/// header up to its next epoch, and slot 1's old table extent and table checksum.
+const SUPERBLOCK_TEAR_OFFSET: usize = 56;
 const PAYLOAD_TEAR_WRITE: u64 = 1;
 const PAYLOAD_TEAR_BLOCKS: u32 = 2;
 
@@ -113,7 +113,8 @@ struct M5CrashPlan {
 }
 
 /// How the crash-arm boot tears one write of the generation-3 commit (alpha's two-block
-/// payload, beta's payload, the superblock into slot 1) before it stops after write 3.
+/// payload, beta's payload, the object table, the superblock into slot 1) before it stops
+/// after write 4.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum M5Tear {
     None,
@@ -122,8 +123,9 @@ enum M5Tear {
     /// (`M5_STALE_SUPERBLOCK_SLOT`).
     SuperblockSuffix,
     /// Only the first block of alpha's payload write reaches the device, yet the write
-    /// reports success, so the payload flush cannot repair it. Beta's payload and the
-    /// superblock then complete, as on a device that loses or misdirects a write.
+    /// reports success, so the payload flush cannot repair it. Beta's payload, the object
+    /// table and the superblock then complete, as on a device that loses or misdirects a
+    /// write.
     PayloadPrefix {
         torn_lba: Option<u64>,
     },

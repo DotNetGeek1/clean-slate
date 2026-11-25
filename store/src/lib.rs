@@ -1,38 +1,48 @@
-//! M5 minimal persistent object store.
+//! M5 persistent object store: a boot/config and `/tmp` store, not a filesystem.
 //!
-//! Version 2 uses a fixed, host-testable on-disk layout encoded explicitly in
+//! Version 3 uses a fixed, host-testable on-disk layout encoded explicitly in
 //! little-endian bytes:
 //!
 //! - LBA 0: superblock slot A
 //! - LBA 1: superblock slot B
-//! - LBA 2..: two alternating committed object-payload arenas selected by the
-//!   active superblock slot
+//! - LBA 2..: two alternating committed arenas selected by the active
+//!   superblock slot; each commit writes its object payloads and then its
+//!   object table into the arena of the slot it commits to
 //!
 //! Each superblock occupies exactly one logical block and contains:
 //!
 //! - magic (`CSO1`);
-//! - format version (`2`);
+//! - format version (`3`);
 //! - CRC-32C over the full superblock block with the checksum field zeroed;
 //! - expected logical block size and device block count;
 //! - generation number for slot selection;
-//! - fixed table capacity and active object count;
-//! - a fixed object table whose entries store object id, UTF-8 name, exact byte
-//!   length, validated data extent, and a payload CRC-32C used to reject a
-//!   superblock whose referenced data is only partially durable.
+//! - the object limit for this geometry ([`object_limit`]) and the live object
+//!   count;
+//! - the next object epoch, so a re-created object never reuses an epoch;
+//! - the extent of the object table and its CRC-32C.
 //!
-//! Version 1 differed only in using an additive byte sum for both checksums.
-//! It is not migrated: a version-1 image is refused with
-//! [`IncompatibleFormatError::UnsupportedVersion`] and never reformatted.
+//! The object table holds one entry per live object: object id, epoch, UTF-8
+//! name, exact byte length, data extent, and a payload CRC-32C. The table CRC
+//! covers the committing generation and the table's location as well as its
+//! bytes. Each payload CRC covers the object's id, epoch, start LBA and length
+//! as well as its bytes, so a payload that is intact but sits at another
+//! object's place (two objects can hold the same bytes) is rejected rather
+//! than read as the object the table names.
+//!
+//! Versions 1 (an additive byte sum) and 2 (CRC-32C, with the object table
+//! inside the superblock and a fixed limit of seven objects) are not migrated:
+//! an older image is refused with [`IncompatibleFormatError::UnsupportedVersion`]
+//! and never reformatted.
 //!
 //! [`probe`] decides what may be done with a device: only a blank one (both
 //! superblock slots entirely zero) may be formatted, and [`ObjectStore::open`]
 //! refuses every other unmountable device rather than reformatting it.
 //!
-//! Commits never need in-place multi-block metadata mutation: object data is
-//! written first and flushed, then a complete next-generation superblock is
-//! written to the alternate metadata slot and flushed. The first flush keeps a
-//! write-back cache from persisting the superblock ahead of the payload it
-//! references.
+//! Commits never need in-place multi-block metadata mutation: object data and
+//! the object table are written first and flushed, then a complete
+//! next-generation superblock is written to the alternate metadata slot and
+//! flushed. The first flush keeps a write-back cache from persisting the
+//! superblock ahead of the table and payload it references.
 //!
 //! The device is assumed to write one logical block (512 bytes on today's
 //! disks) atomically on power loss. Each superblock is one block, so a slot
@@ -55,19 +65,39 @@ use alloc::vec;
 use alloc::vec::Vec;
 use clean_slate_block::{BlockDevice, BlockGeometry, BlockIoError};
 use core::cmp::Ordering;
-use crc32c::{crc32c, Crc32c};
+use crc32c::Crc32c;
 
 pub const STORE_MAGIC: u32 = 0x4353_4F31; // "CSO1"
-pub const STORE_VERSION: u16 = 2;
+pub const STORE_VERSION: u16 = 3;
 pub const SUPERBLOCK_SLOTS: u64 = 2;
 pub const DATA_START_LBA: u64 = SUPERBLOCK_SLOTS;
-pub const MAX_OBJECTS: usize = 7;
+/// The fewest live objects any supported geometry allows; see [`object_limit`].
+pub const MIN_OBJECT_LIMIT: usize = 128;
+/// The most live objects any geometry allows; see [`object_limit`].
+pub const MAX_OBJECT_LIMIT: usize = 65_536;
 pub const MAX_OBJECT_NAME_BYTES: usize = 32;
+/// Bytes of one object-table entry on disk.
+pub const TABLE_ENTRY_BYTES: usize = 72;
+/// The epoch of the first object a fresh store creates. Epoch 0 is never assigned, so a
+/// caller can use it to mean "not bound to an epoch".
+pub const FIRST_OBJECT_EPOCH: u64 = 1;
 
-const HEADER_BYTES: usize = 48;
-const ENTRY_BYTES: usize = 64;
+/// Superblock bytes in use; the rest of the block must be zero.
+const HEADER_BYTES: usize = 72;
+const MIN_BLOCK_BYTES: usize = 512;
+/// Arena blocks per object the limit allows above [`MIN_OBJECT_LIMIT`].
+const ARENA_BLOCKS_PER_OBJECT: u64 = 16;
 const CHECKSUM_RANGE: core::ops::Range<usize> = 8..12;
-const ENTRY_PRESENT_FLAG: u8 = 0x01;
+
+/// Most live objects the store allows on `geometry`: one per 16 blocks of a payload arena,
+/// at least [`MIN_OBJECT_LIMIT`] and at most [`MAX_OBJECT_LIMIT`]. A small disk can run out
+/// of space before it reaches the limit. The 64 MiB data disk the QEMU lanes attach allows
+/// 4095. The limit is recorded in each superblock and checked on mount.
+pub fn object_limit(geometry: BlockGeometry) -> usize {
+    let by_size = usize::try_from(data_arena_blocks(geometry) / ARENA_BLOCKS_PER_OBJECT)
+        .unwrap_or(MAX_OBJECT_LIMIT);
+    by_size.clamp(MIN_OBJECT_LIMIT, MAX_OBJECT_LIMIT)
+}
 
 /// Format version recorded in a superblock block written by any store version, or `None`
 /// when the block does not start with the store magic (for example a blank disk).
@@ -216,6 +246,7 @@ impl From<StoreError> for OpenError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredObject {
     id: u64,
+    epoch: u64,
     name: String,
     data: Vec<u8>,
 }
@@ -223,6 +254,12 @@ pub struct StoredObject {
 impl StoredObject {
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Assigned when the object was created and kept across rewrites. A later object
+    /// created under the same id or name, after a delete, gets a larger epoch.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     pub fn name(&self) -> &str {
@@ -264,6 +301,7 @@ pub enum StoreError {
     NotFound,
     IdentityConflict,
     GenerationExhausted,
+    EpochExhausted,
     Incompatible(IncompatibleFormatError),
     Corrupt(CorruptFormatError),
 }
@@ -292,6 +330,9 @@ pub enum CorruptFormatError {
     InvalidObjectExtent,
     OverlappingObjectExtents,
     ObjectChecksumMismatch,
+    InvalidObjectEpoch,
+    InvalidTableExtent,
+    TableChecksumMismatch,
 }
 
 #[derive(Debug)]
@@ -300,6 +341,7 @@ pub struct ObjectStore<D> {
     geometry: BlockGeometry,
     generation: u64,
     active_slot: u64,
+    next_epoch: u64,
     objects: Vec<StoredObject>,
 }
 
@@ -317,6 +359,7 @@ impl<D: BlockDevice> ObjectStore<D> {
             geometry,
             generation: 0,
             active_slot: 0,
+            next_epoch: superblock.next_epoch,
             objects: Vec::new(),
         })
     }
@@ -350,6 +393,7 @@ impl<D: BlockDevice> ObjectStore<D> {
             geometry,
             generation: superblock.generation,
             active_slot,
+            next_epoch: superblock.next_epoch,
             objects,
         }
     }
@@ -364,6 +408,20 @@ impl<D: BlockDevice> ObjectStore<D> {
 
     pub fn objects(&self) -> &[StoredObject] {
         &self.objects
+    }
+
+    /// Most live objects this store allows: [`object_limit`] of its geometry.
+    pub fn max_objects(&self) -> usize {
+        object_limit(self.geometry)
+    }
+
+    /// Epoch of the live (possibly staged) object `id`.
+    pub fn epoch_of(&self, id: u64) -> Result<u64, StoreError> {
+        self.objects
+            .iter()
+            .find(|object| object.id == id)
+            .map(|object| object.epoch)
+            .ok_or(StoreError::NotFound)
     }
 
     pub fn into_inner(self) -> D {
@@ -391,21 +449,29 @@ impl<D: BlockDevice> ObjectStore<D> {
 
         match target_index {
             Some(index) => {
-                let replacement = StoredObject {
+                // Writing under an existing name with a new id makes a new object: the id a
+                // capability names changed, so it gets a new epoch as well.
+                let epoch = if self.objects[index].id == id {
+                    self.objects[index].epoch
+                } else {
+                    self.take_epoch()?
+                };
+                self.objects[index] = StoredObject {
                     id,
+                    epoch,
                     name: String::from(name),
                     data: data.to_vec(),
                 };
-                self.objects[index] = replacement;
             }
             None => {
-                if self.objects.len() == MAX_OBJECTS {
-                    return Err(StoreError::ObjectTableFull {
-                        max_objects: MAX_OBJECTS,
-                    });
+                let max_objects = self.max_objects();
+                if self.objects.len() >= max_objects {
+                    return Err(StoreError::ObjectTableFull { max_objects });
                 }
+                let epoch = self.take_epoch()?;
                 self.objects.push(StoredObject {
                     id,
+                    epoch,
                     name: String::from(name),
                     data: data.to_vec(),
                 });
@@ -413,6 +479,15 @@ impl<D: BlockDevice> ObjectStore<D> {
         }
 
         Ok(())
+    }
+
+    /// The epoch for an object created now. It is staged with the object: a crash before the
+    /// commit point forgets both, so an epoch is durable, and may be handed out, only once
+    /// the commit that created its object has returned.
+    fn take_epoch(&mut self) -> Result<u64, StoreError> {
+        let epoch = self.next_epoch;
+        self.next_epoch = epoch.checked_add(1).ok_or(StoreError::EpochExhausted)?;
+        Ok(epoch)
     }
 
     /// Stages the removal of object `id`. Like a write, it takes effect at the next
@@ -454,16 +529,25 @@ impl<D: BlockDevice> ObjectStore<D> {
             .generation
             .checked_add(1)
             .ok_or(StoreError::GenerationExhausted)?;
-        let object_layout = build_object_layout(self.geometry, next_slot, &self.objects)?;
+        let (object_layout, table) =
+            build_object_layout(self.geometry, next_slot, next_generation, &self.objects)?;
         for object in &object_layout {
             write_object_data(&mut self.device, self.geometry, object)?;
         }
+        write_table(
+            &mut self.device,
+            self.geometry,
+            table,
+            &encode_table(&object_layout),
+        )?;
         self.device.flush()?;
 
         let superblock = Superblock {
             generation: next_generation,
             object_count: u32::try_from(object_layout.len())
                 .expect("object layout count fits within u32"),
+            next_epoch: self.next_epoch,
+            table,
             objects: object_layout,
         };
 
@@ -478,6 +562,7 @@ impl<D: BlockDevice> ObjectStore<D> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ObjectLayout {
     id: u64,
+    epoch: u64,
     name: String,
     data: Vec<u8>,
     data_len: u32,
@@ -490,7 +575,19 @@ struct ObjectLayout {
 struct Superblock {
     generation: u64,
     object_count: u32,
+    next_epoch: u64,
+    table: TableExtent,
+    /// Filled from the object table once it is read; empty when only the superblock is.
     objects: Vec<ObjectLayout>,
+}
+
+/// Where a commit wrote its object table, and the CRC-32C [`table_checksum`] gives it.
+/// An empty table has no blocks and starts at LBA 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TableExtent {
+    start_lba: u64,
+    block_count: u32,
+    checksum: u32,
 }
 
 impl Superblock {
@@ -499,6 +596,12 @@ impl Superblock {
         Self {
             generation: 0,
             object_count: 0,
+            next_epoch: FIRST_OBJECT_EPOCH,
+            table: TableExtent {
+                start_lba: 0,
+                block_count: 0,
+                checksum: table_checksum(0, 0, &[]),
+            },
             objects: Vec::new(),
         }
     }
@@ -523,8 +626,7 @@ fn validate_geometry(geometry: BlockGeometry) -> Result<BlockGeometry, StoreErro
             block_count: geometry.block_count(),
         }
     })?;
-    let min_block_size = HEADER_BYTES + (ENTRY_BYTES * MAX_OBJECTS);
-    if logical_block_size < min_block_size || geometry.max_transfer_blocks() == 0 {
+    if logical_block_size < MIN_BLOCK_BYTES || geometry.max_transfer_blocks() == 0 {
         return Err(StoreError::UnsupportedGeometry {
             logical_block_size: geometry.logical_block_size(),
             block_count: geometry.block_count(),
@@ -586,8 +688,12 @@ fn select_committed_state<D: BlockDevice>(
             order => order,
         },
     );
-    for (slot, superblock) in candidates {
-        match load_objects(device, geometry, &superblock.objects) {
+    for (slot, mut superblock) in candidates {
+        let loaded = read_table(device, geometry, slot, &superblock).and_then(|layouts| {
+            superblock.objects = layouts;
+            load_objects(device, geometry, &superblock.objects)
+        });
+        match loaded {
             Ok(objects) => return Ok((slot, superblock, objects)),
             Err(StoreError::Corrupt(error)) => corrupt_error = Some(error),
             Err(StoreError::Block(error)) => block_error = Some(error),
@@ -644,81 +750,233 @@ fn decode_superblock(
         ));
     }
 
+    let reserved = read_u16(bytes, 6);
+    let generation = read_u64(bytes, 12);
     let expected_block_size = read_u32(bytes, 20);
     let expected_block_count = read_u64(bytes, 24);
     let max_objects = read_u32(bytes, 32);
     let object_count = read_u32(bytes, 36);
     let data_start_lba = read_u64(bytes, 40);
+    let next_epoch = read_u64(bytes, 48);
+    let table = TableExtent {
+        start_lba: read_u64(bytes, 56),
+        block_count: read_u32(bytes, 64),
+        checksum: read_u32(bytes, 68),
+    };
 
-    if expected_block_size != geometry.logical_block_size()
+    if reserved != 0
+        || expected_block_size != geometry.logical_block_size()
         || expected_block_count != geometry.block_count()
-        || max_objects != MAX_OBJECTS as u32
+        || usize::try_from(max_objects).ok() != Some(object_limit(geometry))
         || data_start_lba != DATA_START_LBA
-        || object_count > MAX_OBJECTS as u32
+        || bytes[HEADER_BYTES..].iter().any(|&byte| byte != 0)
     {
         return Err(SlotDecodeError::Corrupt(CorruptFormatError::InvalidHeader));
     }
-
-    let generation = read_u64(bytes, 12);
-    let mut objects = Vec::new();
-    for index in 0..MAX_OBJECTS {
-        let start = HEADER_BYTES + (ENTRY_BYTES * index);
-        let flags = bytes[start];
-        if flags & !ENTRY_PRESENT_FLAG != 0 {
-            return Err(SlotDecodeError::Corrupt(CorruptFormatError::InvalidHeader));
-        }
-        if flags & ENTRY_PRESENT_FLAG == 0 {
-            continue;
-        }
-
-        let name_len = usize::from(read_u16(bytes, start + 2));
-        if name_len == 0 || name_len > MAX_OBJECT_NAME_BYTES {
-            return Err(SlotDecodeError::Corrupt(
-                CorruptFormatError::InvalidNameEncoding,
-            ));
-        }
-
-        let name_bytes = &bytes[(start + 32)..(start + 32 + MAX_OBJECT_NAME_BYTES)];
-        if name_bytes[name_len..].iter().any(|byte| *byte != 0) {
-            return Err(SlotDecodeError::Corrupt(
-                CorruptFormatError::InvalidNameEncoding,
-            ));
-        }
-
-        let name = core::str::from_utf8(&name_bytes[..name_len])
-            .map_err(|_| SlotDecodeError::Corrupt(CorruptFormatError::InvalidNameEncoding))?;
-
-        objects.push(ObjectLayout {
-            id: read_u64(bytes, start + 24),
-            name: String::from(name),
-            data: Vec::new(),
-            data_len: read_u32(bytes, start + 4),
-            start_lba: read_u64(bytes, start + 8),
-            block_count: read_u32(bytes, start + 16),
-            data_checksum: read_u32(bytes, start + 20),
-        });
-    }
-
-    if objects.len() != object_count as usize {
+    if object_count > max_objects {
         return Err(SlotDecodeError::Corrupt(
             CorruptFormatError::InvalidObjectCount {
                 count: object_count,
             },
         ));
     }
-
-    validate_layouts(geometry, slot, &objects).map_err(SlotDecodeError::Corrupt)?;
+    if next_epoch < FIRST_OBJECT_EPOCH {
+        return Err(SlotDecodeError::Corrupt(
+            CorruptFormatError::InvalidObjectEpoch,
+        ));
+    }
+    validate_table_extent(geometry, slot, object_count, table).map_err(SlotDecodeError::Corrupt)?;
 
     Ok(Superblock {
         generation,
         object_count,
-        objects,
+        next_epoch,
+        table,
+        objects: Vec::new(),
     })
+}
+
+/// Blocks an object table of `count` entries occupies.
+fn table_blocks(geometry: BlockGeometry, count: usize) -> u64 {
+    let bytes = u64::try_from(count * TABLE_ENTRY_BYTES).expect("table size fits in u64");
+    bytes.div_ceil(u64::from(geometry.logical_block_size()))
+}
+
+fn validate_table_extent(
+    geometry: BlockGeometry,
+    slot: u64,
+    object_count: u32,
+    table: TableExtent,
+) -> Result<(), CorruptFormatError> {
+    let count = usize::try_from(object_count).expect("object count fits in usize");
+    if u64::from(table.block_count) != table_blocks(geometry, count) {
+        return Err(CorruptFormatError::InvalidTableExtent);
+    }
+    if table.block_count == 0 {
+        return if table.start_lba == 0 {
+            Ok(())
+        } else {
+            Err(CorruptFormatError::InvalidTableExtent)
+        };
+    }
+    let arena = slot_data_arena(geometry, slot);
+    let end = table
+        .start_lba
+        .checked_add(u64::from(table.block_count))
+        .ok_or(CorruptFormatError::InvalidTableExtent)?;
+    if table.start_lba < arena.start || end > arena.end {
+        return Err(CorruptFormatError::InvalidTableExtent);
+    }
+    Ok(())
+}
+
+/// Reads and checks the object table `superblock` names, then the layouts it holds.
+fn read_table<D: BlockDevice>(
+    device: &mut D,
+    geometry: BlockGeometry,
+    slot: u64,
+    superblock: &Superblock,
+) -> Result<Vec<ObjectLayout>, StoreError> {
+    let count = usize::try_from(superblock.object_count).expect("object count fits in usize");
+    let mut bytes = vec![
+        0;
+        usize::try_from(superblock.table.block_count).expect("fits")
+            * block_size_bytes(geometry)
+    ];
+    if superblock.table.block_count != 0 {
+        read_blocks_chunked(
+            device,
+            geometry,
+            superblock.table.start_lba,
+            superblock.table.block_count,
+            &mut bytes,
+        )?;
+    }
+    let entries = &bytes[..count * TABLE_ENTRY_BYTES];
+    if bytes[entries.len()..].iter().any(|&byte| byte != 0)
+        || table_checksum(superblock.generation, superblock.table.start_lba, entries)
+            != superblock.table.checksum
+    {
+        return Err(StoreError::Corrupt(
+            CorruptFormatError::TableChecksumMismatch,
+        ));
+    }
+    let layouts = decode_table(entries).map_err(StoreError::Corrupt)?;
+    validate_layouts(geometry, slot, superblock, &layouts).map_err(StoreError::Corrupt)?;
+    Ok(layouts)
+}
+
+fn decode_table(entries: &[u8]) -> Result<Vec<ObjectLayout>, CorruptFormatError> {
+    let mut layouts = Vec::with_capacity(entries.len() / TABLE_ENTRY_BYTES);
+    for entry in entries.chunks_exact(TABLE_ENTRY_BYTES) {
+        let name_len = usize::from(read_u16(entry, 36));
+        if read_u16(entry, 38) != 0 {
+            return Err(CorruptFormatError::InvalidHeader);
+        }
+        if name_len == 0 || name_len > MAX_OBJECT_NAME_BYTES {
+            return Err(CorruptFormatError::InvalidNameEncoding);
+        }
+        let name_bytes = &entry[40..40 + MAX_OBJECT_NAME_BYTES];
+        if name_bytes[name_len..].iter().any(|byte| *byte != 0) {
+            return Err(CorruptFormatError::InvalidNameEncoding);
+        }
+        let name = core::str::from_utf8(&name_bytes[..name_len])
+            .map_err(|_| CorruptFormatError::InvalidNameEncoding)?;
+        layouts.push(ObjectLayout {
+            id: read_u64(entry, 0),
+            epoch: read_u64(entry, 8),
+            name: String::from(name),
+            data: Vec::new(),
+            start_lba: read_u64(entry, 16),
+            data_len: read_u32(entry, 24),
+            block_count: read_u32(entry, 28),
+            data_checksum: read_u32(entry, 32),
+        });
+    }
+    Ok(layouts)
+}
+
+fn encode_table(layouts: &[ObjectLayout]) -> Vec<u8> {
+    let mut bytes = vec![0; layouts.len() * TABLE_ENTRY_BYTES];
+    for (entry, object) in bytes.chunks_exact_mut(TABLE_ENTRY_BYTES).zip(layouts) {
+        write_u64(entry, 0, object.id);
+        write_u64(entry, 8, object.epoch);
+        write_u64(entry, 16, object.start_lba);
+        write_u32(entry, 24, object.data_len);
+        write_u32(entry, 28, object.block_count);
+        write_u32(entry, 32, object.data_checksum);
+        write_u16(
+            entry,
+            36,
+            u16::try_from(object.name.len()).expect("validated name length fits in u16"),
+        );
+        let name_bytes = object.name.as_bytes();
+        entry[40..40 + name_bytes.len()].copy_from_slice(name_bytes);
+    }
+    bytes
+}
+
+fn write_table<D: BlockDevice>(
+    device: &mut D,
+    geometry: BlockGeometry,
+    table: TableExtent,
+    entries: &[u8],
+) -> Result<(), StoreError> {
+    if table.block_count == 0 {
+        return Ok(());
+    }
+    let block_size = block_size_bytes(geometry);
+    let max_blocks = usize::try_from(geometry.max_transfer_blocks()).expect("max transfer fits");
+    let total_blocks = usize::try_from(table.block_count).expect("table block count fits");
+    let mut bytes = vec![0; total_blocks * block_size];
+    bytes[..entries.len()].copy_from_slice(entries);
+    for chunk_index in 0..total_blocks.div_ceil(max_blocks) {
+        let chunk_start = chunk_index * max_blocks;
+        let chunk_blocks = core::cmp::min(max_blocks, total_blocks - chunk_start);
+        device.write_blocks(
+            table.start_lba + u64::try_from(chunk_start).expect("chunk start fits"),
+            u32::try_from(chunk_blocks).expect("chunk blocks fit in u32"),
+            &bytes[chunk_start * block_size..(chunk_start + chunk_blocks) * block_size],
+        )?;
+    }
+    Ok(())
+}
+
+/// CRC-32C of an object table, bound to the generation that wrote it and where it was
+/// written as well as to its bytes.
+fn table_checksum(generation: u64, start_lba: u64, entries: &[u8]) -> u32 {
+    let mut crc = Crc32c::new();
+    crc.update(&generation.to_le_bytes());
+    crc.update(&start_lba.to_le_bytes());
+    crc.update(
+        &u32::try_from(entries.len() / TABLE_ENTRY_BYTES)
+            .expect("entry count fits in u32")
+            .to_le_bytes(),
+    );
+    crc.update(entries);
+    crc.finish()
+}
+
+/// CRC-32C of an object payload, bound to the object's id, epoch, start LBA and length:
+/// another object's payload, or this one's at another place, does not match.
+fn payload_checksum(id: u64, epoch: u64, start_lba: u64, data: &[u8]) -> u32 {
+    let mut crc = Crc32c::new();
+    crc.update(&id.to_le_bytes());
+    crc.update(&epoch.to_le_bytes());
+    crc.update(&start_lba.to_le_bytes());
+    crc.update(
+        &u32::try_from(data.len())
+            .expect("object length fits in u32")
+            .to_le_bytes(),
+    );
+    crc.update(data);
+    crc.finish()
 }
 
 fn validate_layouts(
     geometry: BlockGeometry,
     slot: u64,
+    superblock: &Superblock,
     objects: &[ObjectLayout],
 ) -> Result<(), CorruptFormatError> {
     let arena = slot_data_arena(geometry, slot);
@@ -734,6 +992,14 @@ fn validate_layouts(
             .any(|other| other.name == left.name)
         {
             return Err(CorruptFormatError::DuplicateObjectName);
+        }
+        if left.epoch < FIRST_OBJECT_EPOCH
+            || left.epoch >= superblock.next_epoch
+            || objects[..left_index]
+                .iter()
+                .any(|other| other.epoch == left.epoch)
+        {
+            return Err(CorruptFormatError::InvalidObjectEpoch);
         }
 
         if left.data_len == 0 {
@@ -771,6 +1037,12 @@ fn validate_layouts(
             )
         })
         .collect::<Vec<_>>();
+    if superblock.table.block_count != 0 {
+        ranges.push((
+            superblock.table.start_lba,
+            superblock.table.start_lba + u64::from(superblock.table.block_count),
+        ));
+    }
     ranges.sort_unstable_by_key(|range| range.0);
 
     for window in ranges.windows(2) {
@@ -792,6 +1064,7 @@ fn load_objects<D: BlockDevice>(
         let data = read_object_data(device, geometry, layout)?;
         objects.push(StoredObject {
             id: layout.id,
+            epoch: layout.epoch,
             name: layout.name.clone(),
             data,
         });
@@ -802,8 +1075,9 @@ fn load_objects<D: BlockDevice>(
 fn build_object_layout(
     geometry: BlockGeometry,
     slot: u64,
+    generation: u64,
     objects: &[StoredObject],
-) -> Result<Vec<ObjectLayout>, StoreError> {
+) -> Result<(Vec<ObjectLayout>, TableExtent), StoreError> {
     let block_size = u64::from(geometry.logical_block_size());
     let arena = slot_data_arena(geometry, slot);
     let mut next_lba = arena.start;
@@ -837,14 +1111,25 @@ fn build_object_layout(
 
         layouts.push(ObjectLayout {
             id: object.id,
+            epoch: object.epoch,
             name: object.name.clone(),
             data: object.data.clone(),
             data_len: data_len_u32,
             start_lba: object_start,
             block_count,
-            data_checksum: crc32c(object.data.as_slice()),
+            data_checksum: payload_checksum(
+                object.id,
+                object.epoch,
+                object_start,
+                object.data.as_slice(),
+            ),
         });
     }
+
+    // The table follows the payloads it describes.
+    let table_block_count = table_blocks(geometry, layouts.len());
+    let table_start = if table_block_count == 0 { 0 } else { next_lba };
+    next_lba = next_lba.saturating_add(table_block_count);
 
     let available_blocks = data_arena_blocks(geometry);
     let required_blocks = next_lba.saturating_sub(arena.start);
@@ -855,7 +1140,12 @@ fn build_object_layout(
         });
     }
 
-    Ok(layouts)
+    let table = TableExtent {
+        start_lba: table_start,
+        block_count: u32::try_from(table_block_count).expect("table fits within the arena"),
+        checksum: table_checksum(generation, table_start, &encode_table(&layouts)),
+    };
+    Ok((layouts, table))
 }
 
 fn write_superblock<D: BlockDevice>(
@@ -882,27 +1172,14 @@ fn encode_superblock(
     write_u32(
         &mut bytes,
         32,
-        u32::try_from(MAX_OBJECTS).expect("MAX_OBJECTS fits in u32"),
+        u32::try_from(object_limit(geometry)).expect("object limit fits in u32"),
     );
     write_u32(&mut bytes, 36, superblock.object_count);
     write_u64(&mut bytes, 40, DATA_START_LBA);
-
-    for (index, object) in superblock.objects.iter().enumerate() {
-        let start = HEADER_BYTES + (ENTRY_BYTES * index);
-        bytes[start] = ENTRY_PRESENT_FLAG;
-        write_u16(
-            &mut bytes,
-            start + 2,
-            u16::try_from(object.name.len()).expect("validated name length fits in u16"),
-        );
-        write_u32(&mut bytes, start + 4, object.data_len);
-        write_u64(&mut bytes, start + 8, object.start_lba);
-        write_u32(&mut bytes, start + 16, object.block_count);
-        write_u32(&mut bytes, start + 20, object.data_checksum);
-        write_u64(&mut bytes, start + 24, object.id);
-        let name_bytes = object.name.as_bytes();
-        bytes[(start + 32)..(start + 32 + name_bytes.len())].copy_from_slice(name_bytes);
-    }
+    write_u64(&mut bytes, 48, superblock.next_epoch);
+    write_u64(&mut bytes, 56, superblock.table.start_lba);
+    write_u32(&mut bytes, 64, superblock.table.block_count);
+    write_u32(&mut bytes, 68, superblock.table.checksum);
 
     let checksum = superblock_checksum(&bytes);
     write_u32(&mut bytes, CHECKSUM_RANGE.start, checksum);
@@ -978,7 +1255,9 @@ fn read_object_data<D: BlockDevice>(
         &mut bytes,
     )?;
     bytes.truncate(usize::try_from(object.data_len).expect("data length fits"));
-    if crc32c(bytes.as_slice()) != object.data_checksum {
+    if payload_checksum(object.id, object.epoch, object.start_lba, bytes.as_slice())
+        != object.data_checksum
+    {
         return Err(StoreError::Corrupt(
             CorruptFormatError::ObjectChecksumMismatch,
         ));
@@ -1087,6 +1366,64 @@ mod tests {
         bytes
     }
 
+    /// The object layouts the superblock in `slot` commits, read through its table.
+    fn committed_layouts(device: &mut FakeBlockDevice, slot: u64) -> Vec<ObjectLayout> {
+        let geometry = device.geometry();
+        let bytes = durable_slot(device, slot);
+        let superblock = decode_superblock(geometry, slot, &bytes).unwrap();
+        read_table(device, geometry, slot, &superblock).unwrap()
+    }
+
+    /// Writes `layouts` as the table of a generation-1 superblock in slot 0 and slot 1, with
+    /// valid table and superblock checksums whatever the entries hold, so a mount reaches
+    /// the layout checks.
+    fn forge_committed_table(device: &mut FakeBlockDevice, layouts: &[ObjectLayout]) {
+        forge_committed_tables(device, |_| layouts.to_vec());
+    }
+
+    /// As [`forge_committed_table`], with each slot's layouts from `layouts_for(slot)`.
+    fn forge_committed_tables(
+        device: &mut FakeBlockDevice,
+        layouts_for: impl Fn(u64) -> Vec<ObjectLayout>,
+    ) {
+        let geometry = device.geometry();
+        for slot in 0..SUPERBLOCK_SLOTS {
+            let layouts = layouts_for(slot);
+            let layouts = layouts.as_slice();
+            let table_start = slot_data_arena(geometry, slot).end - 1;
+            let entries = encode_table(layouts);
+            let superblock = Superblock {
+                generation: 1,
+                object_count: u32::try_from(layouts.len()).unwrap(),
+                next_epoch: 100,
+                table: TableExtent {
+                    start_lba: table_start,
+                    block_count: 1,
+                    checksum: table_checksum(1, table_start, &entries),
+                },
+                objects: Vec::new(),
+            };
+            let mut block = vec![0; 512];
+            block[..entries.len()].copy_from_slice(&entries);
+            device.write_blocks(table_start, 1, &block).unwrap();
+            write_superblock(device, geometry, slot, &superblock).unwrap();
+        }
+        device.flush().unwrap();
+    }
+
+    fn forged_layout(start_lba: u64, data_len: u32, block_count: u32) -> ObjectLayout {
+        ObjectLayout {
+            id: 7,
+            epoch: 1,
+            name: String::from("alpha"),
+            data: Vec::new(),
+            data_len,
+            start_lba,
+            block_count,
+            data_checksum: 0,
+        }
+    }
+
     #[test]
     fn format_commit_and_remount_round_trip_two_objects() {
         let device = FakeBlockDevice::new(geometry()).unwrap();
@@ -1139,22 +1476,20 @@ mod tests {
         store.write_object(1, "alpha", &[0x11; 700]).unwrap();
         store.commit().unwrap();
         let mut device = store.into_inner();
-        let first_slot = durable_slot(&mut device, 1);
-        let first = decode_superblock(geometry(), 1, &first_slot).unwrap();
+        let first = committed_layouts(&mut device, 1);
         let first_extent = (
-            first.objects[0].start_lba,
-            first.objects[0].start_lba + u64::from(first.objects[0].block_count),
+            first[0].start_lba,
+            first[0].start_lba + u64::from(first[0].block_count),
         );
 
         let mut store = ObjectStore::mount(device).unwrap();
         store.write_object(1, "alpha", &[0x22; 700]).unwrap();
         store.commit().unwrap();
         let mut device = store.into_inner();
-        let second_slot = durable_slot(&mut device, 0);
-        let second = decode_superblock(geometry(), 0, &second_slot).unwrap();
+        let second = committed_layouts(&mut device, 0);
         let second_extent = (
-            second.objects[0].start_lba,
-            second.objects[0].start_lba + u64::from(second.objects[0].block_count),
+            second[0].start_lba,
+            second[0].start_lba + u64::from(second[0].block_count),
         );
 
         assert!(first_extent.1 <= second_extent.0 || second_extent.1 <= first_extent.0);
@@ -1197,7 +1532,8 @@ mod tests {
         assert_eq!(
             store.commit(),
             Err(StoreError::StorageFull {
-                required_blocks: 3,
+                // Three payload blocks and one table block.
+                required_blocks: 4,
                 available_blocks: 1,
             })
         );
@@ -1228,27 +1564,150 @@ mod tests {
     fn write_rejects_full_object_table() {
         let device = FakeBlockDevice::new(geometry()).unwrap();
         let mut store = ObjectStore::format(device).unwrap();
+        assert_eq!(store.max_objects(), MIN_OBJECT_LIMIT);
 
-        for index in 0..MAX_OBJECTS {
-            let name = match index {
-                0 => "obj0",
-                1 => "obj1",
-                2 => "obj2",
-                3 => "obj3",
-                4 => "obj4",
-                5 => "obj5",
-                _ => "obj6",
-            };
+        for index in 0..MIN_OBJECT_LIMIT as u64 {
             store
-                .write_object(index as u64, name, &[index as u8])
+                .write_object(index, &format!("obj{index}"), &[])
                 .unwrap();
         }
 
         assert_eq!(
-            store.write_object(99, "overflow", b"x"),
+            store.write_object(999, "overflow", b"x"),
             Err(StoreError::ObjectTableFull {
-                max_objects: MAX_OBJECTS,
+                max_objects: MIN_OBJECT_LIMIT,
             })
+        );
+    }
+
+    #[test]
+    fn object_limit_grows_with_the_disk_between_its_bounds() {
+        let geometry_of =
+            |blocks| BlockGeometry::new(BlockDeviceId::new(14), 512, blocks, 8, false).unwrap();
+        assert_eq!(object_limit(geometry_of(32)), MIN_OBJECT_LIMIT);
+        // The 64 MiB QEMU data disk: two arenas of 65535 blocks.
+        assert_eq!(object_limit(geometry_of(131_072)), 4095);
+        assert_eq!(object_limit(geometry_of(1 << 40)), MAX_OBJECT_LIMIT);
+    }
+
+    #[test]
+    fn many_more_than_seven_objects_commit_and_survive_a_reboot() {
+        let geometry = BlockGeometry::new(BlockDeviceId::new(15), 512, 8192, 8, false).unwrap();
+        let mut store = ObjectStore::format(FakeBlockDevice::new(geometry).unwrap()).unwrap();
+        for index in 0..200u64 {
+            let data = vec![index as u8; usize::try_from(index % 3).unwrap() * 300];
+            store
+                .write_object(index, &format!("obj{index}"), &data)
+                .unwrap();
+        }
+        store.commit().unwrap();
+        for index in (0..200u64).step_by(2) {
+            store.delete_object(index).unwrap();
+        }
+        store.commit().unwrap();
+
+        let device = store.into_inner();
+        let store = ObjectStore::mount(
+            FakeBlockDevice::from_durable_bytes(geometry, device.durable_bytes()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(store.objects().len(), 100);
+        for index in 0..200u64 {
+            let read = store.read_object_by_id(index);
+            if index % 2 == 0 {
+                assert_eq!(read, Err(StoreError::NotFound));
+            } else {
+                assert_eq!(
+                    read.unwrap(),
+                    vec![index as u8; usize::try_from(index % 3).unwrap() * 300]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn epochs_are_kept_by_rewrites_and_never_reused_after_a_delete() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", b"v1").unwrap();
+        store.write_object(2, "beta", b"v1").unwrap();
+        let alpha = store.epoch_of(1).unwrap();
+        assert_eq!(alpha, FIRST_OBJECT_EPOCH);
+        store.commit().unwrap();
+
+        store.write_object(1, "alpha", b"v2").unwrap();
+        assert_eq!(store.epoch_of(1).unwrap(), alpha);
+        store.delete_object(1).unwrap();
+        store.commit().unwrap();
+
+        // Re-created under the same id and name after a reboot: a new, larger epoch.
+        let mut store = reboot(store);
+        store.write_object(1, "alpha", b"again").unwrap();
+        let recreated = store.epoch_of(1).unwrap();
+        assert!(recreated > store.epoch_of(2).unwrap());
+        store.commit().unwrap();
+        let store = reboot(store);
+        assert_eq!(store.epoch_of(1).unwrap(), recreated);
+        assert_ne!(recreated, alpha);
+    }
+
+    #[test]
+    fn taking_a_name_under_a_new_id_is_a_new_epoch() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", b"v1").unwrap();
+        let first = store.epoch_of(1).unwrap();
+        store.write_object(5, "alpha", b"v2").unwrap();
+        assert_eq!(store.epoch_of(1), Err(StoreError::NotFound));
+        assert!(store.epoch_of(5).unwrap() > first);
+    }
+
+    #[test]
+    fn an_older_version_two_image_is_refused_not_reformatted() {
+        let mut device = device_holding_one_object();
+        for slot_lba in 0..SUPERBLOCK_SLOTS {
+            let mut slot = durable_slot(&mut device, slot_lba);
+            set_version_with_valid_crc(&mut slot, 2);
+            device.write_blocks(slot_lba, 1, &slot).unwrap();
+        }
+        device.flush().unwrap();
+        assert_open_refuses(device, Refusal::UnsupportedVersion(2));
+    }
+
+    #[test]
+    fn a_payload_moved_to_another_objects_place_is_rejected() {
+        // Two objects with the same bytes: only the id and location binding tells their
+        // payloads apart. Swap the table's extents and the payloads still read back
+        // byte for byte, so the binding is all that rejects the generation.
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", &[0x5a; 300]).unwrap();
+        store.write_object(2, "beta", &[0x5a; 300]).unwrap();
+        store.commit().unwrap();
+        let mut device = store.into_inner();
+        let mut layouts = committed_layouts(&mut device, 1);
+        let (left, right) = (layouts[0].start_lba, layouts[1].start_lba);
+        layouts[0].start_lba = right;
+        layouts[1].start_lba = left;
+        let mut slot = durable_slot(&mut device, 1);
+        let superblock = decode_superblock(geometry(), 1, &slot).unwrap();
+        let entries = encode_table(&layouts);
+        let mut block = vec![0; 512];
+        block[..entries.len()].copy_from_slice(&entries);
+        device
+            .write_blocks(superblock.table.start_lba, 1, &block)
+            .unwrap();
+        let checksum = table_checksum(1, superblock.table.start_lba, &entries);
+        slot[68..72].copy_from_slice(&checksum.to_le_bytes());
+        let sum = superblock_checksum(&slot);
+        slot[CHECKSUM_RANGE].copy_from_slice(&sum.to_le_bytes());
+        device.write_blocks(1, 1, &slot).unwrap();
+        device.flush().unwrap();
+
+        assert_eq!(
+            ObjectStore::mount(device).unwrap().committed_generation(),
+            0,
+            "generation 1 must be rejected, leaving the fresh generation 0"
         );
     }
 
@@ -1300,28 +1759,29 @@ mod tests {
 
     #[test]
     fn delete_frees_a_table_entry_and_a_name_for_reuse() {
-        let device = FakeBlockDevice::new(geometry()).unwrap();
-        let mut store = ObjectStore::format(device).unwrap();
-        for index in 0..MAX_OBJECTS as u64 {
+        // Large enough for a full table of the minimum limit.
+        let geometry = BlockGeometry::new(BlockDeviceId::new(17), 512, 256, 8, false).unwrap();
+        let mut store = ObjectStore::format(FakeBlockDevice::new(geometry).unwrap()).unwrap();
+        for index in 0..MIN_OBJECT_LIMIT as u64 {
             store
-                .write_object(index, &format!("obj{index}"), &[index as u8])
+                .write_object(index, &format!("obj{index}"), &[])
                 .unwrap();
         }
         store.commit().unwrap();
         assert!(matches!(
-            store.write_object(99, "extra", b"x"),
+            store.write_object(999, "extra", b"x"),
             Err(StoreError::ObjectTableFull { .. })
         ));
 
         // One commit deletes obj0, then gives its name to a new id and its id to a new name.
         store.delete_object(0).unwrap();
-        store.write_object(99, "obj0", b"new-name-owner").unwrap();
+        store.write_object(999, "obj0", b"new-name-owner").unwrap();
         store.delete_object(1).unwrap();
         store.write_object(1, "renamed", b"new-id-owner").unwrap();
         store.commit().unwrap();
 
         let store = reboot(store);
-        assert_eq!(store.objects().len(), MAX_OBJECTS);
+        assert_eq!(store.objects().len(), MIN_OBJECT_LIMIT);
         assert_eq!(
             store.read_object_by_name("obj0").unwrap(),
             b"new-name-owner"
@@ -1333,12 +1793,12 @@ mod tests {
 
     #[test]
     fn deleted_payload_space_is_free_for_the_next_commit() {
-        // Each arena of the tiny disk holds one block.
-        let device = FakeBlockDevice::new(tiny_geometry()).unwrap();
-        let mut store = ObjectStore::format(device).unwrap();
-        store.write_object(1, "alpha", &[0x11; 512]).unwrap();
+        // Each arena holds three blocks: one two-block payload and the table's block.
+        let geometry = BlockGeometry::new(BlockDeviceId::new(16), 512, 8, 2, false).unwrap();
+        let mut store = ObjectStore::format(FakeBlockDevice::new(geometry).unwrap()).unwrap();
+        store.write_object(1, "alpha", &[0x11; 1024]).unwrap();
         store.commit().unwrap();
-        store.write_object(2, "beta", &[0x22; 512]).unwrap();
+        store.write_object(2, "beta", &[0x22; 1024]).unwrap();
         assert!(matches!(
             store.commit(),
             Err(StoreError::StorageFull { .. })
@@ -1348,7 +1808,7 @@ mod tests {
         store.commit().unwrap();
         let store = reboot(store);
         assert_eq!(store.read_object_by_id(1), Err(StoreError::NotFound));
-        assert_eq!(store.read_object_by_id(2).unwrap(), [0x22; 512]);
+        assert_eq!(store.read_object_by_id(2).unwrap(), [0x22; 1024]);
     }
 
     #[test]
@@ -1558,13 +2018,13 @@ mod tests {
     fn a_damaged_version_field_is_corruption_not_another_format() {
         let mut device = device_holding_one_object();
         let mut slot_a = durable_slot(&mut device, 0);
-        slot_a[4] ^= 0x01;
+        slot_a[4] ^= 0x04;
         let mut slot_b = durable_slot(&mut device, 1);
         slot_b[GENERATION_BYTE] ^= 0x01;
         device.write_blocks(0, 1, &slot_a).unwrap();
         device.write_blocks(1, 1, &slot_b).unwrap();
         device.flush().unwrap();
-        assert_eq!(superblock_format_version(&slot_a), Some(3));
+        assert_eq!(superblock_format_version(&slot_a), Some(7));
 
         assert_open_refuses(device, Refusal::SuperblocksInvalid);
     }
@@ -1669,8 +2129,8 @@ mod tests {
         assert_open_refuses(device, Refusal::NotAStore);
 
         let mut device = device_holding_one_object();
+        let start_lba = committed_layouts(&mut device, 1)[0].start_lba;
         let mut slot = durable_slot(&mut device, 1);
-        let start_lba = read_u64(&slot, HEADER_BYTES + 8);
         let mut payload = vec![0; 512];
         device.read_blocks(start_lba, 1, &mut payload).unwrap();
         payload[0] ^= 0xff;
@@ -1688,29 +2148,11 @@ mod tests {
 
     #[test]
     fn malformed_object_extent_is_rejected_before_data_read() {
-        let device = FakeBlockDevice::new(geometry()).unwrap();
-        let store = ObjectStore::format(device).unwrap();
-        let mut device = store.into_inner();
-        let mut slot = vec![0; 512];
-        device.read_blocks(0, 1, &mut slot).unwrap();
-
-        let entry_start = HEADER_BYTES;
-        slot[36..40].copy_from_slice(&1u32.to_le_bytes());
-        slot[entry_start] = ENTRY_PRESENT_FLAG;
-        slot[(entry_start + 2)..(entry_start + 4)].copy_from_slice(&5u16.to_le_bytes());
-        slot[(entry_start + 4)..(entry_start + 8)].copy_from_slice(&1024u32.to_le_bytes());
-        slot[(entry_start + 8)..(entry_start + 16)]
-            .copy_from_slice(&(geometry().block_count() - 1).to_le_bytes());
-        slot[(entry_start + 16)..(entry_start + 20)].copy_from_slice(&2u32.to_le_bytes());
-        slot[(entry_start + 24)..(entry_start + 32)].copy_from_slice(&7u64.to_le_bytes());
-        slot[(entry_start + 32)..(entry_start + 37)].copy_from_slice(b"alpha");
-        slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&0u32.to_le_bytes());
-        let sum = superblock_checksum(&slot);
-        slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&sum.to_le_bytes());
-        device.write_blocks(0, 1, &slot).unwrap();
-        device.write_blocks(1, 1, &slot).unwrap();
-        device.flush().unwrap();
-
+        let mut device = FakeBlockDevice::new(geometry()).unwrap();
+        forge_committed_table(
+            &mut device,
+            &[forged_layout(geometry().block_count() - 1, 1024, 2)],
+        );
         assert_eq!(
             ObjectStore::mount(device).unwrap_err(),
             StoreError::Corrupt(CorruptFormatError::InvalidObjectExtent)
@@ -1719,31 +2161,36 @@ mod tests {
 
     #[test]
     fn malformed_object_length_is_rejected() {
-        let device = FakeBlockDevice::new(geometry()).unwrap();
-        let store = ObjectStore::format(device).unwrap();
-        let mut device = store.into_inner();
-        let mut slot = vec![0; 512];
-        device.read_blocks(0, 1, &mut slot).unwrap();
-
-        let entry_start = HEADER_BYTES;
-        slot[36..40].copy_from_slice(&1u32.to_le_bytes());
-        slot[entry_start] = ENTRY_PRESENT_FLAG;
-        slot[(entry_start + 2)..(entry_start + 4)].copy_from_slice(&5u16.to_le_bytes());
-        slot[(entry_start + 4)..(entry_start + 8)].copy_from_slice(&513u32.to_le_bytes());
-        slot[(entry_start + 8)..(entry_start + 16)].copy_from_slice(&DATA_START_LBA.to_le_bytes());
-        slot[(entry_start + 16)..(entry_start + 20)].copy_from_slice(&1u32.to_le_bytes());
-        slot[(entry_start + 24)..(entry_start + 32)].copy_from_slice(&9u64.to_le_bytes());
-        slot[(entry_start + 32)..(entry_start + 37)].copy_from_slice(b"alpha");
-        slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&0u32.to_le_bytes());
-        let sum = superblock_checksum(&slot);
-        slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&sum.to_le_bytes());
-        device.write_blocks(0, 1, &slot).unwrap();
-        device.write_blocks(1, 1, &slot).unwrap();
-        device.flush().unwrap();
-
+        let mut device = FakeBlockDevice::new(geometry()).unwrap();
+        forge_committed_table(&mut device, &[forged_layout(DATA_START_LBA, 513, 1)]);
         assert_eq!(
             ObjectStore::mount(device).unwrap_err(),
             StoreError::Corrupt(CorruptFormatError::InvalidObjectLength)
+        );
+    }
+
+    #[test]
+    fn an_epoch_the_superblock_never_issued_is_rejected() {
+        let mut device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut layout = forged_layout(DATA_START_LBA, 0, 0);
+        layout.epoch = 100;
+        forge_committed_table(&mut device, &[layout]);
+        assert_eq!(
+            ObjectStore::mount(device).unwrap_err(),
+            StoreError::Corrupt(CorruptFormatError::InvalidObjectEpoch)
+        );
+    }
+
+    #[test]
+    fn a_table_overlapping_a_payload_is_rejected() {
+        let mut device = FakeBlockDevice::new(geometry()).unwrap();
+        forge_committed_tables(&mut device, |slot| {
+            let table_start = slot_data_arena(geometry(), slot).end - 1;
+            vec![forged_layout(table_start, 10, 1)]
+        });
+        assert_eq!(
+            ObjectStore::mount(device).unwrap_err(),
+            StoreError::Corrupt(CorruptFormatError::OverlappingObjectExtents)
         );
     }
 
@@ -1779,10 +2226,9 @@ mod tests {
         store.commit().unwrap();
 
         let mut device = store.into_inner();
-        let slot = durable_slot(&mut device, 0);
-        let generation_two = decode_superblock(geometry(), 0, &slot).unwrap();
+        let generation_two = committed_layouts(&mut device, 0);
         let payload_offset = usize::try_from(
-            generation_two.objects[0].start_lba * u64::from(geometry().logical_block_size()),
+            generation_two[0].start_lba * u64::from(geometry().logical_block_size()),
         )
         .unwrap();
         device.durable_bytes_mut()[payload_offset] ^= 0xff;
