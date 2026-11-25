@@ -656,8 +656,13 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     summary.ok_or_else(|| "storage was not checked".to_owned())
 }
 
+/// The lifecycle-control family tag, bits 56..64 of every lifecycle handle (#288).
+const LIFECYCLE_HANDLE_TAG: u64 = 0x02;
+
 /// Syscall 3 on init's lifecycle handle: the kernel recorded its refusal for init's pid. Init
-/// probes before it starts any service, so its refusal is the boot's first and only one.
+/// probes before it starts any service, so its refusal is the boot's first and only one. The
+/// handle it records must carry the lifecycle family tag: the IPC decoder refuses any other
+/// tag before it reads a field, so the refusal is the family check and not a lucky field.
 fn check_console_refusal(output: &str, init_pid: u64) -> Result<(), String> {
     if let Some(line) = output.lines().find(|line| line.contains(CONSOLE_PROBE)) {
         return Err(format!(
@@ -667,6 +672,16 @@ fn check_console_refusal(output: &str, init_pid: u64) -> Result<(), String> {
     let refused = only_line(output, CONSOLE_REFUSED_PREFIX)?;
     if number(refused, "pid")? != init_pid || !refused.ends_with(": not the console sink") {
         return Err(format!("console refusal record {refused:?}"));
+    }
+    let handle = field(refused, "handle")
+        .and_then(|value| value.strip_suffix(':'))
+        .and_then(|value| value.strip_prefix("0x"))
+        .and_then(|value| u64::from_str_radix(value, 16).ok())
+        .ok_or_else(|| format!("no hex handle= in {refused:?}"))?;
+    if handle >> 56 != LIFECYCLE_HANDLE_TAG {
+        return Err(format!(
+            "init's console probe used handle {handle:#x}, which does not carry the lifecycle family tag"
+        ));
     }
     Ok(())
 }
@@ -799,7 +814,7 @@ mod tests {
              [IPC ] console pid=3: [INIT] boot profile=base\n\
              [IPC ] console pid=3: [INIT] started pid=3 services=4\n\
              [IPC ] console pid=3: [INIT] SERVICE_READY from init refused: not a service\n\
-             [IPC ] console write refused pid=3 handle=0x10000: not the console sink\n\
+             [IPC ] console write refused pid=3 handle=0x200000000010000: not the console sink\n\
              [IPC ] console pid=3: [INIT] console write on the lifecycle handle refused: EBADF\n\
              [IPC ] console pid=3: [INIT] starting service=20736\n\
              [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
@@ -858,7 +873,8 @@ mod tests {
 
     #[test]
     fn syscall_3_on_a_non_console_handle_is_refused_by_the_kernel_for_init() {
-        let refused = "[IPC ] console write refused pid=3 handle=0x10000: not the console sink\n";
+        let refused =
+            "[IPC ] console write refused pid=3 handle=0x200000000010000: not the console sink\n";
         let delivered = transcript(1, 9).replace(
             refused,
             &format!("{refused}[IPC ] console pid=3: {CONSOLE_PROBE}\n"),
@@ -873,6 +889,9 @@ mod tests {
         for (from, to) in [
             ("refused pid=3 ", "refused pid=4 "),
             (": not the console sink", ": unauthorized"),
+            ("handle=0x200000000010000:", "handle=0x10000:"),
+            ("handle=0x200000000010000:", "handle=0x100000000010000:"),
+            ("handle=0x200000000010000:", "handle=zz:"),
         ] {
             let text = transcript(1, 9).replace(from, to);
             assert!(validate_boot(&text, Formatted::Yes).is_err(), "{to}");

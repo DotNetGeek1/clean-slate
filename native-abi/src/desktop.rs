@@ -77,7 +77,10 @@ impl DesktopLaunchPage {
 /// the console sink: a handle that names anything else, a torn-down sink included, is `EBADF`;
 /// a live sink's handle the caller does not hold is `EACCES`; the caller's capability revoked
 /// while the sink lives is `ESTALE`; and an unreadable buffer or a length of 0 or over
-/// [`CONSOLE_LINE_BYTES`] is `EINVAL`.
+/// [`CONSOLE_LINE_BYTES`] is `EINVAL`. A handle of another family (a lifecycle or
+/// block-device handle, or a capability-table handle) is `EBADF`, whatever its low bits are:
+/// the kernel tags every handle with its family in bits 56..64 (`docs/ARCHITECTURE.md`,
+/// *Handle families*). Handles are opaque; pass back the value the kernel gave.
 pub const SYSCALL_NR_IPC_SEND: u64 = 3;
 /// Longest console message the kernel accepts.
 pub const CONSOLE_LINE_BYTES: usize = 64;

@@ -426,7 +426,7 @@ The Linux console write (`write(2)` on a console descriptor) checks in a differe
 
 Mailbox endpoints, and kernel delivery to them, compile only into the `m3-resources-self-test` and `m4-crash-service-self-test` builds, which use them to account for per-process IPC resources. Every other build, the system kernel included, has console sinks only.
 
-At boot, init calls syscall 3 with its lifecycle handle, and `test-system-boot` requires the kernel's refusal record for init's pid. That handle (`0x10000`) names endpoint generation 0, which no endpoint ever has, so the lane shows that a handle naming no endpoint is refused with `EBADF` in the default image. The lane also fails if the probe text reaches serial, but only as a regression guard. Refusing a live endpoint of another kind is covered by the kernel host tests alone.
+At boot, init calls syscall 3 with its lifecycle handle, and `test-system-boot` requires the kernel's refusal record for init's pid. That handle (`0x200000000010000`) carries the lifecycle-control family tag, not the IPC one (see *Handle families* below), so the lane shows that the default image refuses a handle of another family with `EBADF` before it reads any of the handle's fields. Before #288 the same handle was `0x10000`, which decoded as init's own console capability and was refused only because its endpoint-generation field happened to be 0. The lane also fails if the probe text reaches serial, but only as a regression guard. Refusing a live endpoint of another kind is covered by the kernel host tests alone.
 
 ## M4.1 service lifecycle protocol direction
 
@@ -494,6 +494,19 @@ M6.1 defines the shared capability contract in workspace crate `clean-slate-capa
 ### Vocabulary
 
 - **Handle** (`CapabilityHandle`): opaque slot + generation presented by userspace. Knowing a raw handle value is not authority until the kernel validates it against the live table record.
+
+### Handle families (#288)
+
+Four kernel tables hand out handles, and the top byte of every handle names the table it belongs to. Each decoder refuses a handle with another family's tag, or with any bit set that its layout does not use, before it reads a slot or generation. So a handle from one table can never be read as a record of another, even when the two records sit in the same slot with the same generation.
+
+| Family | Tag (bits 56..64) | Layout below the tag | Refused as |
+|---|---|---|---|
+| Capability table (`CapabilityHandle`) | `0x00` | `slot:16 \| generation:32`; bits 48..64 zero | `EINVAL` (`InvalidHandle`) |
+| IPC console send (syscall 3) | `0x01` | `cap_slot:16 \| cap_gen:16 \| ep_slot:8 \| ep_gen:16` | `EBADF` (not the console sink) |
+| Lifecycle control | `0x02` | `slot:16 \| generation:16`; bits 32..56 zero | `InvalidHandle` |
+| Block device | `0x03` | `slot:16 \| generation:16`; bits 32..56 zero | `InvalidHandle` |
+
+The capability table already refused bits 48..64, so its handles did not change. No tag sets bit 63, so no handle falls in the native status range. Handles stay opaque to userspace: programs pass back the value the kernel gave them and never build one. The tags are defined in `kernel/src/capability/handle_family.rs`.
 - **Resource** (`ResourceRef`): stable identity of the protected object or control target (class, id, optional instance generation). Separate from handle identity — the same resource may have many capabilities over time in different slots.
 - **Holder** (`HolderId`): trusted process identity for who may exercise a capability. Supplied only by the kernel from the current process context, never from an untrusted syscall argument.
 

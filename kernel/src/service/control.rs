@@ -2150,7 +2150,7 @@ mod tests {
             Err(LifecycleControlError::Unauthorized)
         );
         use crate::service::capability::LifecycleControlHandleParts;
-        let parts = LifecycleControlHandleParts::decode(capability);
+        let parts = LifecycleControlHandleParts::decode(capability).expect("lifecycle handle");
         let wrong_generation = LifecycleControlHandleParts {
             capability_generation: parts.capability_generation + 1,
             ..parts
@@ -2170,8 +2170,27 @@ mod tests {
             .expect("grant block capability");
         assert_eq!(
             controller.pending_service_authorized(101, block_handle),
-            Err(LifecycleControlError::Unauthorized),
-            "a block-device handle held by a process without lifecycle control is refused"
+            Err(LifecycleControlError::InvalidHandle),
+            "a block-device handle is not a lifecycle handle, whoever holds it (#288)"
+        );
+        let holder_block_handle = unsafe { lifecycle_capabilities_mut() }
+            .block_device
+            .grant_block_device_capability(100, STORAGE_BLOCK_DEVICE_ID)
+            .expect("grant block capability to the lifecycle holder");
+        assert_eq!(
+            controller.pending_service_authorized(100, holder_block_handle),
+            Err(LifecycleControlError::InvalidHandle),
+            "the lifecycle holder's own block-device handle does not alias its lifecycle handle"
+        );
+        assert_eq!(
+            controller.pending_service_authorized(100, capability & 0xffff_ffff),
+            Err(LifecycleControlError::InvalidHandle),
+            "the lifecycle handle without its family tag is refused"
+        );
+        assert_eq!(
+            controller.pending_service_authorized(100, capability | (1 << 40)),
+            Err(LifecycleControlError::InvalidHandle),
+            "a reserved bit set on the lifecycle handle is refused"
         );
 
         let event = controller

@@ -7,6 +7,7 @@ use clean_slate_capability::{
 use clean_slate_service_lifecycle::ServiceId;
 
 use crate::capability::audit::{self, record_kernel_revoke};
+use crate::capability::handle_family::{HandleFamily, SlotGenerationHandle};
 use crate::limits::SERVICE_REGISTRY_CAPACITY;
 use crate::sync::global_cell::GlobalCell;
 
@@ -120,15 +121,21 @@ pub(crate) struct LifecycleControlHandleParts {
 }
 
 impl LifecycleControlHandleParts {
+    /// `slot | generation << 16`, tagged [`HandleFamily::LifecycleControl`] (#288).
     pub(crate) fn encode(self) -> u64 {
-        u64::from(self.capability_slot) | (u64::from(self.capability_generation) << 16)
+        SlotGenerationHandle {
+            capability_slot: self.capability_slot,
+            capability_generation: self.capability_generation,
+        }
+        .encode(HandleFamily::LifecycleControl)
     }
 
-    pub(crate) fn decode(raw: u64) -> Self {
-        Self {
-            capability_slot: raw as u16,
-            capability_generation: (raw >> 16) as u16,
-        }
+    /// `None` for a handle of another family or with reserved bits set.
+    pub(crate) fn decode(raw: u64) -> Option<Self> {
+        SlotGenerationHandle::decode(HandleFamily::LifecycleControl, raw).map(|handle| Self {
+            capability_slot: handle.capability_slot,
+            capability_generation: handle.capability_generation,
+        })
     }
 }
 
@@ -172,15 +179,21 @@ pub(crate) struct BlockDeviceHandleParts {
 }
 
 impl BlockDeviceHandleParts {
+    /// `slot | generation << 16`, tagged [`HandleFamily::BlockDevice`] (#288).
     pub(crate) fn encode(self) -> u64 {
-        u64::from(self.capability_slot) | (u64::from(self.capability_generation) << 16)
+        SlotGenerationHandle {
+            capability_slot: self.capability_slot,
+            capability_generation: self.capability_generation,
+        }
+        .encode(HandleFamily::BlockDevice)
     }
 
-    pub(crate) fn decode(raw: u64) -> Self {
-        Self {
-            capability_slot: raw as u16,
-            capability_generation: (raw >> 16) as u16,
-        }
+    /// `None` for a handle of another family or with reserved bits set.
+    pub(crate) fn decode(raw: u64) -> Option<Self> {
+        SlotGenerationHandle::decode(HandleFamily::BlockDevice, raw).map(|handle| Self {
+            capability_slot: handle.capability_slot,
+            capability_generation: handle.capability_generation,
+        })
     }
 }
 
@@ -325,7 +338,9 @@ impl BlockDeviceCapabilityTable {
         raw_handle: u64,
         device_id: u64,
     ) -> Result<(), BlockDeviceCapabilityError> {
-        let handle = BlockDeviceHandleParts::decode(raw_handle);
+        let Some(handle) = BlockDeviceHandleParts::decode(raw_handle) else {
+            return Err(BlockDeviceCapabilityError::InvalidHandle);
+        };
         let capability = match self.capabilities.get(handle.capability_slot as usize) {
             Some(capability) => capability,
             None => return Err(BlockDeviceCapabilityError::InvalidHandle),
@@ -491,7 +506,9 @@ impl LifecycleControlCapabilityTable {
         raw_handle: u64,
         service: Option<ServiceId>,
     ) -> Result<LifecycleScope, LifecycleControlCapabilityError> {
-        let handle = LifecycleControlHandleParts::decode(raw_handle);
+        let Some(handle) = LifecycleControlHandleParts::decode(raw_handle) else {
+            return Err(LifecycleControlCapabilityError::InvalidHandle);
+        };
         let capability = match self.capabilities.get(handle.capability_slot as usize) {
             Some(capability) => capability,
             None => return Err(LifecycleControlCapabilityError::InvalidHandle),
@@ -769,6 +786,56 @@ mod tests {
         assert_eq!(
             table.authorize_block_device_access(3, handle, 1),
             Err(BlockDeviceCapabilityError::StaleHandle)
+        );
+    }
+
+    /// #288: one holder's lifecycle and block-device records in the same slot with the same
+    /// generation used to encode to the same handle, so either authorized the other table.
+    #[test]
+    fn lifecycle_and_block_handles_in_the_same_slot_do_not_alias() {
+        let mut lifecycle = LifecycleControlCapabilityTable::new();
+        let mut block = BlockDeviceCapabilityTable::new();
+        let lifecycle_handle = lifecycle
+            .grant_lifecycle_control_capability(9, scope(&[SERVICE_A]))
+            .expect("grant lifecycle control");
+        let block_handle = block
+            .grant_block_device_capability(9, 1)
+            .expect("grant block device");
+        assert_eq!(
+            lifecycle_handle & 0xffff_ffff,
+            block_handle & 0xffff_ffff,
+            "same slot and generation in both tables"
+        );
+        assert_ne!(lifecycle_handle, block_handle);
+
+        assert!(lifecycle
+            .authorize_lifecycle_control(9, lifecycle_handle, Some(SERVICE_A))
+            .is_ok());
+        assert!(block
+            .authorize_block_device_access(9, block_handle, 1)
+            .is_ok());
+        assert_eq!(
+            lifecycle.authorize_lifecycle_control(9, block_handle, Some(SERVICE_A)),
+            Err(LifecycleControlCapabilityError::InvalidHandle)
+        );
+        assert_eq!(
+            block.authorize_block_device_access(9, lifecycle_handle, 1),
+            Err(BlockDeviceCapabilityError::InvalidHandle)
+        );
+        for untagged in [lifecycle_handle & 0xffff_ffff, block_handle & 0xffff_ffff] {
+            assert_eq!(
+                lifecycle.authorize_lifecycle_control(9, untagged, Some(SERVICE_A)),
+                Err(LifecycleControlCapabilityError::InvalidHandle)
+            );
+            assert_eq!(
+                block.authorize_block_device_access(9, untagged, 1),
+                Err(BlockDeviceCapabilityError::InvalidHandle)
+            );
+        }
+        assert_eq!(
+            block.authorize_block_device_access(9, block_handle | (1 << 32), 1),
+            Err(BlockDeviceCapabilityError::InvalidHandle),
+            "reserved bits are not ignored"
         );
     }
 }
