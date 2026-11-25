@@ -250,7 +250,9 @@ const M9_LINUX_PROC_ACCEPTANCE_MARKERS: [&str; 4] = [
 const M9_LINUX_PROC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_ROOTFS_ACCEPTANCE_MARKERS: [&str; 2] = ["[RFS ] rootfs entries=", "[M9.K] PASS"];
 const M9_ROOTFS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 15] = [
+/// First boot of `test-m9-linux-fs` (blank disk): the `/tmp` probe, then the #304 `/home`
+/// probe writes a 180 KiB save and a config, and checks rename, unlink, fsync, ftruncate.
+const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 23] = [
     "[M9.H] creating",
     "[M9.H] getcwd=/\n",
     "[M9.H] hostname=m9-fixture\n",
@@ -263,6 +265,27 @@ const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[M9.H] big write/read ok",
     "[M9.H] negative cases ok",
     "[M9.H] open cloexec ok",
+    "[HOME] loaded files=0 bytes=0 (new)",
+    "[HOME] probe phase=write\n",
+    "[HOME] commit files=1 bytes=0\n",
+    "[HOME] commit files=1 bytes=184320\n",
+    "[HOME] save 184320 bytes read back ok",
+    "[HOME] config fsync/ftruncate ok",
+    "[HOME] rename/unlink ok",
+    "[HOME] probe phase=write PASS",
+    "[M9.H] pool_before",
+    "[M9.H] pool_after",
+    "[M9.H] PASS",
+];
+/// Second boot on the same disk: `/home` came back from the store with both files and their
+/// bytes, and the probe removes them.
+const M9_LINUX_FS_HOME_VERIFY_MARKERS: [&str; 9] = [
+    "[M9.H] open cloexec ok",
+    "[HOME] loaded files=2 bytes=184324\n",
+    "[HOME] probe phase=verify\n",
+    "[HOME] save 184320 bytes read back ok",
+    "[HOME] commit files=0 bytes=0\n",
+    "[HOME] probe phase=verify PASS",
     "[M9.H] pool_before",
     "[M9.H] pool_after",
     "[M9.H] PASS",
@@ -2220,14 +2243,33 @@ fn run_m9_linux_fs_acceptance() -> Result<(), XtaskError> {
         &probe_dir.join("linux-fs-probe-x86_64.sha256"),
     )
     .map_err(XtaskError::InvalidCommand)?;
+    let home_dir = probe_dir.join("..").join("linux-home-probe");
+    m8_fixture::verify_pinned_sha256(
+        &home_dir.join("linux-home-probe-x86_64"),
+        &home_dir.join("linux-home-probe-x86_64.sha256"),
+    )
+    .map_err(XtaskError::InvalidCommand)?;
     reset_m5_data_disk_image()?;
     build_m6_fixture_userspace(true)?;
+    println!("[M9.H] boot 1/2: blank disk, /home written");
     run_vm_inner_with_config(
         false,
         false,
         &["m9-linux-fs-self-test"],
         Some((
             MarkerSet::Ordered(&M9_LINUX_FS_ACCEPTANCE_MARKERS),
+            M9_LINUX_FS_ACCEPTANCE_TIMEOUT,
+        )),
+        m5_storage_vm_config(),
+    )?;
+    // The same data disk again: `/home` must come back from the store (#304).
+    println!("[M9.H] boot 2/2: same disk, /home read back");
+    run_vm_inner_with_config(
+        false,
+        false,
+        &["m9-linux-fs-self-test"],
+        Some((
+            MarkerSet::Ordered(&M9_LINUX_FS_HOME_VERIFY_MARKERS),
             M9_LINUX_FS_ACCEPTANCE_TIMEOUT,
         )),
         m5_storage_vm_config(),

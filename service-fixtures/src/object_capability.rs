@@ -15,6 +15,17 @@ pub const OBJECT_OP_WRITE: u64 = 2;
 /// Removes the object; it takes effect at the storage service's next commit, which the
 /// service runs before completing the request. Needs `Rights::WRITE`, like a write.
 pub const OBJECT_OP_DELETE: u64 = 3;
+/// Reads up to `len` bytes (at most [`OBJECT_MAX_PAYLOAD_BYTES`]) from `offset`; the
+/// completion's payload holds the bytes, fewer at the object's end. Needs `Rights::READ`.
+pub const OBJECT_OP_READ_AT: u64 = 4;
+/// Stages the payload at `offset`, creating the object when it is missing and zero-filling
+/// past its end. It is not committed: `OBJECT_STATUS_OK` means staged, and the next
+/// committing op ([`OBJECT_OP_WRITE`] or [`OBJECT_OP_DELETE`]) makes it durable. A crash
+/// or service restart before then forgets it. Needs `Rights::WRITE`.
+pub const OBJECT_OP_WRITE_AT: u64 = 5;
+/// Stages the object cut or zero-extended to `offset` bytes, creating it when it is
+/// missing. Staged like [`OBJECT_OP_WRITE_AT`]. Needs `Rights::WRITE`.
+pub const OBJECT_OP_TRUNCATE: u64 = 6;
 
 pub const OBJECT_MAX_PAYLOAD_BYTES: usize = 512;
 pub const OBJECT_REQUEST_SLOTS: usize = 4;
@@ -29,6 +40,9 @@ pub const OBJECT_STATUS_TOO_LARGE: u64 = 3;
 /// The request's capability is bound to an object epoch, and the object it names is gone
 /// or was deleted and re-created under the same id with a later epoch.
 pub const OBJECT_STATUS_STALE: u64 = 4;
+/// The write would take the store's live bytes past the service's budget: the store is
+/// full. Nothing was staged.
+pub const OBJECT_STATUS_NO_SPACE: u64 = 5;
 
 /// [`ObjectServiceRequest::epoch`] for a capability not bound to one object epoch: it
 /// reaches whatever object currently has the id.
@@ -47,6 +61,9 @@ pub struct ObjectServiceRequest {
     /// `instance_generation`), or [`OBJECT_EPOCH_UNBOUND`]. Set by the kernel, never by
     /// the client.
     pub epoch: u64,
+    /// Byte offset for [`OBJECT_OP_READ_AT`] and [`OBJECT_OP_WRITE_AT`], and the new length
+    /// for [`OBJECT_OP_TRUNCATE`]; 0 for the whole-object ops.
+    pub offset: u64,
     pub payload: [u8; OBJECT_MAX_PAYLOAD_BYTES],
 }
 
@@ -60,6 +77,7 @@ impl ObjectServiceRequest {
             object_id,
             len,
             epoch: OBJECT_EPOCH_UNBOUND,
+            offset: 0,
             payload: [0; OBJECT_MAX_PAYLOAD_BYTES],
         }
     }
@@ -71,7 +89,8 @@ impl ObjectServiceRequest {
         bytes[16..24].copy_from_slice(&self.object_id.to_le_bytes());
         bytes[24..32].copy_from_slice(&self.len.to_le_bytes());
         bytes[32..40].copy_from_slice(&self.epoch.to_le_bytes());
-        bytes[40..40 + OBJECT_MAX_PAYLOAD_BYTES].copy_from_slice(&self.payload);
+        bytes[40..48].copy_from_slice(&self.offset.to_le_bytes());
+        bytes[48..48 + OBJECT_MAX_PAYLOAD_BYTES].copy_from_slice(&self.payload);
         bytes
     }
 
@@ -87,14 +106,16 @@ impl ObjectServiceRequest {
             return Err(ObjectServiceDecodeError::LengthOutOfRange);
         }
         let epoch = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+        let offset = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
         let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
-        payload.copy_from_slice(&bytes[40..40 + OBJECT_MAX_PAYLOAD_BYTES]);
+        payload.copy_from_slice(&bytes[48..48 + OBJECT_MAX_PAYLOAD_BYTES]);
         Ok(Self {
             request_id,
             op,
             object_id,
             len,
             epoch,
+            offset,
             payload,
         })
     }
@@ -112,7 +133,7 @@ mod tests {
 
     #[test]
     fn object_service_request_size_matches_repr_c() {
-        assert_eq!(OBJECT_SERVICE_REQUEST_BYTES, 40 + OBJECT_MAX_PAYLOAD_BYTES);
+        assert_eq!(OBJECT_SERVICE_REQUEST_BYTES, 48 + OBJECT_MAX_PAYLOAD_BYTES);
     }
 
     #[test]
@@ -128,6 +149,7 @@ mod tests {
     fn object_service_request_round_trip() {
         let mut request = ObjectServiceRequest::new(9, OBJECT_OP_WRITE, 7, 4);
         request.epoch = 0x1234_5678_9abc;
+        request.offset = 0x0002_d000;
         request.payload[..4].copy_from_slice(b"test");
         let bytes = request.encode();
         let decoded = ObjectServiceRequest::decode(&bytes).expect("decode");
@@ -137,8 +159,15 @@ mod tests {
     #[test]
     fn object_ops_and_statuses_are_stable() {
         assert_eq!(
-            [OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_OP_DELETE],
-            [1, 2, 3]
+            [
+                OBJECT_OP_READ,
+                OBJECT_OP_WRITE,
+                OBJECT_OP_DELETE,
+                OBJECT_OP_READ_AT,
+                OBJECT_OP_WRITE_AT,
+                OBJECT_OP_TRUNCATE
+            ],
+            [1, 2, 3, 4, 5, 6]
         );
         assert_eq!(
             [
@@ -146,9 +175,10 @@ mod tests {
                 OBJECT_STATUS_NOT_FOUND,
                 OBJECT_STATUS_STORE_ERROR,
                 OBJECT_STATUS_TOO_LARGE,
-                OBJECT_STATUS_STALE
+                OBJECT_STATUS_STALE,
+                OBJECT_STATUS_NO_SPACE
             ],
-            [0, 1, 2, 3, 4]
+            [0, 1, 2, 3, 4, 5]
         );
         assert_eq!(OBJECT_EPOCH_UNBOUND, 0);
     }

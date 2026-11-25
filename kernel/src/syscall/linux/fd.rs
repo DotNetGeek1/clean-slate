@@ -144,7 +144,18 @@ pub(crate) fn handle_sys_close(
     ctx: &mut LinuxSyscallContext<'_>,
 ) -> LinuxSyscallResult {
     let fd = request.args[0];
-    linux_fd::close_fd(ctx.pid, ctx.instance_generation, fd).map(|()| 0)
+    // `close` of a writable `/home` fd commits what was written (#304). The fd stays open
+    // while the commit blocks, and is closed whatever the commit's outcome.
+    #[cfg(clean_slate_linux_rootfs)]
+    let synced = match super::fs::sync_home_before_close(request, ctx, fd) {
+        Ok(Some(rax)) => return Ok(rax),
+        Ok(None) => Ok(()),
+        Err(errno) => Err(errno),
+    };
+    #[cfg(not(clean_slate_linux_rootfs))]
+    let synced: Result<(), clean_slate_linux_abi::LinuxErrno> = Ok(());
+    linux_fd::close_fd(ctx.pid, ctx.instance_generation, fd)?;
+    synced.map(|()| 0)
 }
 
 pub(crate) fn handle_sys_dup2(

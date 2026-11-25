@@ -8,7 +8,8 @@
 //!
 //! - `Console`: one console capability, installed as fd 1 and fd 2;
 //! - `ConsoleInput`: serial console input at fd 0;
-//! - `TmpObjects`: `READ | WRITE` on every `/tmp` backing object;
+//! - `TmpObjects`: `READ | WRITE` on every `/tmp` backing object and on the `/home` table
+//!   object, which authorises every `/home` file (#304);
 //! - `NetworkClient`: the network client entitlement, plus a client capability bound to the
 //!   network instance when one is live (see [`crate::capability::network`]). A build without
 //!   the Linux socket layer cannot honour it, so the launch fails.

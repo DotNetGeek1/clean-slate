@@ -49,12 +49,13 @@ pub(crate) const SMALL_ADDRESS_SPACE_USER_MAPPINGS: usize = 384;
 /// for the capacity. Each large table is 16,384 × 16 = 256 KiB.
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 16 * 1024;
 
-/// Large mapping tables, shared by every address space (1 MiB of `.bss`).
+/// Large mapping tables, shared by every address space (1.25 MiB of `.bss`).
 ///
-/// Four covers two large Linux processes, each with an exec replacement
-/// in flight. Beyond that a growing space fails with `ENOMEM` once its
-/// small table is full.
-pub(crate) const LARGE_USER_MAPPING_TABLES: usize = 4;
+/// Four cover two large Linux processes, each with an exec replacement
+/// in flight; the fifth is the object storage service's, whose heap is
+/// 2048 pages (#304). Beyond that a growing space fails with `ENOMEM` once
+/// its small table is full.
+pub(crate) const LARGE_USER_MAPPING_TABLES: usize = 5;
 
 /// Page-table frames tracked inside `ProcessAddressSpace`, before the fixed
 /// carve-out tables are added.

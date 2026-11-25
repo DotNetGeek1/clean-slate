@@ -55,7 +55,15 @@ pub(crate) fn log_storage_service_exit(pid: u64) {
 /// Logs the refusal recorded by the current process, which must be the exiting storage service.
 fn log_exiting_service_refusal() {
     match read_user::<StorageServiceBootstrap>(STORAGE_SERVICE_BOOTSTRAP_ADDRESS) {
-        Ok(report) => log_refusal(&report),
+        Ok(report) => {
+            log_refusal(&report);
+            if report.refusal == 0 {
+                kernel_log_fmt(format_args!(
+                    "[STOR] storage service exited result={} aux={:#x} heap={:#x}+{:#x}\n",
+                    report.result_code, report.aux_status, report.heap_address, report.heap_bytes
+                ));
+            }
+        }
         Err(message) => kernel_log_fmt(format_args!(
             "[STOR] storage service bootstrap page unreadable at exit: {message}\n"
         )),

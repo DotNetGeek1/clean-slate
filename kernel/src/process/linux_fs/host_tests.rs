@@ -282,3 +282,79 @@ fn resolve_executable_via_mod_api() {
     assert!(!exec.image.is_empty());
     assert!(resolved.starts_with(b"/bin/"));
 }
+
+/// `/home` (#304): its table's files appear as nodes, with the table's lengths, and leave
+/// with an unlink or a replacing rename. The only test touching the global `/home` state.
+#[test]
+fn home_files_come_from_the_loaded_table() {
+    use super::home_backend::{load_home_for_host_tests, reset_home_for_host_tests};
+    use super::home_table::HomeTable;
+    use clean_slate_linux_abi::{EBADF, EEXIST, ENOENT, EPERM, S_IFDIR, S_IFREG};
+
+    let mut table = fresh_table();
+    let img = image();
+    reset_home_for_host_tests();
+    // Before the table is loaded, `/home` exists but holds nothing.
+    let home = table.lookup_path(b"/home", &img, true).expect("/home");
+    assert_eq!(table.node_kind(home), Ok(NodeKind::Dir));
+    assert_eq!(
+        table.lookup_path(b"/home/doomsav0.dsg", &img, true),
+        Err(ENOENT)
+    );
+
+    let mut stored = HomeTable::empty();
+    stored.create_at(0, b"doomsav0.dsg").unwrap();
+    stored.entry_mut(0).unwrap().len = 180 * 1024;
+    stored.create_at(3, b"default.cfg").unwrap();
+    stored.entry_mut(3).unwrap().len = 42;
+    load_home_for_host_tests(stored);
+
+    let save = table
+        .lookup_path(b"/home/doomsav0.dsg", &img, true)
+        .expect("save");
+    assert_eq!(table.home_slot_for_node(save), Ok(0));
+    let stat = table.stat_fields(save, &img, false).unwrap();
+    assert_eq!((stat.st_mode, stat.st_size), (S_IFREG | 0o644, 180 * 1024));
+    assert_eq!(
+        table.stat_fields(home, &img, false).unwrap().st_mode,
+        S_IFDIR | 0o755
+    );
+    assert!(check_write_allowed(b"/home/new.cfg", O_WRONLY | O_CREAT).is_ok());
+    assert_eq!(
+        resolve_executable_bytes(&mut table, &img, b"/home/doomsav0.dsg"),
+        Err(EACCES)
+    );
+    assert_eq!(table.mkdir(b"/home", &img), Err(EEXIST));
+    assert_eq!(table.mkdir(b"/home/saves", &img), Err(EPERM));
+
+    let mut children = [(
+        NodeId {
+            index: 0,
+            generation: 0,
+        },
+        0u8,
+    ); 32];
+    let count = table.list_children(home, &img, &mut children).unwrap();
+    let mut names: std::vec::Vec<&[u8]> = children[..count]
+        .iter()
+        .map(|(id, _)| table.dirent_name(*id).unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, [&b"default.cfg"[..], b"doomsav0.dsg"]);
+
+    let root = table.lookup_path(b"/", &img, true).unwrap();
+    let count = table.list_children(root, &img, &mut children).unwrap();
+    let homes = children[..count]
+        .iter()
+        .filter(|(id, _)| table.dirent_name(*id) == Ok(&b"home"[..]))
+        .count();
+    assert_eq!(homes, 1, "/ lists home once");
+
+    // A rename keeps the node; an unlink drops it and its fds go stale.
+    table.rename_home_file(0, b"doomsav1.dsg");
+    assert_eq!(table.dirent_name(save), Ok(&b"doomsav1.dsg"[..]));
+    let cfg = table.lookup_path(b"/home/default.cfg", &img, true).unwrap();
+    table.evict_home_file(3);
+    assert_eq!(table.check_node(cfg), Err(EBADF));
+    reset_home_for_host_tests();
+}

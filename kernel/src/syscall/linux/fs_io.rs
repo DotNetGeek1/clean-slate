@@ -1,7 +1,8 @@
 //! File-backed fd read/write/lseek helpers (#101).
 
 use crate::process::linux_fd;
-use crate::process::linux_fd::open_description::DescriptorKind;
+use crate::process::linux_fd::open_description::{DescriptorKind, OpenAccess};
+use crate::process::linux_fs::home_backend::{self as home, Flow};
 use crate::process::linux_fs::object_backend::{object_read_sync, object_write_sync, ObjectIo};
 use crate::process::linux_fs::table_mut;
 use crate::process::linux_rootfs;
@@ -49,6 +50,20 @@ pub(crate) fn read_file_fd(
         buf[..take].copy_from_slice(&data[start..start + take]);
         linux_fd::set_open_description_offset(pid, generation, fd, desc.offset + take as u64)?;
         return Ok(take as u64);
+    }
+    if let Ok(slot) = table.home_slot_for_node(file.node) {
+        return match home::finish(pid, home::read(request, ctx, slot, desc.offset, buf))? {
+            Flow::Done(read) => {
+                linux_fd::set_open_description_offset(
+                    pid,
+                    generation,
+                    fd,
+                    desc.offset + read as u64,
+                )?;
+                Ok(read as u64)
+            }
+            Flow::Restart(rax) => Ok(rax),
+        };
     }
     if let Ok(object_id) = table.object_id_for_node(file.node) {
         let start = desc.offset as usize;
@@ -148,6 +163,28 @@ pub(crate) fn write_file_fd_user(
     if table.rootfs_entry_data(file.node, &image()).is_ok() {
         return Err(EBADF);
     }
+    if let Ok(slot) = table.home_slot_for_node(file.node) {
+        let access = linux_fd::open_description_status(pid, generation, fd)?.access;
+        if access == OpenAccess::ReadOnly {
+            return Err(EBADF);
+        }
+        return match home::finish(
+            pid,
+            home::write(request, ctx, slot, desc.offset, user_ptr, count),
+        )? {
+            Flow::Done(written) => {
+                linux_fd::set_open_description_offset(
+                    pid,
+                    generation,
+                    fd,
+                    desc.offset + written as u64,
+                )?;
+                Ok(written as u64)
+            }
+            Flow::Restart(rax) => Ok(rax),
+        };
+    }
+    let count = super::write::clamp_write_count(count as u64);
     let start = desc.offset as usize;
     if start.saturating_add(count) > OBJECT_MAX_PAYLOAD_BYTES {
         return Err(EFBIG);
@@ -184,6 +221,8 @@ pub(crate) fn lseek_file_fd(
     table.check_node(file.node)?;
     let size = if let Ok(data) = table.rootfs_entry_data(file.node, &img) {
         data.len() as i64
+    } else if let Ok(slot) = table.home_slot_for_node(file.node) {
+        home::file_len(slot) as i64
     } else if let Ok(object_id) = table.object_id_for_node(file.node) {
         tmp_file_by_len(object_id) as i64
     } else {

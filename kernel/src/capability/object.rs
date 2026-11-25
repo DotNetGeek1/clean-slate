@@ -10,7 +10,8 @@ use clean_slate_capability::{
 use clean_slate_native_abi::status::STATUS_ETIMEDOUT;
 use clean_slate_service_fixtures::{
     ObjectServiceRequest, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_DELETE, OBJECT_OP_READ,
-    OBJECT_OP_WRITE, OBJECT_POLL_NO_DEADLINE, OBJECT_REQUEST_SLOTS, OBJECT_SERVICE_REQUEST_BYTES,
+    OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE, OBJECT_OP_WRITE_AT,
+    OBJECT_POLL_NO_DEADLINE, OBJECT_REQUEST_SLOTS, OBJECT_SERVICE_REQUEST_BYTES,
     OBJECT_SERVICE_ROLE_ID, OBJECT_STATUS_PENDING, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT,
     OBJECT_SUBOP_POLL, OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT,
     OBJECT_SUBOP_SUBMIT,
@@ -49,6 +50,8 @@ struct ObjectRequestSlot {
     object_id: u64,
     /// The authorizing capability's object epoch, passed to the storage service.
     epoch: u64,
+    /// Offset of an offset op (`READ_AT`, `WRITE_AT`), or `TRUNCATE`'s new length.
+    offset: u64,
     len: usize,
     payload: [u8; OBJECT_MAX_PAYLOAD_BYTES],
     status: u64,
@@ -63,6 +66,7 @@ impl ObjectRequestSlot {
             op: 0,
             object_id: 0,
             epoch: 0,
+            offset: 0,
             len: 0,
             payload: [0; OBJECT_MAX_PAYLOAD_BYTES],
             status: 0,
@@ -97,6 +101,20 @@ impl ObjectRequestQueue {
         epoch: u64,
         payload: &[u8],
     ) -> Result<u64, SyscallQueueError> {
+        self.submit_at(client, op, object_id, epoch, 0, payload)
+    }
+
+    /// [`submit`](Self::submit) with an offset. A `READ_AT` asks for `payload.len()` bytes;
+    /// its payload's bytes are not read.
+    pub fn submit_at(
+        &mut self,
+        client: HolderId,
+        op: u64,
+        object_id: u64,
+        epoch: u64,
+        offset: u64,
+        payload: &[u8],
+    ) -> Result<u64, SyscallQueueError> {
         let slot_index = self
             .slots
             .iter()
@@ -111,6 +129,7 @@ impl ObjectRequestQueue {
         slot.op = op;
         slot.object_id = object_id;
         slot.epoch = epoch;
+        slot.offset = offset;
         slot.len = len;
         slot.payload[..len].copy_from_slice(payload);
         self.slots[slot_index] = slot;
@@ -166,6 +185,7 @@ impl ObjectRequestQueue {
         let mut request =
             ObjectServiceRequest::new(slot.request_id, slot.op, slot.object_id, slot.len as u64);
         request.epoch = slot.epoch;
+        request.offset = slot.offset;
         request.payload[..slot.len].copy_from_slice(&slot.payload[..slot.len]);
         Some(request)
     }
@@ -234,13 +254,23 @@ pub(crate) fn object_request_wait_key(request_id: u64) -> WaitKey {
     WaitKey(0x46_u64 << 56 | (request_id & 0x00FF_FFFF_FFFF_FFFF))
 }
 
-/// The right an object op needs. Deleting an object needs `WRITE`, like changing its bytes.
+/// The right an object op needs. Deleting or truncating an object needs `WRITE`, like
+/// changing its bytes.
 fn required_rights(op: u64) -> Option<Rights> {
     match op {
-        OBJECT_OP_READ => Some(Rights::READ),
-        OBJECT_OP_WRITE | OBJECT_OP_DELETE => Some(Rights::WRITE),
+        OBJECT_OP_READ | OBJECT_OP_READ_AT => Some(Rights::READ),
+        OBJECT_OP_WRITE | OBJECT_OP_DELETE | OBJECT_OP_WRITE_AT | OBJECT_OP_TRUNCATE => {
+            Some(Rights::WRITE)
+        }
         _ => None,
     }
+}
+
+/// Ops a native client may submit through `OBJECT_SUBOP_SUBMIT`. The offset ops carry an
+/// offset the native ABI has no register for, so only the kernel's Linux `/home`
+/// projection submits them (#304).
+fn native_submit_op(op: u64) -> bool {
+    matches!(op, OBJECT_OP_READ | OBJECT_OP_WRITE | OBJECT_OP_DELETE)
 }
 
 /// Wait key the storage service blocks on in `OBJECT_SUBOP_SERVICE_NEXT` while no
@@ -280,6 +310,30 @@ pub(crate) fn object_queue_submit(
         op,
         object_id,
         clean_slate_service_fixtures::OBJECT_EPOCH_UNBOUND,
+        payload,
+    )
+}
+
+/// Submits `op` on `object_id` for `holder`, authorised by the holder's rights on
+/// `authority_id` instead of on the object itself: the Linux `/home` projection's one
+/// directory capability covers every file object in it (#304), since the per-holder
+/// capability quota cannot hold one capability per file.
+#[cfg(clean_slate_linux_rootfs)]
+pub(crate) fn object_queue_submit_under(
+    client: HolderId,
+    authority_id: u64,
+    op: u64,
+    object_id: u64,
+    offset: u64,
+    payload: &[u8],
+) -> Result<u64, SyscallQueueError> {
+    authorize_holder_object_op(client, authority_id, op)?;
+    queue_mut().submit_at(
+        client,
+        op,
+        object_id,
+        clean_slate_service_fixtures::OBJECT_EPOCH_UNBOUND,
+        offset,
         payload,
     )
 }
@@ -558,7 +612,7 @@ fn handle_submit(frame: &mut SyscallContext) {
             return;
         }
     };
-    if len > OBJECT_MAX_PAYLOAD_BYTES {
+    if len > OBJECT_MAX_PAYLOAD_BYTES || !native_submit_op(op) {
         frame.rax = SYSCALL_EINVAL;
         return;
     }
@@ -850,6 +904,39 @@ mod tests {
         );
         let second = queue.service_next().unwrap();
         assert_eq!((second.object_id, second.epoch), (8, 0));
+    }
+
+    #[test]
+    fn the_service_sees_an_offset_ops_offset_and_length() {
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(3);
+        queue
+            .submit_at(client, OBJECT_OP_WRITE_AT, 7, 0, 0x2_d000, b"save")
+            .unwrap();
+        queue
+            .submit_at(client, OBJECT_OP_READ_AT, 7, 0, 1024, &[0; 512])
+            .unwrap();
+        let write = queue.service_next().unwrap();
+        assert_eq!(
+            (write.op, write.offset, write.len, &write.payload[..4]),
+            (OBJECT_OP_WRITE_AT, 0x2_d000, 4, &b"save"[..])
+        );
+        let read = queue.service_next().unwrap();
+        assert_eq!(
+            (read.op, read.offset, read.len),
+            (OBJECT_OP_READ_AT, 1024, 512)
+        );
+    }
+
+    #[test]
+    fn offset_ops_need_the_same_rights_as_whole_object_ops() {
+        assert_eq!(required_rights(OBJECT_OP_READ_AT), Some(Rights::READ));
+        assert_eq!(required_rights(OBJECT_OP_WRITE_AT), Some(Rights::WRITE));
+        assert_eq!(required_rights(OBJECT_OP_TRUNCATE), Some(Rights::WRITE));
+        assert!(native_submit_op(OBJECT_OP_WRITE));
+        assert!(!native_submit_op(OBJECT_OP_WRITE_AT));
+        assert!(!native_submit_op(OBJECT_OP_READ_AT));
+        assert!(!native_submit_op(OBJECT_OP_TRUNCATE));
     }
 
     #[test]

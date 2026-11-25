@@ -305,7 +305,9 @@ pub(crate) fn handle_sys_write(
 
     #[cfg(clean_slate_linux_rootfs)]
     if matches!(projection, LinuxFdProjection::FileBackend) {
-        let n = clamp_write_count(count);
+        // A `/home` file takes the whole count in one write (#304), as `M_WriteFile`-style
+        // callers expect; other files clamp it to `LINUX_WRITE_MAX_BYTES` themselves.
+        let n = usize::try_from(count).unwrap_or(usize::MAX);
         return super::fs_io::write_file_fd_user(request, ctx, pid, generation, fd, user_ptr, n);
     }
 

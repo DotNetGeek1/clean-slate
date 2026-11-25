@@ -68,7 +68,7 @@ unsafe impl<T: UserPod, const N: usize> UserPod for [T; N] {}
 const _: () = assert!(size_of::<M6FixtureBootstrap>() == 5 * 8 + 64 * 88 + 1024);
 const _: () = assert!(size_of::<NetworkServiceBootstrap>() == 28 * 8);
 const _: () = assert!(size_of::<NetworkServiceOccupancy>() == 15 * 8);
-const _: () = assert!(size_of::<StorageServiceBootstrap>() == 23 * 8);
+const _: () = assert!(size_of::<StorageServiceBootstrap>() == 25 * 8);
 user_pod!(
     M6FixtureBootstrap,
     NetworkServiceBootstrap,

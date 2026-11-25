@@ -241,7 +241,7 @@ impl HeldAuthority {
         grants: &[Grant],
         network_instance_live: bool,
     ) -> Self {
-        use crate::process::linux_fs::object_backend::LINUX_TMP_MAX_FILES;
+        use crate::process::linux_fs::object_backend::LINUX_FILE_OBJECT_GRANTS;
 
         let held = |grant: Grant| usize::from(grants.contains(&grant));
         Self {
@@ -252,7 +252,7 @@ impl HeldAuthority {
             network: held(Grant::NetworkService),
             network_client: held(Grant::NetworkClient) * usize::from(network_instance_live),
             network_client_entitlement: held(Grant::NetworkClient),
-            tmp_objects: held(Grant::TmpObjects) * LINUX_TMP_MAX_FILES,
+            tmp_objects: held(Grant::TmpObjects) * LINUX_FILE_OBJECT_GRANTS,
             graphics_serve: held(Grant::GraphicsPort),
             graphics_shell: held(Grant::GraphicsShellRole),
             graphics_client: held(Grant::GraphicsAppRole),
@@ -847,7 +847,7 @@ mod tests {
         let without_network = HeldAuthority {
             console: 1,
             console_records: 1,
-            tmp_objects: 4,
+            tmp_objects: 5,
             network_client_entitlement: 1,
             outside: OutsideCapabilitySpace {
                 linux_personality: 1,
@@ -867,11 +867,11 @@ mod tests {
         );
         assert_eq!(
             std::format!("{shell}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         assert_eq!(
             std::format!("{without_network}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         let without_stdin = HeldAuthority::for_grants(
             ServiceImage::LinuxShell,

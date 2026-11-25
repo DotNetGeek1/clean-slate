@@ -40,8 +40,13 @@ const PASS_MARKER: &str = "[M9.H] PASS";
 
 const PROBE_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-fs-probe/linux-fs-probe-x86_64");
+/// #304: writes `/home` on a blank store, or verifies and removes what the previous boot
+/// on the same disk wrote.
+const HOME_PROBE_FIXTURE: &[u8] =
+    include_bytes!("../../../fixtures/linux-home-probe/linux-home-probe-x86_64");
 
 static M9_MAIN_PROBE_PID: AtomicU64 = AtomicU64::new(0);
+static M9_HOME_PROBE_PID: AtomicU64 = AtomicU64::new(0);
 static M9_CYCLE_PID: AtomicU64 = AtomicU64::new(0);
 static M9_CYCLE: AtomicU32 = AtomicU32::new(0);
 static M9_BASELINE_POOL: AtomicU16 = AtomicU16::new(0);
@@ -51,6 +56,7 @@ static M9_POOL_AT_CYCLE: AtomicU16 = AtomicU16::new(0);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     MainProbe,
+    HomeProbe,
     Cycles,
 }
 
@@ -106,11 +112,32 @@ pub(crate) fn start_m9_linux_fs_self_test(page_allocator: PageAllocator) -> ! {
     // service's block completion waits use TSC `MonotonicNs` deadlines.
     crate::time::calibration::calibrate_apic_tick();
 
+    let pid = launch_probe(
+        allocator,
+        PROBE_FIXTURE,
+        b"linux-fs-probe",
+        b"/linux-fs-probe",
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message));
+    M9_MAIN_PROBE_PID.store(pid, Ordering::Relaxed);
+
+    let frame_pointer =
+        start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
+    unsafe { restore_task_context(frame_pointer) }
+}
+
+/// Launches a Linux probe fixture with console stdio in the Linux slot.
+fn launch_probe(
+    allocator: &mut PageAllocator,
+    image: &'static [u8],
+    argv0: &'static [u8],
+    exec_filename: &'static [u8],
+) -> Result<u64, &'static str> {
     let spec = LinuxExecSpec {
-        image: PROBE_FIXTURE,
-        argv: &[b"linux-fs-probe"],
+        image,
+        argv: &[argv0],
         envp: &[],
-        exec_filename: b"/linux-fs-probe",
+        exec_filename,
         stack_pages: LINUX_STACK_PAGES,
         policy: &LINUX_CONVENTIONAL_LOAD_POLICY,
     };
@@ -121,15 +148,10 @@ pub(crate) fn start_m9_linux_fs_self_test(page_allocator: PageAllocator) -> ! {
         LINUX_SLOT,
         &spec,
     )
-    .unwrap_or_else(|_| fatal_kernel_error("m9 linux fs probe launch failed"));
-    M9_MAIN_PROBE_PID.store(linux.pid, Ordering::Relaxed);
-
+    .map_err(|_| "m9 linux fs probe launch failed")?;
     linux_fd::grant_console_stdio_for_process(linux.pid, linux.instance_generation)
-        .unwrap_or_else(|_| fatal_kernel_error("stdio install"));
-
-    let frame_pointer =
-        start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
-    unsafe { restore_task_context(frame_pointer) }
+        .map_err(|_| "stdio install")?;
+    Ok(linux.pid)
 }
 
 fn launch_storage_service(
@@ -283,6 +305,27 @@ pub(crate) fn after_linux_exit(
                     teardown.exit_status
                 ));
                 fatal_kernel_error("m9 linux fs probe non-zero exit");
+            }
+            unsafe {
+                M9_PHASE = Phase::HomeProbe;
+            }
+            let pid = launch_probe(
+                allocator,
+                HOME_PROBE_FIXTURE,
+                b"linux-home-probe",
+                b"/linux-home-probe",
+            )
+            .unwrap_or_else(|message| fatal_kernel_error(message));
+            M9_HOME_PROBE_PID.store(pid, Ordering::Relaxed);
+            Some(start_current_scheduler_thread().unwrap_or_else(|m| fatal_kernel_error(m)))
+        }
+        Phase::HomeProbe if pid == M9_HOME_PROBE_PID.load(Ordering::Relaxed) => {
+            if teardown.exit_status != 0 {
+                kernel_log_fmt(format_args!(
+                    "[M9.H] home probe exit status={}\n",
+                    teardown.exit_status
+                ));
+                fatal_kernel_error("m9 linux home probe non-zero exit");
             }
             // The namespace keeps `/tmp` entries and resolved rootfs nodes after the probe
             // exits, so cycles are measured against the post-probe node table.

@@ -1,4 +1,14 @@
 pub const STORAGE_SERVICE_BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0010_0000;
+/// Where the kernel maps the storage service's heap pages, above its code, bootstrap page
+/// and stack (#304). The service holds every object in memory and copies them on each
+/// commit, so its heap, not the disk, bounds the store's live bytes.
+pub const STORAGE_SERVICE_HEAP_ADDRESS: u64 = 0x0000_4000_0100_0000;
+/// Heap the kernel maps for the object-service build of the storage service: 8 MiB.
+pub const STORAGE_SERVICE_HEAP_BYTES: u64 = 8 * 1024 * 1024;
+/// Live payload bytes the object service accepts: a third of its heap, since a commit
+/// holds a second copy of every payload while it writes them, and the heap fragments.
+/// A write past it fails with `OBJECT_STATUS_NO_SPACE` instead of exhausting the heap.
+pub const STORAGE_SERVICE_LIVE_BYTES_BUDGET: u64 = STORAGE_SERVICE_HEAP_BYTES / 3;
 
 pub const STORAGE_SERVICE_MODE_INTEGRATION_INITIAL: u64 = 1;
 pub const STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE: u64 = 2;
@@ -48,6 +58,10 @@ pub struct StorageServiceBootstrap {
     pub malformed_mount_error: u64,
     /// [`DiskRefusal::encode`] when the service refused the data disk; 0 otherwise.
     pub refusal: u64,
+    /// The heap the kernel mapped for the service at spawn, or 0 for none: the service then
+    /// uses the small heap in its own image.
+    pub heap_address: u64,
+    pub heap_bytes: u64,
 }
 
 /// Why the store refuses a data disk it can neither mount nor safely format. Only a disk whose
@@ -154,6 +168,8 @@ impl StorageServiceBootstrap {
             mounted_beta_checksum: 0,
             malformed_mount_error: 0,
             refusal: 0,
+            heap_address: 0,
+            heap_bytes: 0,
         }
     }
 }

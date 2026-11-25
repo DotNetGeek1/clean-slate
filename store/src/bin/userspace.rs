@@ -22,16 +22,17 @@ use clean_slate_service_fixtures::{
     ObjectServiceRequest, StorageServiceBootstrap, BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES,
     BLOCK_TRANSPORT_REQUEST_BYTES, BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION,
     OBJECT_EPOCH_UNBOUND, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_DELETE, OBJECT_OP_READ,
-    OBJECT_OP_WRITE, OBJECT_SERVICE_REQUEST_BYTES, OBJECT_STATUS_NOT_FOUND, OBJECT_STATUS_OK,
-    OBJECT_STATUS_STALE, OBJECT_STATUS_STORE_ERROR, OBJECT_STATUS_TOO_LARGE,
+    OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE, OBJECT_OP_WRITE_AT,
+    OBJECT_SERVICE_REQUEST_BYTES, OBJECT_STATUS_NOT_FOUND, OBJECT_STATUS_NO_SPACE,
+    OBJECT_STATUS_OK, OBJECT_STATUS_STALE, OBJECT_STATUS_STORE_ERROR, OBJECT_STATUS_TOO_LARGE,
     OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT, STORAGE_BLOCK_DEVICE_ID,
-    STORAGE_SERVICE_BOOTSTRAP_ADDRESS as BOOTSTRAP_ADDRESS, STORAGE_SERVICE_MODE_CRASH_ARM_EARLY,
-    STORAGE_SERVICE_MODE_CRASH_ARM_LATE, STORAGE_SERVICE_MODE_CRASH_RECOVERY,
-    STORAGE_SERVICE_MODE_INTEGRATION_INITIAL, STORAGE_SERVICE_MODE_INTEGRATION_RESTART,
-    STORAGE_SERVICE_MODE_OBJECT_CHURN, STORAGE_SERVICE_MODE_OBJECT_SERVICE,
-    STORAGE_SERVICE_MODE_PERSISTENCE, STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE,
-    STORAGE_SERVICE_RESULT_ERROR, STORAGE_SERVICE_RESULT_OK,
-    STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
+    STORAGE_SERVICE_BOOTSTRAP_ADDRESS as BOOTSTRAP_ADDRESS, STORAGE_SERVICE_LIVE_BYTES_BUDGET,
+    STORAGE_SERVICE_MODE_CRASH_ARM_EARLY, STORAGE_SERVICE_MODE_CRASH_ARM_LATE,
+    STORAGE_SERVICE_MODE_CRASH_RECOVERY, STORAGE_SERVICE_MODE_INTEGRATION_INITIAL,
+    STORAGE_SERVICE_MODE_INTEGRATION_RESTART, STORAGE_SERVICE_MODE_OBJECT_CHURN,
+    STORAGE_SERVICE_MODE_OBJECT_SERVICE, STORAGE_SERVICE_MODE_PERSISTENCE,
+    STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE, STORAGE_SERVICE_RESULT_ERROR,
+    STORAGE_SERVICE_RESULT_OK, STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
 };
 use clean_slate_store::heap::FreeListHeap;
 use clean_slate_store::{ObjectStore, OpenError, Opened, StoreError};
@@ -67,7 +68,9 @@ unsafe impl Sync for ServiceAllocator {}
 static ALLOCATOR: ServiceAllocator =
     ServiceAllocator(core::cell::UnsafeCell::new(FreeListHeap::empty()));
 
-/// The image, heap included, must fit `STORAGE_SERVICE_MAX_CODE_PAGES` (64 pages) in the kernel.
+/// The heap in the image, used when the kernel mapped none (every mode but the object
+/// service). The image, this heap included, must fit `STORAGE_SERVICE_MAX_CODE_PAGES`
+/// (64 pages) in the kernel.
 const HEAP_BYTES: usize = 128 * 1024;
 static mut HEAP: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 
@@ -75,7 +78,19 @@ unsafe impl GlobalAlloc for ServiceAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let heap = unsafe { &mut *self.0.get() };
         if !heap.is_initialized() {
-            unsafe { heap.init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_BYTES) };
+            // The kernel maps the object service's heap at spawn (#304) and says where in
+            // the bootstrap page, which `_start` never clears.
+            let bootstrap = bootstrap();
+            if bootstrap.heap_address != 0 && bootstrap.heap_bytes != 0 {
+                unsafe {
+                    heap.init(
+                        bootstrap.heap_address as *mut u8,
+                        bootstrap.heap_bytes as usize,
+                    )
+                };
+            } else {
+                unsafe { heap.init(core::ptr::addr_of_mut!(HEAP) as *mut u8, HEAP_BYTES) };
+            }
         }
         heap.allocate(layout)
             .map_or(ptr::null_mut(), |block| block.as_ptr())
@@ -88,15 +103,25 @@ unsafe impl GlobalAlloc for ServiceAllocator {
     }
 }
 
+/// [`StorageServiceBootstrap::aux_status`] when the heap could not satisfy an allocation;
+/// the low 32 bits hold its size.
+const AUX_HEAP_EXHAUSTED: u64 = 0xA110_C000_0000_0000;
+/// [`StorageServiceBootstrap::aux_status`] after a panic.
+const AUX_PANIC: u64 = 0xDEAD_0000_0000_0000;
+
 #[alloc_error_handler]
-fn alloc_error(_layout: Layout) -> ! {
-    bootstrap().result_code = STORAGE_SERVICE_RESULT_ERROR;
+fn alloc_error(layout: Layout) -> ! {
+    let bootstrap = bootstrap();
+    bootstrap.result_code = STORAGE_SERVICE_RESULT_ERROR;
+    bootstrap.aux_status = AUX_HEAP_EXHAUSTED | (layout.size() as u64 & 0xFFFF_FFFF);
     finish()
 }
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    bootstrap().result_code = STORAGE_SERVICE_RESULT_ERROR;
+    let bootstrap = bootstrap();
+    bootstrap.result_code = STORAGE_SERVICE_RESULT_ERROR;
+    bootstrap.aux_status = AUX_PANIC;
     finish()
 }
 
@@ -223,8 +248,32 @@ fn stale_status<D: BlockDevice>(
     }
 }
 
+/// Whether staging `request` would take the store's live bytes past
+/// [`STORAGE_SERVICE_LIVE_BYTES_BUDGET`]: the heap must still hold a commit's second copy
+/// of every payload, so a full store refuses the write rather than running out of heap.
+fn over_budget<D: BlockDevice>(
+    store: &ObjectStore<D>,
+    request: &ObjectServiceRequest,
+    len: usize,
+) -> bool {
+    let current = store.object_len(request.object_id).unwrap_or(0) as u64;
+    let new_len = match request.op {
+        OBJECT_OP_WRITE => len as u64,
+        OBJECT_OP_WRITE_AT => current.max(request.offset.saturating_add(len as u64)),
+        OBJECT_OP_TRUNCATE => request.offset,
+        _ => return false,
+    };
+    if new_len <= current {
+        return false;
+    }
+    let live = store.live_bytes() as u64;
+    live.saturating_add(new_len - current) > STORAGE_SERVICE_LIVE_BYTES_BUDGET
+}
+
 /// Serves one request: its completion status and, for a read, the bytes. A write or delete
-/// is committed before it completes, so `OBJECT_STATUS_OK` means it is durable.
+/// is committed before it completes, so `OBJECT_STATUS_OK` means it is durable, and the
+/// commit takes every staged offset write and truncate with it. `WRITE_AT` and `TRUNCATE`
+/// only stage (#304): many 512-byte requests build a file, and one commit makes it durable.
 fn serve<D: BlockDevice>(
     store: &mut ObjectStore<D>,
     request: &ObjectServiceRequest,
@@ -233,7 +282,41 @@ fn serve<D: BlockDevice>(
     if let Some(status) = stale_status(store, request) {
         return (status, None);
     }
+    if over_budget(store, request, len) {
+        return (OBJECT_STATUS_NO_SPACE, None);
+    }
     let staged = match request.op {
+        OBJECT_OP_READ_AT => {
+            let mut out = vec![0u8; len];
+            return match store.read_object_at(request.object_id, request.offset, &mut out) {
+                Ok(read) => {
+                    out.truncate(read);
+                    (OBJECT_STATUS_OK, Some(out))
+                }
+                Err(StoreError::NotFound) => (OBJECT_STATUS_NOT_FOUND, None),
+                Err(_) => (OBJECT_STATUS_STORE_ERROR, None),
+            };
+        }
+        OBJECT_OP_WRITE_AT | OBJECT_OP_TRUNCATE => {
+            let name = object_name(request.object_id);
+            let result = if request.op == OBJECT_OP_WRITE_AT {
+                store.write_object_at(
+                    request.object_id,
+                    &name,
+                    request.offset,
+                    &request.payload[..len],
+                )
+            } else {
+                store.truncate_object(request.object_id, &name, request.offset)
+            };
+            let status = match result {
+                Ok(()) => OBJECT_STATUS_OK,
+                Err(StoreError::ObjectTooLarge { .. }) => OBJECT_STATUS_TOO_LARGE,
+                Err(StoreError::ObjectTableFull { .. }) => OBJECT_STATUS_NO_SPACE,
+                Err(_) => OBJECT_STATUS_STORE_ERROR,
+            };
+            return (status, None);
+        }
         OBJECT_OP_READ => {
             return match store.read_object_by_id(request.object_id) {
                 Ok(bytes) if bytes.len() <= OBJECT_MAX_PAYLOAD_BYTES => {
@@ -732,11 +815,17 @@ impl SyscallBlockDevice {
             BlockTransportRequest::geometry(1, STORAGE_BLOCK_DEVICE_ID),
             &mut payload,
         )?;
+        // The device may move more per request than one transport payload holds; the store
+        // chunks by `max_transfer_blocks`, so cap it to what `write_blocks` can carry.
+        let payload_blocks = u32::try_from(BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES)
+            .unwrap_or(u32::MAX)
+            .checked_div(response.logical_block_size)
+            .unwrap_or(0);
         let geometry = BlockGeometry::new(
             BlockDeviceId::new(response.device_id),
             response.logical_block_size,
             response.block_count,
-            response.max_transfer_blocks,
+            response.max_transfer_blocks.min(payload_blocks),
             false,
         )
         .map_err(|_| 0u64)?;
