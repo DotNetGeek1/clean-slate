@@ -6,7 +6,7 @@
 use super::pipe::wait_key_for_parent;
 use super::table::{exit_status_word, table_mut, ProcId};
 use crate::diagnostics::qemu::fatal_kernel_error;
-use crate::sched::wait::wake_all;
+use crate::sched::wait::wake_all_registered;
 
 /// Publish exit status, retire the proc-table slot, and wake the parent wait queue.
 ///
@@ -22,7 +22,7 @@ pub(crate) fn publish_linux_exit(id: ProcId, status: u32, finalize_children: boo
         table.finalize_children_on_parent_exit(id);
     }
     table.retire_slot(id);
-    wake_all(wait_key_for_parent(parent_pid));
+    wake_all_registered(wait_key_for_parent(parent_pid));
 }
 
 /// Publish a signalled zombie (e.g. page fault) and wake a blocked parent `wait4`.
@@ -34,5 +34,5 @@ pub(crate) fn publish_linux_signalled_exit(id: ProcId, signal: u32) {
     let parent_pid = table.parent_of(id).map_or(id.pid, |p| p.pid);
     table.publish_exit(id, exit_status_word(0, Some(signal)));
     table.retire_slot(id);
-    wake_all(wait_key_for_parent(parent_pid));
+    wake_all_registered(wait_key_for_parent(parent_pid));
 }

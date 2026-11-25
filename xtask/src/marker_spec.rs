@@ -346,6 +346,10 @@ mod tests {
                 "[M10.port] FAIL fixture pid=4 failed_step=9",
             ),
             ("[M9.J] FAIL brk", "[M9.J] FAIL brk"),
+            (
+                "[SCHED] FAIL pending wake dropped key=0x5400000000000012: table full\r",
+                "[SCHED] FAIL pending wake dropped key=0x5400000000000012: table full",
+            ),
             ("x[DNS ] FAIL", "[DNS ] FAIL"),
         ] {
             assert_eq!(guest_failure(line), Some(failure), "{line:?}");

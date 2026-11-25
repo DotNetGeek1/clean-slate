@@ -257,6 +257,18 @@ pub(crate) fn has_waiter_where(pid: u64, matches: impl Fn(WaitKey) -> bool) -> b
     })
 }
 
+/// Recorded pending wakes whose key satisfies `matches`.
+#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
+pub(crate) fn pending_wake_count_where(matches: impl Fn(WaitKey) -> bool) -> usize {
+    without_interrupts(|| {
+        wait_table_mut()
+            .pending_wake_keys
+            .iter()
+            .filter(|&&key| key != 0 && matches(WaitKey(key)))
+            .count()
+    })
+}
+
 /// Active waiters whose owning pid satisfies `owned_by`.
 #[cfg(feature = "m9-userspace-self-test")]
 pub(crate) fn waiter_occupancy_where(mut owned_by: impl FnMut(u64) -> bool) -> usize {
@@ -441,7 +453,8 @@ pub(crate) fn wake_all(key: WaitKey) -> usize {
 /// Consumers of these keys check their condition and register in one interrupts-disabled
 /// section ([`block_current_thread_unless`], or one masked syscall), so a wake with no
 /// waiter has nothing to deliver; recording one would spend a slot of the bounded
-/// pending-wake table that [`wake_all`] users (the net service) depend on.
+/// pending-wake table that [`wake_all`] users (the net service) depend on. A
+/// `RestartSyscall` or `RetrySyscall` block discards a pending record anyway.
 pub(crate) fn wake_all_registered(key: WaitKey) -> usize {
     without_interrupts(|| wake_matching(key, true, false))
 }
@@ -489,13 +502,13 @@ fn wake_matching(key: WaitKey, all: bool, record_pending: bool) -> usize {
 }
 
 /// A dropped pending wake can strand a `NativeOutcome` waiter that blocks on `key` later.
-/// Stale records from producers whose consumer never blocked can fill the table, so a drop
-/// is reported rather than fatal.
+/// Only a few fixed keys record pending wakes, so a full table means some producer leaks
+/// records: lanes fail on the `FAIL` line, while a shipping kernel keeps running.
 fn log_dropped_wake(key: WaitKey) {
     let observed = DROPPED_WAKE_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
     if observed < DROPPED_WAKE_LOG_LIMIT {
         kernel_log_fmt(format_args!(
-            "[SCHED] pending wake dropped key={:#x}: table full\n",
+            "[SCHED] FAIL pending wake dropped key={:#x}: table full\n",
             key.0
         ));
     }
@@ -1069,6 +1082,63 @@ mod tests {
         let net_key = WaitKey(0x54 << 56);
         assert!(!table.record_pending_wake(net_key));
         assert!(!table.consume_pending_wake(net_key));
+    }
+
+    /// A pending record helps only a `NativeOutcome` waiter that checks in one critical section
+    /// and blocks in another; every other consumer discards it, and a record for a key that is
+    /// never blocked on again (request ids, pids, socket and pipe generations) holds its slot
+    /// forever (#287). Outside self-tests, only the fixed net-service work key may record.
+    #[test]
+    fn only_the_net_service_work_key_records_pending_wakes() {
+        use std::path::Path;
+        const ALLOWED: (&str, &str) = (
+            "service/net_request_wake.rs",
+            "wake_all(NET_SERVICE_WORK_KEY);",
+        );
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut directories = std::vec![root.clone()];
+        let mut offenders = std::vec::Vec::new();
+        let mut allowed_seen = 0;
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(&directory).expect("read kernel source directory") {
+                let path = entry.expect("kernel source entry").path();
+                let relative = path
+                    .strip_prefix(&root)
+                    .expect("source file under kernel/src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if path.is_dir() {
+                    if relative != "selftest" {
+                        directories.push(path);
+                    }
+                    continue;
+                }
+                if path.extension().is_none_or(|extension| extension != "rs")
+                    || relative == "sched/wait.rs"
+                {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read kernel source file");
+                let code = source.split("mod tests {").next().unwrap_or_default();
+                for (index, line) in code.lines().enumerate() {
+                    let line = line.split("//").next().unwrap_or_default().trim();
+                    if !line.contains("wake_all(") && !line.contains("wake_one(") {
+                        continue;
+                    }
+                    if (relative.as_str(), line) == ALLOWED {
+                        allowed_seen += 1;
+                        continue;
+                    }
+                    offenders.push(std::format!("{relative}:{}: {line}", index + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "pending-wake recording outside the net-service work key:\n{}",
+            offenders.join("\n")
+        );
+        assert_eq!(allowed_seen, 1, "net-service work wake not found");
     }
 
     #[test]

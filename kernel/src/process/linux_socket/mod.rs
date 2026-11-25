@@ -20,7 +20,7 @@ use crate::capability::network::{
 };
 use crate::process::linux_fd::open_description::{OpenDescriptionId, SocketRef};
 use crate::process::linux_fd::readiness::{Readiness, ReadinessSource};
-use crate::sched::wait::{wake_all, WaitKey};
+use crate::sched::wait::{wake_all_registered, WaitKey};
 use crate::sync::global_cell::GlobalCell;
 
 pub(crate) use broker::broker_sync;
@@ -191,7 +191,7 @@ pub(crate) fn deliver_prefetch_receive(request_id: u64) -> usize {
         .or_else(|| tcp::deliver_completed_prefetch(request_id));
     if let Some((id, owner_pid)) = delivered {
         woken = woken
-            .saturating_add(wake_all(linux_socket_wait_key(id)))
+            .saturating_add(wake_all_registered(linux_socket_wait_key(id)))
             .saturating_add(crate::syscall::linux::poll::wake_poll_waiters_for_pid(
                 owner_pid,
             ));
@@ -365,9 +365,9 @@ pub(crate) fn on_network_instance_gone() -> usize {
                 u64::from(slot.owner_generation),
                 request_id,
             );
-            wake_all(linux_socket_request_wait_key(request_id));
+            wake_all_registered(linux_socket_request_wait_key(request_id));
         }
-        wake_all(wake.socket_key);
+        wake_all_registered(wake.socket_key);
         crate::syscall::linux::poll::wake_poll_waiters_for_pid(wake.owner_pid);
     }
     if lost > 0 {
@@ -388,7 +388,7 @@ pub(crate) fn release_socket(id: LinuxSocketId) {
                 close_m7_session(slot);
             }
             slot.state = SocketState::Closed;
-            wake_all(linux_socket_wait_key(id));
+            wake_all_registered(linux_socket_wait_key(id));
             slot.generation = slot.generation.saturating_add(1);
         }
     }

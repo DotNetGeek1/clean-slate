@@ -10,7 +10,9 @@ Native mechanism for sleeping and waking scheduler threads. Linux `wait4`, pipes
 
 ## Lost-wake discipline
 
-Wait registration and the “already woken?” check run with interrupts disabled. `wake_one` / `wake_all` record a **pending wake** when no waiter is registered yet; the next `block_current_thread` on that `WaitKey` consumes it and returns `Woken` without sleeping. The pending-wake table has `MAX_WAITERS` entries and drops records once full; each drop logs `[SCHED] pending wake dropped key=…: table full` (the first 8 only). It is not fatal, because a producer whose consumer never blocks leaves stale records behind. `RestartSyscall` / `RetrySyscall` blocks consume and ignore pending wakes.
+Wait registration and the “already woken?” check run with interrupts disabled. `wake_one` / `wake_all` record a **pending wake** when no waiter is registered yet; the next `block_current_thread` on that `WaitKey` consumes it and returns `Woken` without sleeping. The pending-wake table has `MAX_WAITERS` entries and drops records once full. `RestartSyscall` / `RetrySyscall` blocks consume and ignore pending wakes, so a record helps only a `NativeOutcome` waiter.
+
+Outside self-tests, only the net service's work key (`0x55 << 56`, `NET_SUBOP_WAIT_WORK`) is woken with `wake_all`; every other producer uses `wake_all_registered` (#287), and a host test (`only_the_net_service_work_key_records_pending_wakes`) enforces this. Self-tests record only on a few fixed keys. A full table therefore means some producer leaks records, so each drop logs `[SCHED] FAIL pending wake dropped key=…: table full` (the first 8 only). Every lane fails on that line through the shared guest-failure check; a shipping kernel logs it and keeps running.
 
 ### Atomic check-then-block (M10 W1)
 
@@ -22,7 +24,9 @@ Producers for such waiters call `wake_all_registered(key)`, which wakes register
 
 The object queue (`kernel/src/capability/object.rs`) uses the same rule without `block_current_thread_unless`. Native `OBJECT_SUBOP_POLL`, the storage service's `OBJECT_SUBOP_SERVICE_NEXT` and the Linux `/tmp` read/write check the queue and call `block_current_thread_with_resume` (`RestartSyscall`) within one syscall. Interrupts stay masked from entry to registration, so the check and the registration form one critical section. Their producers (`submit`, `service_complete`, the service-exit requeue) therefore call `wake_all_registered` on the per-request keys (`0x46 << 56 | id`) and the work key (`0x47 << 56`). A pending record there would never be consumed: once the client's next poll finds the request done it does not block, and request ids are never reused, so each completion that lands before the poll would leak a slot.
 
-The network service still checks readiness in one critical section and blocks in another, relying on the pending-wake table to close the gap. It is unchanged by M10; the service port and work sets (#200) use the atomic form. Its per-request keys (`0x54 << 56 | id`) leak pending-wake slots the way the object keys did ([#287](https://github.com/DotNetGeek1/clean-slate/issues/287)).
+The same holds for every Linux wait (`block_linux_syscall`: pipes, `wait4`, `poll`, sockets, the socket broker), for the network bridge's `NET_SUBOP_POLL` and TX-space waits, and for the virtio-blk completion wait: each checks its condition and blocks within one syscall. Their producers use `wake_all_registered`. Many of these keys are never blocked on again once their object is gone (request ids, pids, socket and pipe generations), so a recorded wake would hold its slot forever ([#287](https://github.com/DotNetGeek1/clean-slate/issues/287)): before this rule the M7 capacity loop filled the table with request keys (`0x54 << 56 | id`). `test-m7-net-service` and `test-m7-network` require `[NET ] capacity loop left no request wakes pending`, which the kernel logs only when no request key holds a record after the capacity loop.
+
+`NET_SUBOP_WAIT_WORK` also checks readiness and blocks within one masked syscall, but it blocks with `NativeOutcome` and keeps `wake_all`. Its fixed key holds at most one record, which only makes the next wait return `Woken` early.
 
 ## Syscall continuation (design a)
 

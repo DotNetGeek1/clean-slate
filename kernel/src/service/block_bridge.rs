@@ -9,7 +9,7 @@
 
 use crate::device::virtio::block::{VirtioBlockDevice, BLOCK_COMPLETION_TIMEOUT_NS};
 use crate::diagnostics::log::kernel_log_fmt;
-use crate::sched::wait::{wake_all, WaitKey};
+use crate::sched::wait::{wake_all_registered, WaitKey};
 use crate::sync::global_cell::GlobalCell;
 use crate::time::{monotonic_ns, tsc_hz};
 use clean_slate_block::{BlockDeviceId, BlockGeometry, BlockIoError};
@@ -170,7 +170,7 @@ pub(crate) fn write_requests_from(pid: u64) -> u64 {
 
 /// Interrupt context: only wakes the waiter; the harvest runs in its syscall.
 fn wake_block_completion() {
-    wake_all(BLOCK_COMPLETION_KEY);
+    wake_all_registered(BLOCK_COMPLETION_KEY);
 }
 
 /// Advance `request` for `caller` by one syscall entry. `payload` is the

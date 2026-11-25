@@ -1141,6 +1141,48 @@ mod tests {
         bridge.poll(pid, pid, generation, id, &mut payload).unwrap();
     }
 
+    /// Completions that land before the client polls, and requests failed by a service
+    /// shutdown, must not fill the pending-wake table that `NativeOutcome` waiters (the net
+    /// service's `WAIT_WORK`) rely on (#287).
+    #[test]
+    fn request_completions_before_poll_leave_the_pending_wake_table_free() {
+        use crate::sched::wait::{consume_pending_wake_for_tests, pending_wake_keys_for_tests};
+        use crate::sched::wait::{WaitKey, MAX_WAITERS};
+        let is_request_key = |key: u64| key >> 56 == 0x54;
+        let mut bridge = NetBridge::new();
+        bridge.register_service_instance(10, 1, 3);
+        let mut payload = [0u8; 64];
+        for _ in 0..2 * MAX_WAITERS {
+            let id = bridge.submit(20, 20, 1, &open_wire(), &[]).unwrap();
+            let (taken, ..) = bridge.service_next().unwrap();
+            bridge
+                .service_complete(taken, NetworkResponse::Connect, &[])
+                .unwrap();
+            crate::process::linux_socket::deliver_prefetch_receive(taken);
+            bridge.poll(20, 20, 1, id, &mut payload).unwrap();
+        }
+        for _ in 0..2 * MAX_WAITERS {
+            bridge.register_service_instance(10, 1, 3);
+            let id = bridge.submit(21, 21, 1, &open_wire(), &[]).unwrap();
+            assert_eq!(bridge.shutdown_service(), 1);
+            bridge.poll(21, 21, 1, id, &mut payload).unwrap();
+        }
+        let recorded: Vec<u64> = pending_wake_keys_for_tests()
+            .into_iter()
+            .filter(|&key| is_request_key(key))
+            .collect();
+        assert!(
+            recorded.is_empty(),
+            "request keys hold pending-wake slots: {recorded:#x?}"
+        );
+
+        crate::service::net_request_wake::wake_net_service_work();
+        assert!(
+            consume_pending_wake_for_tests(WaitKey(0x55 << 56)),
+            "the net service's WAIT_WORK wake was dropped"
+        );
+    }
+
     fn drain_exits(bridge: &mut NetBridge, service_pid: u64) -> Vec<TrustedCaller> {
         let mut exits = Vec::new();
         while let Some(caller) = bridge.pop_holder_exit() {
