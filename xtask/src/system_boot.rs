@@ -40,13 +40,19 @@ pub(crate) const DESKTOP_SERVICES: [u32; 3] = [0x5300, 0x5301, 0x5302];
 /// One boot to init idle, with the network service's DHCP exchange; the build is not counted.
 const LANE_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// The kernel's record of a syscall 3 call whose handle names no console sink.
+const CONSOLE_REFUSED_PREFIX: &str = "[IPC ] console write refused pid=";
+/// The message init sends through its lifecycle handle. The handle names endpoint generation 0,
+/// which no endpoint has, so finding it on serial is a regression guard, not evidence.
+const CONSOLE_PROBE: &str = "[INIT] console probe on a non-console handle";
+
 /// In serial order, except that network and the shell start together once storage is ready, so
 /// their lines interleave as the two run; [`validate_boot`] checks each service's own order. The
 /// audit service starts with storage and runs beside all three, so only [`validate_boot`] and
 /// the settle count check it.
 /// Kernel lines (`[KERN]`, `[SVC ]`) are printed by the kernel; `[INIT]` lines reach serial
 /// only through init's console capability, as `[IPC ] console pid=N: …`.
-pub(crate) const MARKERS: [MarkerStep<'static>; 17] = [
+pub(crate) const MARKERS: [MarkerStep<'static>; 19] = [
     MarkerStep::Ordered("[KERN] serial console input on vector="),
     MarkerStep::Ordered("[KERN] boot profile=base"),
     MarkerStep::Ordered("[KERN] init launched pid="),
@@ -54,6 +60,8 @@ pub(crate) const MARKERS: [MarkerStep<'static>; 17] = [
     MarkerStep::Ordered("[INIT] boot profile=base"),
     MarkerStep::Ordered("[INIT] started pid="),
     MarkerStep::Ordered("[INIT] SERVICE_READY from init refused: not a service"),
+    MarkerStep::Ordered(CONSOLE_REFUSED_PREFIX),
+    MarkerStep::Ordered("[INIT] console write on the lifecycle handle refused: EBADF"),
     MarkerStep::Ordered("[INIT] starting service=20736"),
     MarkerStep::Ordered("[SVC ] authority service=20736 "),
     MarkerStep::Ordered("[SVC ] launch service=20736 "),
@@ -576,6 +584,7 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     if number(&started[console_prefix.len()..], "pid")? != init_pid {
         return Err(format!("init reports a different pid: {started:?}"));
     }
+    check_console_refusal(output, init_pid)?;
 
     let mut summary = None;
     for service in [
@@ -645,6 +654,21 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
         }
     }
     summary.ok_or_else(|| "storage was not checked".to_owned())
+}
+
+/// Syscall 3 on init's lifecycle handle: the kernel recorded its refusal for init's pid. Init
+/// probes before it starts any service, so its refusal is the boot's first and only one.
+fn check_console_refusal(output: &str, init_pid: u64) -> Result<(), String> {
+    if let Some(line) = output.lines().find(|line| line.contains(CONSOLE_PROBE)) {
+        return Err(format!(
+            "syscall 3 delivered a message on a non-console handle: {line:?}"
+        ));
+    }
+    let refused = only_line(output, CONSOLE_REFUSED_PREFIX)?;
+    if number(refused, "pid")? != init_pid || !refused.ends_with(": not the console sink") {
+        return Err(format!("console refusal record {refused:?}"));
+    }
+    Ok(())
 }
 
 /// The audit service's launch audit: `AUDIT_READ` on the log and its console, nothing else.
@@ -775,6 +799,8 @@ mod tests {
              [IPC ] console pid=3: [INIT] boot profile=base\n\
              [IPC ] console pid=3: [INIT] started pid=3 services=4\n\
              [IPC ] console pid=3: [INIT] SERVICE_READY from init refused: not a service\n\
+             [IPC ] console write refused pid=3 handle=0x10000: not the console sink\n\
+             [IPC ] console pid=3: [INIT] console write on the lifecycle handle refused: EBADF\n\
              [IPC ] console pid=3: [INIT] starting service=20736\n\
              [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20736 pid=4 gen=1\n\
@@ -828,6 +854,29 @@ mod tests {
         let unsettled = transcript(1, 9).replace("running=4 down=0", "running=3 down=1");
         let mut tracker = crate::MarkerTracker::from_steps(&MARKERS);
         assert!(!tracker.consume(&unsettled));
+    }
+
+    #[test]
+    fn syscall_3_on_a_non_console_handle_is_refused_by_the_kernel_for_init() {
+        let refused = "[IPC ] console write refused pid=3 handle=0x10000: not the console sink\n";
+        let delivered = transcript(1, 9).replace(
+            refused,
+            &format!("{refused}[IPC ] console pid=3: {CONSOLE_PROBE}\n"),
+        );
+        assert!(validate_boot(&delivered, Formatted::Yes)
+            .unwrap_err()
+            .contains("delivered a message on a non-console handle"));
+        let unrecorded = transcript(1, 9).replace(refused, "");
+        assert!(validate_boot(&unrecorded, Formatted::Yes).is_err());
+        let mut tracker = crate::MarkerTracker::from_steps(&MARKERS);
+        assert!(!tracker.consume(&unrecorded));
+        for (from, to) in [
+            ("refused pid=3 ", "refused pid=4 "),
+            (": not the console sink", ": unauthorized"),
+        ] {
+            let text = transcript(1, 9).replace(from, to);
+            assert!(validate_boot(&text, Formatted::Yes).is_err(), "{to}");
+        }
     }
 
     #[test]
