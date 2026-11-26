@@ -54,7 +54,8 @@ pub(crate) fn reset_tmp_store_for_host_tests() {
 }
 
 /// Objects a Linux process holds `READ | WRITE` on for its file projections: every `/tmp`
-/// backing object, and the `/home` table object, which authorises every `/home` file (#304).
+/// backing object, and the `/home` table object, which with `DIRECTORY` authorises every
+/// `/home` file (#304, #312).
 pub(crate) const LINUX_FILE_OBJECT_GRANTS: usize = LINUX_TMP_MAX_FILES + 1;
 
 pub(crate) fn grant_linux_tmp_object_capabilities(pid: u64) -> Result<(), &'static str> {
@@ -68,7 +69,7 @@ pub(crate) fn grant_linux_tmp_object_capabilities(pid: u64) -> Result<(), &'stat
     if grant_object_capability(
         holder,
         super::home_table::HOME_TABLE_OBJECT_ID,
-        Rights::READ.union(Rights::WRITE),
+        Rights::READ.union(Rights::WRITE).union(Rights::DIRECTORY),
     )
     .is_err()
     {

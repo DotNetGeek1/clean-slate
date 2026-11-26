@@ -7,6 +7,7 @@ use clean_slate_capability::{
     CapabilityError, CapabilityHandle, CapabilityState, HolderId, ResourceClass, ResourceRef,
     Rights,
 };
+use clean_slate_native_abi::directory;
 use clean_slate_native_abi::status::STATUS_ETIMEDOUT;
 use clean_slate_native_abi::SharedBufferId;
 use clean_slate_service_fixtures::{
@@ -485,8 +486,33 @@ pub(crate) fn object_queue_submit(
     )
 }
 
-/// Submits `op` on `object_id` for `holder`, authorised by the holder's rights on
-/// `authority_id` instead of on the object itself: the Linux `/home` projection's one
+/// Kernel-internal check of a holder's directory capability: `op` on the directory
+/// `directory`'s table, or with `Rights::DIRECTORY` on one of its entry objects (#312). The
+/// same rule as a native holder's `SUBMIT_AT` through a directory capability.
+#[cfg(clean_slate_linux_rootfs)]
+pub(crate) fn authorize_holder_directory_op(
+    holder: HolderId,
+    directory: u64,
+    op: u64,
+    object_id: u64,
+) -> Result<(), SyscallQueueError> {
+    let mut required = required_rights(op).ok_or(SyscallQueueError::InvalidRequest)?;
+    if object_id != directory {
+        if !directory::is_entry_of(directory, object_id) {
+            return Err(SyscallQueueError::UnauthorizedHolder);
+        }
+        required = required.union(Rights::DIRECTORY);
+    }
+    if super::holder_has_resource_rights(holder, ResourceRef::object(directory), required) {
+        Ok(())
+    } else {
+        log_deny(holder, object_id, op, CapabilityError::UnauthorizedHolder);
+        Err(SyscallQueueError::UnauthorizedHolder)
+    }
+}
+
+/// Submits `op` on `object_id` for `holder`, authorised by the holder's directory capability
+/// on `authority_id` ([`authorize_holder_directory_op`]): the Linux `/home` projection's one
 /// directory capability covers every file object in it (#304), since the per-holder
 /// capability quota cannot hold one capability per file.
 #[cfg(clean_slate_linux_rootfs)]
@@ -498,7 +524,7 @@ pub(crate) fn object_queue_submit_under(
     offset: u64,
     payload: &[u8],
 ) -> Result<u64, SyscallQueueError> {
-    authorize_holder_object_op(client, authority_id, op)?;
+    authorize_holder_directory_op(client, authority_id, op, object_id)?;
     queue_mut().submit_at(
         client,
         op,
@@ -731,15 +757,35 @@ pub(crate) fn register_pending_bootstrap_grant(
 
 /// Authorizes `op` on `object_id` and returns the object epoch the capability is bound to
 /// (its resource's `instance_generation`; 0 for an unbound capability).
+///
+/// A directory capability (`Rights::DIRECTORY` on a directory's table object, #312) also
+/// authorises the op on the directory's entry objects; an entry is not bound to the table's
+/// epoch, so the request is unbound.
 fn authorize_object_op(raw_handle: u64, object_id: u64, op: u64) -> Result<u64, CapabilityError> {
     let holder = current_holder().map_err(|_| CapabilityError::UnauthorizedHolder)?;
     let required = required_rights(op).ok_or(CapabilityError::InvalidHandle)?;
     let record = authorize_current_class(raw_handle, ResourceClass::PersistentObject, required)?;
-    if record.resource.id != object_id {
-        return Err(CapabilityError::WrongResource);
-    }
+    let epoch = object_epoch(record.resource, record.rights, object_id)?;
     log_allowed(holder, object_id, op);
-    Ok(record.resource.instance_generation)
+    Ok(epoch)
+}
+
+/// The epoch a request on `object_id` carries under a capability on `resource` with
+/// `rights` that passed the op's rights check: the capability's own epoch for its object,
+/// unbound for an entry of the directory it names with `DIRECTORY`, and `WrongResource`
+/// for anything else.
+fn object_epoch(
+    resource: ResourceRef,
+    rights: Rights,
+    object_id: u64,
+) -> Result<u64, CapabilityError> {
+    if resource.id == object_id {
+        Ok(resource.instance_generation)
+    } else if rights.contains(Rights::DIRECTORY) && directory::is_entry_of(resource.id, object_id) {
+        Ok(clean_slate_service_fixtures::OBJECT_EPOCH_UNBOUND)
+    } else {
+        Err(CapabilityError::WrongResource)
+    }
 }
 
 fn authorize_service_role(raw_handle: u64) -> Result<(), CapabilityError> {
@@ -1375,6 +1421,43 @@ mod tests {
             assert_eq!(queue.poll(client, request.request_id, &mut []), Ok(0));
         }
         assert_eq!(decoded(OBJECT_OP_READ_AT, 0, 512).payload_len(), 0);
+    }
+
+    #[test]
+    fn a_directory_capability_reaches_its_entries_only() {
+        let directory_id = 0x5100_0000;
+        let directory = ResourceRef::object(directory_id);
+        let rw = Rights::READ.union(Rights::WRITE);
+        let with_directory = rw.union(Rights::DIRECTORY);
+        // Its own table, at the capability's epoch.
+        let bound = ResourceRef {
+            instance_generation: 9,
+            ..directory
+        };
+        assert_eq!(object_epoch(bound, with_directory, directory_id), Ok(9));
+        // Every entry, unbound.
+        for slot in [0, directory::DIRECTORY_MAX_ENTRIES - 1] {
+            let entry = directory::entry_object_id(directory_id, slot);
+            assert_eq!(
+                object_epoch(bound, with_directory, entry),
+                Ok(clean_slate_service_fixtures::OBJECT_EPOCH_UNBOUND)
+            );
+            // A plain object capability on the table does not.
+            assert_eq!(
+                object_epoch(bound, rw, entry),
+                Err(CapabilityError::WrongResource)
+            );
+        }
+        // Nothing past the last entry, or before the table.
+        for outside in [
+            directory_id + directory::DIRECTORY_MAX_ENTRIES as u64 + 1,
+            directory_id - 1,
+        ] {
+            assert_eq!(
+                object_epoch(directory, with_directory, outside),
+                Err(CapabilityError::WrongResource)
+            );
+        }
     }
 
     fn buffer_id(slot: u16) -> SharedBufferId {

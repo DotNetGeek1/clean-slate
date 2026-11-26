@@ -10,6 +10,7 @@ use std::vec::Vec;
 
 use clean_slate_capability::{HolderId, Rights};
 use clean_slate_native_abi::desktop::SYSCALL_NR_IPC_SEND;
+use clean_slate_native_abi::directory::is_entry_of;
 use clean_slate_native_abi::object::{
     ObjectSubmitAt, OBJECT_OP_COMMIT, OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE_AT,
     OBJECT_SUBMIT_AT_BYTES, OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT_AT, SYSCALL_NR_CAP_OBJECT,
@@ -53,6 +54,8 @@ struct FakeObject {
 struct FakeObjects {
     /// `(handle, object id, write right)`.
     grants: Vec<(u64, u64, bool)>,
+    /// `(handle, directory id)`: read-write on the table and its entries.
+    directories: Vec<(u64, u64)>,
     objects: Vec<FakeObject>,
     /// Objects whose epoch-bound capability is stale: every request polls `ESTALE`.
     gone: Vec<u64>,
@@ -110,6 +113,13 @@ impl FakeKernel {
         self.objects.grants.push((handle, id, write));
     }
 
+    /// Gives the client `handle` with `READ | WRITE | DIRECTORY` on directory `id`: the table
+    /// and every entry object.
+    pub fn grant_directory(&mut self, handle: u64, id: u64) {
+        self.objects.grants.retain(|grant| grant.0 != handle);
+        self.objects.directories.push((handle, id));
+    }
+
     /// Object `id`'s bytes as staged, if it exists.
     pub fn object_staged(&self, id: u64) -> Option<&[u8]> {
         self.find_object(id)
@@ -154,13 +164,26 @@ impl FakeKernel {
                 let Ok(submit) = ObjectSubmitAt::decode(bytes) else {
                     return STATUS_EINVAL;
                 };
-                let Some(&(_, id, write)) =
-                    self.objects.grants.iter().find(|grant| grant.0 == args[1])
-                else {
-                    return STATUS_EACCES;
-                };
-                if id != submit.object_id || (submit.op != OBJECT_OP_READ_AT && !write) {
-                    return STATUS_EACCES;
+                let directory = self
+                    .objects
+                    .directories
+                    .iter()
+                    .find(|grant| grant.0 == args[1])
+                    .map(|&(_, directory)| directory);
+                let id = submit.object_id;
+                if let Some(directory) = directory {
+                    if id != directory && !is_entry_of(directory, id) {
+                        return STATUS_EACCES;
+                    }
+                } else {
+                    let Some(&(_, granted, write)) =
+                        self.objects.grants.iter().find(|grant| grant.0 == args[1])
+                    else {
+                        return STATUS_EACCES;
+                    };
+                    if granted != id || (submit.op != OBJECT_OP_READ_AT && !write) {
+                        return STATUS_EACCES;
+                    }
                 }
                 let staged = if submit.buffer == 0 {
                     None

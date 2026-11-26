@@ -53,6 +53,10 @@ impl Rights {
     /// the attached front end and its input comes only from there (the terminal's shell, #311).
     /// Only a manifest row grants it at the root; forks inherit it.
     pub const CONSOLE_SESSION: Self = Self(1 << 23);
+    /// On a persistent object: the object is a directory's name table, and the capability's
+    /// `READ` and `WRITE` reach the directory's entry objects too (#312,
+    /// `clean_slate_native_abi::directory`).
+    pub const DIRECTORY: Self = Self(1 << 24);
 
     const ALL_KNOWN: u32 = (1 << 0)
         | (1 << 1)
@@ -77,7 +81,8 @@ impl Rights {
         | (1 << 20)
         | (1 << 21)
         | (1 << 22)
-        | (1 << 23);
+        | (1 << 23)
+        | (1 << 24);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -121,7 +126,12 @@ impl Rights {
     pub const fn valid_for(class: ResourceClass) -> Self {
         match class {
             ResourceClass::PersistentObject => Self(
-                Self::READ.0 | Self::WRITE.0 | Self::INSPECT.0 | Self::DELEGATE.0 | Self::REVOKE.0,
+                Self::READ.0
+                    | Self::WRITE.0
+                    | Self::INSPECT.0
+                    | Self::DELEGATE.0
+                    | Self::REVOKE.0
+                    | Self::DIRECTORY.0,
             ),
             ResourceClass::ProcessControl => Self(
                 Self::OBSERVE.0
@@ -206,7 +216,7 @@ impl Rights {
 
     /// Lowercase, pipe-separated names in deterministic bit order.
     pub fn write_names(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        const NAMES: [(&str, u32); 24] = [
+        const NAMES: [(&str, u32); 25] = [
             ("read", 1 << 0),
             ("write", 1 << 1),
             ("inspect", 1 << 2),
@@ -231,6 +241,7 @@ impl Rights {
             ("console_serve", 1 << 21),
             ("console_attach", 1 << 22),
             ("console_session", 1 << 23),
+            ("directory", 1 << 24),
         ];
         let mut first = true;
         for (name, bit) in NAMES {
