@@ -12,15 +12,18 @@
 use clean_slate_capability::ResourceClass;
 use clean_slate_native_abi::port::PORT_FRAME_BYTES;
 use clean_slate_native_abi::port::{
-    PORT_OP_CLOSE, PORT_OP_CONNECT, PORT_OP_FIND_HANDLE, PORT_OP_RECV_EVENT, PORT_OP_SEND,
-    PORT_RECV_NONBLOCK, PORT_ROLE_CONNECT, PORT_SEND_WAIT,
+    PORT_OP_BIND_WAKE, PORT_OP_CLOSE, PORT_OP_CONNECT, PORT_OP_DISCONNECT, PORT_OP_FIND_HANDLE,
+    PORT_OP_POST, PORT_OP_RECV, PORT_OP_RECV_EVENT, PORT_OP_SEND, PORT_RECV_NONBLOCK,
+    PORT_ROLE_CONNECT, PORT_ROLE_SERVE, PORT_SEND_WAIT,
 };
 use clean_slate_native_abi::status::STATUS_EINVAL;
 use clean_slate_native_abi::work_set::{
     SYSCALL_NR_WORK_SET, WORK_SET_OP_CREATE, WORK_SET_OP_DESTROY, WORK_SET_OP_NOW,
     WORK_SET_OP_WAIT, WORK_SET_WAIT_NONBLOCK,
 };
-use clean_slate_native_abi::{EventKind, PortEventRecord, SYSCALL_NR_SERVICE_PORT};
+use clean_slate_native_abi::{
+    ConnectionId, EventKind, PortEventRecord, PortRecvRecord, SYSCALL_NR_SERVICE_PORT,
+};
 
 use crate::{Error, Syscalls};
 
@@ -189,6 +192,125 @@ impl Connection {
             Ok(_) | Err(Error::Gone) => Ok(()),
             Err(error) => Err(error),
         }
+    }
+}
+
+/// The serving end of a port: the caller's `SERVE` capability on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Server {
+    serve: u64,
+}
+
+impl Server {
+    /// Finds the caller's serve capability for (`class`, `resource_id`).
+    pub fn find<S: Syscalls>(
+        sys: &mut S,
+        class: ResourceClass,
+        resource_id: u64,
+    ) -> Result<Self, Error> {
+        let serve = sys.call(
+            SYSCALL_NR_SERVICE_PORT,
+            [
+                PORT_OP_FIND_HANDLE,
+                0,
+                u64::from(class as u8),
+                resource_id,
+                PORT_ROLE_SERVE,
+                0,
+            ],
+        )?;
+        Ok(Self { serve })
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.serve
+    }
+
+    /// The next queued request or client notice, or `None` when the queue is empty.
+    pub fn recv<S: Syscalls>(self, sys: &mut S) -> Result<Option<PortRecvRecord>, Error> {
+        let mut out = [0u8; PortRecvRecord::BYTES];
+        match sys.call(
+            SYSCALL_NR_SERVICE_PORT,
+            [
+                PORT_OP_RECV,
+                self.serve,
+                out.as_mut_ptr() as u64,
+                out.len() as u64,
+                PORT_RECV_NONBLOCK,
+                0,
+            ],
+        ) {
+            Ok(_) => PortRecvRecord::decode(&out)
+                .map(Some)
+                .map_err(|_| Error::Failed(STATUS_EINVAL)),
+            Err(Error::WouldBlock) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Posts `frame` to the client of `connection`. A full event queue is
+    /// [`Error::WouldBlock`]; a client that has gone is [`Error::Gone`].
+    pub fn post<S: Syscalls>(
+        self,
+        sys: &mut S,
+        connection: ConnectionId,
+        frame: &Frame,
+    ) -> Result<(), Error> {
+        sys.call(
+            SYSCALL_NR_SERVICE_PORT,
+            [
+                PORT_OP_POST,
+                self.serve,
+                connection.encode(),
+                frame.as_ptr() as u64,
+                0,
+                0,
+            ],
+        )
+        .map(|_| ())
+    }
+
+    /// Closes `connection` from the server side; the client sees `Disconnected { reason }`.
+    pub fn disconnect<S: Syscalls>(
+        self,
+        sys: &mut S,
+        connection: ConnectionId,
+        reason: u32,
+    ) -> Result<(), Error> {
+        sys.call(
+            SYSCALL_NR_SERVICE_PORT,
+            [
+                PORT_OP_DISCONNECT,
+                self.serve,
+                connection.encode(),
+                u64::from(reason),
+                0,
+                0,
+            ],
+        )
+        .map(|_| ())
+    }
+
+    /// Sets `request_bit` of `work_set` for each request and `notice_bit` for each notice.
+    pub fn bind_wake<S: Syscalls>(
+        self,
+        sys: &mut S,
+        work_set: WorkSet,
+        request_bit: u32,
+        notice_bit: u32,
+    ) -> Result<(), Error> {
+        sys.call(
+            SYSCALL_NR_SERVICE_PORT,
+            [
+                PORT_OP_BIND_WAKE,
+                self.serve,
+                work_set.raw(),
+                u64::from(request_bit),
+                u64::from(notice_bit),
+                0,
+            ],
+        )
+        .map(|_| ())
     }
 }
 
@@ -372,6 +494,42 @@ mod tests {
             set.wait(&mut sys, 0, Wait::No),
             Err(Error::Failed(STATUS_EINVAL))
         );
+    }
+
+    #[test]
+    fn a_server_passes_its_handle_and_reads_an_empty_queue_as_none() {
+        use clean_slate_native_abi::status::STATUS_EAGAIN;
+
+        let mut sys = FakeKernel::new();
+        sys.answer_next(SYSCALL_NR_SERVICE_PORT, 0x77);
+        let server = Server::find(&mut sys, ResourceClass::Console, 0x5600).expect("find");
+        assert_eq!(server.raw(), 0x77);
+        assert_eq!(
+            sys.last_call().1,
+            [PORT_OP_FIND_HANDLE, 0, 12, 0x5600, PORT_ROLE_SERVE, 0]
+        );
+        sys.answer_next(SYSCALL_NR_SERVICE_PORT, STATUS_EAGAIN);
+        assert_eq!(server.recv(&mut sys), Ok(None));
+        assert_eq!(sys.last_call().1[0], PORT_OP_RECV);
+        assert_eq!(sys.last_call().1[4], PORT_RECV_NONBLOCK);
+
+        let connection = ConnectionId::new(3, 1).unwrap();
+        sys.answer_next(SYSCALL_NR_SERVICE_PORT, 0);
+        assert_eq!(server.post(&mut sys, connection, &frame(1)), Ok(()));
+        assert_eq!(
+            sys.last_call().1[..3],
+            [PORT_OP_POST, 0x77, connection.encode()]
+        );
+        sys.answer_next(SYSCALL_NR_SERVICE_PORT, STATUS_ESTALE);
+        assert_eq!(server.disconnect(&mut sys, connection, 9), Err(Error::Gone));
+        assert_eq!(
+            sys.last_call().1,
+            [PORT_OP_DISCONNECT, 0x77, connection.encode(), 9, 0, 0]
+        );
+        let set = WorkSet { raw: 5 };
+        sys.answer_next(SYSCALL_NR_SERVICE_PORT, 0);
+        assert_eq!(server.bind_wake(&mut sys, set, 0, 1), Ok(()));
+        assert_eq!(sys.last_call().1, [PORT_OP_BIND_WAKE, 0x77, 5, 0, 1, 0]);
     }
 
     #[test]

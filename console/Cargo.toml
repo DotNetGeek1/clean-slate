@@ -1,0 +1,29 @@
+[package]
+name = "clean-slate-console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "#310 native console service: console streams framed per writer on the serial line"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "clean-slate-console-userspace"
+path = "src/bin/console.rs"
+required-features = ["userspace"]
+
+[features]
+default = []
+userspace = []
+
+[dependencies]
+clean-slate-capability = { path = "../capability" }
+clean-slate-native-abi = { path = "../native-abi" }
+clean-slate-runtime = { path = "../runtime" }
+clean-slate-service-fixtures = { path = "../service-fixtures" }
+
+[lints]
+workspace = true

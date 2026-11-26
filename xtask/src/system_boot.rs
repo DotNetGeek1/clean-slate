@@ -1,7 +1,7 @@
 //! The default image (#218 S3b): `cargo xtask run` and the `test-system-boot` lane.
 //!
 //! The default image is the kernel built with no feature: the kernel launches userspace init,
-//! which starts storage and the audit service (#219), then network and the serial-console shell
+//! which starts storage, the audit service (#219) and the console service (#310), then network and the serial-console shell
 //! (#218 S5), and waits. `run` always attaches the persistent data
 //! disk `target/system-data.img` (created when missing) and starts the network fixture peer
 //! only with `--net`. The lane boots the same image three times on a disk of its own: the first
@@ -33,8 +33,9 @@ const STORAGE_SERVICE: u32 = 0x5100;
 const NETWORK_SERVICE: u32 = 0x5200;
 const SHELL_SERVICE: u32 = 0x5400;
 pub(crate) const AUDIT_SERVICE: u32 = 0x5500;
-/// The base rows: storage, network, the shell and the audit service.
-pub(crate) const BASE_SERVICES: u64 = 4;
+pub(crate) const CONSOLE_SERVICE: u32 = 0x5600;
+/// The base rows: storage, network, the shell, the audit service and the console service.
+pub(crate) const BASE_SERVICES: u64 = 5;
 /// Compositor, desktop shell and app (#218 S6c): declared only with the desktop option.
 pub(crate) const DESKTOP_SERVICES: [u32; 3] = [0x5300, 0x5301, 0x5302];
 /// One boot to init idle, with the network service's DHCP exchange; the build is not counted.
@@ -48,8 +49,8 @@ const CONSOLE_PROBE: &str = "[INIT] console probe on a non-console handle";
 
 /// In serial order, except that network and the shell start together once storage is ready, so
 /// their lines interleave as the two run; [`validate_boot`] checks each service's own order. The
-/// audit service starts with storage and runs beside all three, so only [`validate_boot`] and
-/// the settle count check it.
+/// audit and console services start with storage and run beside all three, so only
+/// [`validate_boot`] and the settle count check them.
 /// Kernel lines (`[KERN]`, `[SVC ]`) are printed by the kernel; `[INIT]` lines reach serial
 /// only through init's console capability, as `[IPC ] console pid=N: …`.
 pub(crate) const MARKERS: [MarkerStep<'static>; 19] = [
@@ -78,7 +79,7 @@ pub(crate) const MARKERS: [MarkerStep<'static>; 19] = [
         "[SVC ] ready service=20992 ",
         "[INIT] service=20992 ready gen=1",
     ]),
-    MarkerStep::Ordered("[INIT] boot settled running=4 down=0; waiting, no deadline"),
+    MarkerStep::Ordered("[INIT] boot settled running=5 down=0; waiting, no deadline"),
     MarkerStep::Ordered("[KERN] idle thread halted 16 times in a row while init pid="),
 ];
 
@@ -381,8 +382,8 @@ pub(crate) fn run_lane() -> Result<(), XtaskError> {
 const REFUSAL_LINE: &str = "[STOR] refusing data disk: corrupt (both superblock slots invalid)";
 
 /// Storage is launched once and restarted [`STORAGE_RESTARTS`] times, refusing the disk each
-/// time; init then gives up on it and on the two services that depend on it. The audit service
-/// depends on nothing and keeps running.
+/// time; init then gives up on it and on the two services that depend on it. The audit and
+/// console services depend on nothing and keep running.
 const REFUSED_DISK_MARKERS: [MarkerStep<'static>; 7] = [
     MarkerStep::Ordered("[KERN] init launched pid="),
     MarkerStep::Ordered("[INIT] starting service=20736"),
@@ -393,7 +394,7 @@ const REFUSED_DISK_MARKERS: [MarkerStep<'static>; 7] = [
         "[INIT] not starting service=20992: service=20736 is down",
         "[INIT] not starting service=21504: service=20736 is down",
     ]),
-    MarkerStep::Ordered("[INIT] boot settled running=1 down=3; waiting, no deadline"),
+    MarkerStep::Ordered("[INIT] boot settled running=2 down=3; waiting, no deadline"),
 ];
 const STORAGE_RESTARTS: usize = 3;
 
@@ -549,7 +550,8 @@ fn only_line<'a>(output: &'a str, prefix: &str) -> Result<&'a str, String> {
 /// entitlement, a client capability for the network instance (launched before it in the same
 /// init wake, so live) and the Linux personality only, and became ready by blocking on stdin;
 /// the audit service holds `AUDIT_READ` and its console only and became ready where the kernel
-/// says its first drain stopped ([`check_audit_service`]).
+/// says its first drain stopped ([`check_audit_service`]); the console service serves its port
+/// with the serial device and became ready waiting in its work set ([`check_console_service`]).
 fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, String> {
     // `[HOOK]` lines come only from the `system-test-hooks` build; this is the default image.
     if let Some(line) = output.lines().find(|line| line.contains("[HOOK]")) {
@@ -564,7 +566,7 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     check_no_desktop_rows(output, launched)?;
     let authority = only_line(output, "[KERN] init authority pid=")?;
     let expected_authority = format!(
-        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1"
+        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1"
     );
     if authority != expected_authority {
         return Err(format!("init authority line {authority:?}"));
@@ -592,6 +594,7 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
         NETWORK_SERVICE,
         SHELL_SERVICE,
         AUDIT_SERVICE,
+        CONSOLE_SERVICE,
     ] {
         let launch = only_line(output, &format!("[SVC ] launch service={service} "))?;
         let pid = number(launch, "pid")?;
@@ -625,6 +628,9 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
         }
         if service == AUDIT_SERVICE {
             check_audit_service(output, pid, audit, ready)?;
+        }
+        if service == CONSOLE_SERVICE {
+            check_console_service(output, pid, audit, ready)?;
         }
         if service == NETWORK_SERVICE && field(ready, "raw-backend") != Some("virtio") {
             return Err(format!(
@@ -689,7 +695,7 @@ fn check_console_refusal(output: &str, init_pid: u64) -> Result<(), String> {
 /// The audit service's launch audit: `AUDIT_READ` on the log and its console, nothing else.
 pub(crate) fn expected_audit_authority(pid: u64) -> String {
     format!(
-        "[SVC ] authority service={AUDIT_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1"
+        "[SVC ] authority service={AUDIT_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1"
     )
 }
 
@@ -746,6 +752,46 @@ pub(crate) fn check_audit_service(
     }
 }
 
+/// The console service's launch audit (#310): its IPC console for its own failures, `CONSOLE_SERVE`
+/// on the port it registered and `WRITE` on the serial console device, nothing else.
+pub(crate) fn expected_console_authority(pid: u64) -> String {
+    format!(
+        "[SVC ] authority service={CONSOLE_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=1 con-device=1 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1"
+    )
+}
+
+/// The console service holds exactly its row, the kernel registered its port before the launch
+/// audit, and it reported ready serving that one port from a work set: it found its capability,
+/// bound the port's wake and reached its wait loop before it said ready.
+pub(crate) fn check_console_service(
+    output: &str,
+    pid: u64,
+    audit: &str,
+    ready: &str,
+) -> Result<(), String> {
+    if audit != expected_console_authority(pid) {
+        return Err(format!("console service authority {audit:?}"));
+    }
+    let granted_prefix = format!("[CONS] authority granted pid={pid} port={CONSOLE_SERVICE}:");
+    let granted = only_line(output, &granted_prefix)?;
+    if !granted.ends_with(" rights=serve registered=1 device=write") {
+        return Err(format!("console service port grant {granted:?}"));
+    }
+    if !ready.contains(" kernel-observed ports=1 port-connections=")
+        || field(ready, "work-sets") != Some("1")
+    {
+        return Err(format!(
+            "console service ready without serving its port from a work set: {ready:?}"
+        ));
+    }
+    match (output.find(granted), output.find(audit)) {
+        (Some(granted_at), Some(audit_at)) if granted_at < audit_at => Ok(()),
+        _ => Err(format!(
+            "console service port granted after its launch audit: {granted:?}"
+        )),
+    }
+}
+
 /// With the desktop option off the kernel declares the base rows and nothing of the desktop's:
 /// no desktop row is declared or launched and no graphics, display or input authority is
 /// granted.
@@ -779,7 +825,7 @@ fn check_shell(
     ready: &str,
 ) -> Result<(), String> {
     let expected_audit = format!(
-        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
+        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
     );
     if audit != expected_audit {
         return Err(format!("shell authority {audit:?}"));
@@ -807,17 +853,18 @@ mod tests {
              [SVC ] declared service=20992\n\
              [SVC ] declared service=21504\n\
              [SVC ] declared service=21760\n\
+             [SVC ] declared service=22016\n\
              [KERN] serial console input on vector=49\n\
              [KERN] boot profile=base\n\
-             [KERN] init launched pid=3 slot=0 declared-services=4\n\
-             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1\n\
+             [KERN] init launched pid=3 slot=0 declared-services=5\n\
+             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1\n\
              [IPC ] console pid=3: [INIT] boot profile=base\n\
-             [IPC ] console pid=3: [INIT] started pid=3 services=4\n\
+             [IPC ] console pid=3: [INIT] started pid=3 services=5\n\
              [IPC ] console pid=3: [INIT] SERVICE_READY from init refused: not a service\n\
              [IPC ] console write refused pid=3 handle=0x200000000010000: not the console sink\n\
              [IPC ] console pid=3: [INIT] console write on the lifecycle handle refused: EBADF\n\
              [IPC ] console pid=3: [INIT] starting service=20736\n\
-             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
+             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20736 pid=4 gen=1\n\
              [IPC ] console pid=3: [INIT] starting service=21760\n\
              {audit_authority}\n\
@@ -826,23 +873,30 @@ mod tests {
              [IPC ] console pid=7: [ADT ] drained through=60 records=20 lost=40\n\
              [SVC ] ready service=21760 pid=7 gen=1 source=live-instance kernel-observed audit-read-through=60 audit-next=61 audit-dropped=40 service-reported first-drain-records=20\n\
              [IPC ] console pid=3: [INIT] service=21760 ready gen=1\n\
+             [IPC ] console pid=3: [INIT] starting service=22016\n\
+             [CONS] authority granted pid=8 port=22016:8 rights=serve registered=1 device=write\n\
+             {console_authority}\n\
+             [SVC ] launch service=22016 pid=8 gen=1\n\
+             [SVC ] ready service=22016 pid=8 gen=1 source=live-instance kernel-observed ports=1 port-connections=0 work-sets=1 service-reported detail=0x0\n\
+             [IPC ] console pid=3: [INIT] service=22016 ready gen=1\n\
              [SVC ] ready service=20736 pid=4 gen=1 source=live-instance kernel-observed block-write-requests={writes} service-reported formatted={formatted} store-generation=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=20992\n\
-             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
+             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20992 pid=5 gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=21504\n\
              [SVC ] shell process pid=6 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
-             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
+             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
              [SVC ] launch service=21504 pid=6 gen=1\n\
              [SVC ] ready service=20992 pid=5 gen=1 source=live-instance kernel-observed raw-backend=virtio service-reported link-up=1\n\
              [IPC ] console pid=3: [INIT] service=20992 ready gen=1\n\
              \n\n# BusyBox v1.37.0 (2026-09-23 09:18:28 UTC) built-in shell (ash)\n\n\
              [SVC ] ready service=21504 pid=6 gen=1 source=live-instance kernel-observed first-console-input-wait\n\
              [IPC ] console pid=3: [INIT] service=21504 ready gen=1\n\
-             [IPC ] console pid=3: [INIT] boot settled running=4 down=0; waiting, no deadline\n\
+             [IPC ] console pid=3: [INIT] boot settled running=5 down=0; waiting, no deadline\n\
              [KERN] idle thread halted 16 times in a row while init pid=3 waited in LIFECYCLE_WAIT with no deadline\n",
             audit_authority = expected_audit_authority(7),
+            console_authority = expected_console_authority(8),
         )
     }
 
@@ -866,7 +920,7 @@ mod tests {
             "{}",
             tracker.pending_label()
         );
-        let unsettled = transcript(1, 9).replace("running=4 down=0", "running=3 down=1");
+        let unsettled = transcript(1, 9).replace("running=5 down=0", "running=4 down=1");
         let mut tracker = crate::MarkerTracker::from_steps(&MARKERS);
         assert!(!tracker.consume(&unsettled));
     }
@@ -974,12 +1028,49 @@ mod tests {
     }
 
     #[test]
+    fn the_console_service_holds_its_row_and_is_ready_serving_its_port() {
+        for (from, to) in [
+            ("con-serve=1 con-device=1", "con-serve=1 con-device=0"),
+            ("con-serve=1 con-device=1", "con-serve=0 con-device=1"),
+            (
+                "pid=8 lifecycle-control=0 console=1 block-device=0",
+                "pid=8 lifecycle-control=0 console=1 block-device=1",
+            ),
+            (
+                "rights=serve registered=1 device=write",
+                "rights=serve registered=0 device=write",
+            ),
+            ("pid=8 port=22016:8", "pid=7 port=22016:8"),
+            (
+                "kernel-observed ports=1 port-connections=0 work-sets=1",
+                "kernel-observed ports=1 port-connections=0 work-sets=0",
+            ),
+            (
+                "kernel-observed ports=1 port-connections=0 work-sets=1",
+                "kernel-observed ports=0 port-connections=0 work-sets=1",
+            ),
+        ] {
+            let text = transcript(1, 9).replace(from, to);
+            assert!(validate_boot(&text, Formatted::Yes).is_err(), "{to}");
+        }
+        let granted =
+            "[CONS] authority granted pid=8 port=22016:8 rights=serve registered=1 device=write\n";
+        let late = transcript(1, 9).replace(granted, "").replace(
+            "[SVC ] launch service=22016 pid=8 gen=1\n",
+            &format!("{granted}[SVC ] launch service=22016 pid=8 gen=1\n"),
+        );
+        assert!(validate_boot(&late, Formatted::Yes)
+            .unwrap_err()
+            .contains("after its launch audit"));
+    }
+
+    #[test]
     fn desktop_rows_in_the_off_mode_boot_fail_by_name() {
         let declared = transcript(1, 9).replace(
             "[SVC ] declared service=21504\n",
             "[SVC ] declared service=21504\n[SVC ] declared service=21248\n",
         );
-        let counted = transcript(1, 9).replace("declared-services=4", "declared-services=7");
+        let counted = transcript(1, 9).replace("declared-services=5", "declared-services=8");
         let granted = transcript(1, 9).replace(
             "[SVC ] launch service=21504 pid=6 gen=1\n",
             "[SVC ] launch service=21504 pid=6 gen=1\n[SEAT] authority granted pid=7 seat=0 rights=consume,inspect\n",

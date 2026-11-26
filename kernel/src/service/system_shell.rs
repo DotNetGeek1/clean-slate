@@ -72,7 +72,9 @@ impl LinuxGrants {
                 | Grant::DisplayPresenter
                 | Grant::InputSeat
                 | Grant::GraphicsShellRole
-                | Grant::GraphicsAppRole => {
+                | Grant::GraphicsAppRole
+                | Grant::ConsoleService
+                | Grant::ConsoleClient => {
                     return Err("system shell: native grant on a Linux row");
                 }
             }

@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod clock;
+pub mod console;
 pub mod desktop;
 pub mod lifecycle;
 pub mod memory;

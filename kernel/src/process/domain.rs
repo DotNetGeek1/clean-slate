@@ -1184,6 +1184,11 @@ mod tests {
             "grants_land_on_one_holder_and_teardown_revokes_them",
             "revoke_for_holder",
         ),
+        (
+            "capability/console.rs",
+            "the_service_grants_end_with_the_holder",
+            "revoke_for_holder",
+        ),
         // Address spaces built before any process record exists.
         (
             "mm/fork_clone.rs",

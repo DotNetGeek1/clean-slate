@@ -783,10 +783,14 @@ impl ServiceLifecycleController {
     {
         #[cfg(clean_slate_desktop)]
         let live_graphics_port = self.live_graphics_port();
+        #[cfg(clean_slate_desktop)]
+        let live_console_port = self.live_console_port();
         let mut authority = KernelInstanceGrants {
             service_id,
             #[cfg(clean_slate_desktop)]
             live_graphics_port,
+            #[cfg(clean_slate_desktop)]
+            live_console_port,
         };
         if let Err(failure) =
             apply_instance_grants(grants, pid, instance_generation, &mut authority)
@@ -804,6 +808,20 @@ impl ServiceLifecycleController {
     #[cfg(clean_slate_desktop)]
     fn live_graphics_port(&self) -> Option<LiveGraphicsPort> {
         let row = graphics_port_row(self.manifest)?;
+        let pid = self.live_pid(row.id)?;
+        let generation = crate::process::live_instance_generation(pid)?;
+        let port = crate::service::port::counts_for(clean_slate_capability::HolderId(pid));
+        (port.ports_served > 0).then_some(LiveGraphicsPort {
+            service: row.id,
+            generation,
+        })
+    }
+
+    /// The console port of the live instance of the active manifest's `Grant::ConsoleService`
+    /// row, when that instance has registered one: what the console client grants name.
+    #[cfg(clean_slate_desktop)]
+    fn live_console_port(&self) -> Option<LiveGraphicsPort> {
+        let row = clean_slate_service_fixtures::manifest::console_service_row(self.manifest)?;
         let pid = self.live_pid(row.id)?;
         let generation = crate::process::live_instance_generation(pid)?;
         let port = crate::service::port::counts_for(clean_slate_capability::HolderId(pid));
@@ -1140,6 +1158,9 @@ struct KernelInstanceGrants {
     service_id: ServiceId,
     #[cfg(clean_slate_desktop)]
     live_graphics_port: Option<LiveGraphicsPort>,
+    /// The console port of the live `Grant::ConsoleService` instance, as for graphics.
+    #[cfg(clean_slate_desktop)]
+    live_console_port: Option<LiveGraphicsPort>,
 }
 
 impl KernelInstanceGrants {
@@ -1283,6 +1304,72 @@ impl InstanceGrantAuthority for KernelInstanceGrants {
         Ok(())
     }
 
+    /// `console_port(service id, process instance generation)`, as the graphics port.
+    #[cfg(clean_slate_desktop)]
+    fn grant_console_service(&mut self, pid: u64) -> Result<(), &'static str> {
+        use crate::capability::console::{
+            grant_console_port, grant_serial_console_device, CONSOLE_PORT_PARAMS,
+            CONSOLE_SERVICE_PORT_RIGHTS,
+        };
+        use clean_slate_capability::{HolderId, ResourceRef};
+
+        let Some(generation) = crate::process::live_instance_generation(pid) else {
+            return Err(self.grant_failed(pid, "console port", "instance has no generation"));
+        };
+        let resource =
+            ResourceRef::console_port(u64::from(self.service_id.0), u64::from(generation.0));
+        if crate::service::port::register_port(
+            resource,
+            HolderId(pid),
+            generation,
+            CONSOLE_PORT_PARAMS,
+        )
+        .is_err()
+        {
+            return Err(self.grant_failed(pid, "console port", "port registration refused"));
+        }
+        // From here a failure leaves the port registered; the caller's rollback teardown
+        // unregisters it with the process.
+        grant_console_port(HolderId(pid), resource, CONSOLE_SERVICE_PORT_RIGHTS)
+            .map_err(|_| self.grant_failed(pid, "console port", "serve capability refused"))?;
+        grant_serial_console_device(HolderId(pid))
+            .map_err(|_| self.grant_failed(pid, "console device", "capability refused"))?;
+        kernel_log_fmt(format_args!(
+            "[CONS] authority granted pid={pid} port={}:{} rights=serve registered=1 device=write\n",
+            self.service_id.0, generation.0
+        ));
+        Ok(())
+    }
+
+    #[cfg(clean_slate_desktop)]
+    fn grant_console_client(&mut self, pid: u64) -> Result<(), &'static str> {
+        use crate::capability::console::{grant_console_port, CONSOLE_CLIENT_RIGHTS};
+        use clean_slate_capability::{HolderId, ResourceRef};
+
+        let Some(port) = self.live_console_port else {
+            return Err(self.grant_failed(pid, "console client", "no live console port"));
+        };
+        let resource =
+            ResourceRef::console_port(u64::from(port.service.0), u64::from(port.generation.0));
+        grant_console_port(HolderId(pid), resource, CONSOLE_CLIENT_RIGHTS)
+            .map_err(|_| self.grant_failed(pid, "console client", "capability refused"))?;
+        kernel_log_fmt(format_args!(
+            "[CONS] authority granted pid={pid} port={}:{} rights=connect\n",
+            port.service.0, port.generation.0
+        ));
+        Ok(())
+    }
+
+    #[cfg(not(clean_slate_desktop))]
+    fn grant_console_service(&mut self, pid: u64) -> Result<(), &'static str> {
+        Err(self.grant_failed(pid, "console port", DESKTOP_NOT_COMPILED))
+    }
+
+    #[cfg(not(clean_slate_desktop))]
+    fn grant_console_client(&mut self, pid: u64) -> Result<(), &'static str> {
+        Err(self.grant_failed(pid, "console client", DESKTOP_NOT_COMPILED))
+    }
+
     #[cfg(not(clean_slate_desktop))]
     fn grant_graphics_port(&mut self, pid: u64) -> Result<(), &'static str> {
         Err(self.grant_failed(pid, "graphics port", DESKTOP_NOT_COMPILED))
@@ -1321,6 +1408,7 @@ const fn rollback_failure_message(grant: Grant) -> &'static str {
         | Grant::InputSeat
         | Grant::GraphicsShellRole
         | Grant::GraphicsAppRole => "desktop grant rollback teardown failed",
+        Grant::ConsoleService | Grant::ConsoleClient => "console grant rollback teardown failed",
     }
 }
 

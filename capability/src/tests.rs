@@ -64,7 +64,7 @@ fn rights_subset_and_names() {
     assert!(Rights::READ.is_subset_of(full));
     assert_eq!(full.attenuate(Rights::READ), Rights::READ);
     assert!(!Rights::WRITE.is_subset_of(Rights::READ));
-    assert_eq!(Rights::from_bits(1 << 20), None);
+    assert_eq!(Rights::from_bits(1 << 22), None);
     let mut buf = alloc::string::String::new();
     full.write_names(&mut buf).unwrap();
     assert_eq!(buf, "read|write|delegate");
@@ -336,7 +336,7 @@ fn network_rights_mask_and_authorization() {
     let handle = CapabilityHandle::new(0, 1);
     let valid = Rights::valid_for(ResourceClass::Network);
     assert!(valid.contains(Rights::NET_SEND));
-    assert_eq!(Rights::from_bits(valid.bits() | (1 << 20)), None);
+    assert_eq!(Rights::from_bits(valid.bits() | (1 << 22)), None);
     assert!(!Rights::NET_SEND.is_subset_of(Rights::valid_for(ResourceClass::BlockDevice)));
 
     let parent = live_record(holder, resource, valid, 1);
@@ -410,11 +410,11 @@ fn shared_buffer_id_raw(slot: u16, generation: u32) -> u64 {
 
 #[test]
 fn resource_class_from_u8_includes_m10_classes() {
-    for raw in 1u8..=11 {
+    for raw in 1u8..=12 {
         assert_eq!(ResourceClass::from_u8(raw).map(|c| c.as_u8()), Some(raw));
     }
     assert_eq!(ResourceClass::from_u8(0), None);
-    assert_eq!(ResourceClass::from_u8(12), None);
+    assert_eq!(ResourceClass::from_u8(13), None);
 }
 
 #[test]
@@ -447,6 +447,32 @@ fn m10_valid_for_masks_exact() {
         Rights::root_only_for(ResourceClass::PersistentObject),
         Rights::empty()
     );
+}
+
+#[test]
+fn console_rights_keep_serving_and_the_device_at_the_root() {
+    let valid = Rights::valid_for(ResourceClass::Console);
+    assert_eq!(
+        valid,
+        Rights::CONSOLE_CONNECT
+            .union(Rights::CONSOLE_SERVE)
+            .union(Rights::READ)
+            .union(Rights::WRITE)
+            .union(Rights::DELEGATE)
+            .union(Rights::REVOKE)
+    );
+    let root_only = Rights::root_only_for(ResourceClass::Console);
+    assert!(!root_only.contains(Rights::DELEGATE));
+    assert!(!root_only.contains(Rights::CONSOLE_CONNECT));
+    assert!(root_only.contains(Rights::CONSOLE_SERVE));
+    assert!(root_only.contains(Rights::WRITE));
+    assert_eq!(ResourceClass::Console.name(), "console");
+    let mut names = alloc::string::String::new();
+    Rights::CONSOLE_CONNECT
+        .union(Rights::CONSOLE_SERVE)
+        .write_names(&mut names)
+        .unwrap();
+    assert_eq!(names, "console_connect|console_serve");
 }
 
 #[test]

@@ -9,6 +9,7 @@
 pub mod audit_service;
 mod block_transport;
 mod config;
+pub mod console_service;
 mod crash_service;
 mod diagnostics;
 /// #218 S3b userspace init bootstrap page.
@@ -90,6 +91,7 @@ pub use unrelated_workload::{UnrelatedWorkloadFixture, UNRELATED_WORKLOAD_SERVIC
 
 pub use audit_service::AUDIT_SERVICE_ID;
 pub use clean_slate_service_lifecycle::ServiceId;
+pub use console_service::CONSOLE_SERVICE_ID;
 
 /// Stable logical identity for the supervised crash-service fixture.
 pub const CRASH_SERVICE_ID: ServiceId = ServiceId(0x0000_4100);

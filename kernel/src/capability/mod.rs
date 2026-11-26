@@ -8,6 +8,8 @@ pub(crate) mod audit;
 #[cfg(test)]
 mod audit_coverage;
 pub(crate) mod bootstrap_grant;
+#[cfg(any(test, clean_slate_system_init))]
+pub(crate) mod console;
 pub(crate) mod delegation;
 pub(crate) mod display;
 #[cfg(any(test, clean_slate_desktop))]

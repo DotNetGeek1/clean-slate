@@ -82,6 +82,17 @@ fn log_ready(instance: ServiceInstanceId, block_write_requests: u64, detail: u64
         kernel_log_fmt(format_args!(
             "[SVC ] ready service={service} pid={pid} gen={generation} source=live-instance kernel-observed audit-read-through={read_through} audit-next={next} audit-dropped={dropped} service-reported first-drain-records={detail}\n"
         ));
+    } else if instance.service == clean_slate_service_fixtures::CONSOLE_SERVICE_ID {
+        // The console service reports ready once its port wakes its work set, before it has
+        // served anything.
+        let holder = clean_slate_capability::HolderId(pid);
+        let ports = crate::service::port::counts_for(holder);
+        kernel_log_fmt(format_args!(
+            "[SVC ] ready service={service} pid={pid} gen={generation} source=live-instance kernel-observed ports={} port-connections={} work-sets={} service-reported detail={detail:#x}\n",
+            ports.ports_served,
+            ports.port_connections,
+            crate::sched::work_set::count_for(holder),
+        ));
     } else {
         #[cfg(clean_slate_system_init)]
         if let Some(bindings) = desktop_bindings(instance) {

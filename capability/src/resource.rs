@@ -15,6 +15,8 @@ pub enum ResourceClass {
     Graphics = 9,
     Display = 10,
     Input = 11,
+    /// Console streams (#310): the console service's port and the serial console device.
+    Console = 12,
 }
 
 impl ResourceClass {
@@ -35,6 +37,7 @@ impl ResourceClass {
             9 => Some(Self::Graphics),
             10 => Some(Self::Display),
             11 => Some(Self::Input),
+            12 => Some(Self::Console),
             _ => None,
         }
     }
@@ -52,9 +55,14 @@ impl ResourceClass {
             Self::Graphics => "graphics",
             Self::Display => "display",
             Self::Input => "input",
+            Self::Console => "console",
         }
     }
 }
+
+/// `ResourceClass::Console` id of the serial console device. Service ids are never 0, so it
+/// cannot name a console port.
+pub const SERIAL_CONSOLE_DEVICE_ID: u64 = 0;
 
 /// Stable resource key bound by a capability (independent of handle slot/generation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -147,6 +155,25 @@ impl ResourceRef {
         Self {
             class: ResourceClass::Input,
             id: seat,
+            instance_generation: 0,
+        }
+    }
+
+    /// Console service port (#310): `id` is the service id; `instance_generation` is the live
+    /// console service instance (stale after a restart, as [`Self::graphics`]).
+    pub const fn console_port(service_id: u64, instance_generation: u64) -> Self {
+        Self {
+            class: ResourceClass::Console,
+            id: service_id,
+            instance_generation,
+        }
+    }
+
+    /// The serial console device (#310), written by the console service only.
+    pub const fn serial_console_device() -> Self {
+        Self {
+            class: ResourceClass::Console,
+            id: SERIAL_CONSOLE_DEVICE_ID,
             instance_generation: 0,
         }
     }

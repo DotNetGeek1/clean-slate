@@ -7,8 +7,8 @@
 
 use crate::init_bootstrap::{DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_VIRTIO_GPU};
 use crate::{
-    AUDIT_SERVICE_ID, COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, NETWORK_SERVICE_ID,
-    NETWORK_SERVICE_MODE_ACCEPTANCE, PLAYGROUND_SERVICE_ID, STORAGE_SERVICE_ID,
+    AUDIT_SERVICE_ID, COMPOSITOR_SERVICE_ID, CONSOLE_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID,
+    NETWORK_SERVICE_ID, NETWORK_SERVICE_MODE_ACCEPTANCE, PLAYGROUND_SERVICE_ID, STORAGE_SERVICE_ID,
     STORAGE_SERVICE_MODE_OBJECT_SERVICE, SYSTEM_SHELL_SERVICE_ID,
 };
 use clean_slate_capability::{
@@ -46,6 +46,8 @@ pub enum ServiceImage {
     Playground,
     /// `clean-slate-audit-userspace`, the capability audit log's reader (#219).
     Audit,
+    /// `clean-slate-console-userspace`, the console service (#310).
+    Console,
 }
 
 impl ServiceImage {
@@ -62,7 +64,8 @@ impl ServiceImage {
             | Self::Compositor
             | Self::DesktopShell
             | Self::Playground
-            | Self::Audit => false,
+            | Self::Audit
+            | Self::Console => false,
         }
     }
 
@@ -131,6 +134,15 @@ pub enum Grant {
     /// Root `AUDIT_READ` on the capability audit log. Its handle is written into the audit
     /// bootstrap page, so only a [`ServiceImage::Audit`] row may hold it.
     AuditReader,
+    /// Registers the row's console port, `console_port(row id, instance generation)`, for the
+    /// instance being started, with a root `CONSOLE_SERVE` capability on it, and grants root
+    /// `WRITE` on the serial console device (#310). Teardown unregisters the port (clients see
+    /// `ServerGone`) and revokes both. Console rows only; at most one row of a manifest.
+    ConsoleService,
+    /// Root `CONSOLE_CONNECT` on the port of the live `ConsoleService` row's instance: one
+    /// console stream per connection. With no live instance the grant fails, and so does the
+    /// start. Desktop images only, which must depend on the `ConsoleService` row.
+    ConsoleClient,
 }
 
 /// What init does when a started service exits or faults. Init counts ticks in monotonic
@@ -266,11 +278,26 @@ pub const AUDIT_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: 0,
 };
 
+/// The console service (#310): it owns native console streams and writes them, framed per
+/// writer, to the serial line. It depends on nothing and starts at boot. Ready is its port
+/// bound to its work set, before it serves anything.
+pub const CONSOLE_SERVICE_SPEC: ServiceSpec = ServiceSpec {
+    id: CONSOLE_SERVICE_ID,
+    image: ServiceImage::Console,
+    mode: 0,
+    grants: &[Grant::ConsoleService, Grant::Console],
+    restart: SYSTEM_RESTART,
+    depends_on: &[],
+    slot_allowance: None,
+    memory_pages: 0,
+};
+
 pub const SYSTEM_MANIFEST: &[ServiceSpec] = &[
     STORAGE_SERVICE_SPEC,
     NETWORK_SERVICE_SPEC,
     SYSTEM_SHELL_SPEC,
     AUDIT_SERVICE_SPEC,
+    CONSOLE_SERVICE_SPEC,
 ];
 
 const _: () = assert!(validate_manifest(SYSTEM_MANIFEST).is_ok());
@@ -325,24 +352,30 @@ pub const DESKTOP_SHELL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
 };
 
 /// The playground app. It depends on the shell so the panel is mapped before the app's first
-/// window takes focus. Ready is that window mapped.
+/// window takes focus, and on the console service for its console stream. Ready is that window
+/// mapped.
 pub const PLAYGROUND_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     id: PLAYGROUND_SERVICE_ID,
     image: ServiceImage::Playground,
     mode: 0,
-    grants: &[Grant::Console, Grant::GraphicsAppRole],
+    grants: &[Grant::Console, Grant::GraphicsAppRole, Grant::ConsoleClient],
     restart: DESKTOP_RESTART,
-    depends_on: &[COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID],
+    depends_on: &[
+        COMPOSITOR_SERVICE_ID,
+        DESKTOP_SHELL_SERVICE_ID,
+        CONSOLE_SERVICE_ID,
+    ],
     slot_allowance: None,
     memory_pages: 0,
 };
 
-/// The desktop profile: the four system rows followed by the three desktop rows.
+/// The desktop profile: the five system rows followed by the three desktop rows.
 pub const SYSTEM_DESKTOP_MANIFEST: &[ServiceSpec] = &[
     STORAGE_SERVICE_SPEC,
     NETWORK_SERVICE_SPEC,
     SYSTEM_SHELL_SPEC,
     AUDIT_SERVICE_SPEC,
+    CONSOLE_SERVICE_SPEC,
     COMPOSITOR_SERVICE_SPEC,
     DESKTOP_SHELL_SERVICE_SPEC,
     PLAYGROUND_SERVICE_SPEC,
@@ -408,13 +441,19 @@ pub enum ManifestError {
     ConsoleInputWithoutConsole {
         row: usize,
     },
-    /// A second row holds `Grant::GraphicsPort`, `Grant::InputSeat` or `Grant::AuditReader`.
+    /// A second row holds `Grant::GraphicsPort`, `Grant::InputSeat`, `Grant::AuditReader` or
+    /// `Grant::ConsoleService`.
     DuplicateExclusiveGrant {
         row: usize,
     },
     /// A graphics role holder does not list the `Grant::GraphicsPort` row in `depends_on`
     /// (or no earlier row holds `GraphicsPort`).
     GraphicsRoleWithoutPortDependency {
+        row: usize,
+    },
+    /// A `Grant::ConsoleClient` holder does not list the `Grant::ConsoleService` row in
+    /// `depends_on` (or no earlier row holds `ConsoleService`).
+    ConsoleClientWithoutServiceDependency {
         row: usize,
     },
     /// `memory_pages` is above `NATIVE_MEMORY_MAX_BUDGET_PAGES`, or set on a Linux row.
@@ -485,7 +524,7 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
             }
             if matches!(
                 spec.grants[grant],
-                Grant::GraphicsPort | Grant::InputSeat | Grant::AuditReader
+                Grant::GraphicsPort | Grant::InputSeat | Grant::AuditReader | Grant::ConsoleService
             ) && earlier_row_grants(manifest, row, spec.grants[grant])
             {
                 return Err(ManifestError::DuplicateExclusiveGrant { row });
@@ -496,6 +535,11 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
             ) && !depends_on_graphics_port(manifest, row)
             {
                 return Err(ManifestError::GraphicsRoleWithoutPortDependency { row });
+            }
+            if matches!(spec.grants[grant], Grant::ConsoleClient)
+                && !depends_on_row_granting(manifest, row, Grant::ConsoleService)
+            {
+                return Err(ManifestError::ConsoleClientWithoutServiceDependency { row });
             }
             grant += 1;
         }
@@ -527,17 +571,25 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
 
 /// Linux-personality grants go only to Linux rows, and Linux rows hold nothing else: the native
 /// grants are applied through the native bootstrap page or service registration. `Console` is
-/// shared with the desktop and audit images; each graphics, display, input and audit grant has
-/// one image.
+/// shared with the desktop, audit and console images, and `ConsoleClient` with the desktop
+/// images; each graphics, display, input, audit and console-service grant has one image.
 const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
     match grant {
         Grant::ObjectServiceRole => matches!(image, ServiceImage::Storage),
         Grant::BlockDevice | Grant::NetworkService => {
-            !matches!(image, ServiceImage::LinuxShell | ServiceImage::Audit) && !image.is_desktop()
+            !matches!(
+                image,
+                ServiceImage::LinuxShell | ServiceImage::Audit | ServiceImage::Console
+            ) && !image.is_desktop()
         }
         Grant::Console => {
-            matches!(image, ServiceImage::LinuxShell | ServiceImage::Audit) || image.is_desktop()
+            matches!(
+                image,
+                ServiceImage::LinuxShell | ServiceImage::Audit | ServiceImage::Console
+            ) || image.is_desktop()
         }
+        Grant::ConsoleService => matches!(image, ServiceImage::Console),
+        Grant::ConsoleClient => image.is_desktop(),
         Grant::AuditReader => matches!(image, ServiceImage::Audit),
         Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
             matches!(image, ServiceImage::LinuxShell)
@@ -563,13 +615,18 @@ const fn earlier_row_grants(manifest: &[ServiceSpec], row: usize, wanted: Grant)
 
 /// Whether row `row` lists, in `depends_on`, an earlier row holding `Grant::GraphicsPort`.
 const fn depends_on_graphics_port(manifest: &[ServiceSpec], row: usize) -> bool {
+    depends_on_row_granting(manifest, row, Grant::GraphicsPort)
+}
+
+/// Whether row `row` lists, in `depends_on`, an earlier row holding `wanted`.
+const fn depends_on_row_granting(manifest: &[ServiceSpec], row: usize, wanted: Grant) -> bool {
     let depends_on = manifest[row].depends_on;
     let mut dependency = 0;
     while dependency < depends_on.len() {
         let mut earlier = 0;
         while earlier < row {
             if manifest[earlier].id.0 == depends_on[dependency].0
-                && manifest[earlier].grants(Grant::GraphicsPort)
+                && manifest[earlier].grants(wanted)
             {
                 return true;
             }
@@ -578,6 +635,18 @@ const fn depends_on_graphics_port(manifest: &[ServiceSpec], row: usize) -> bool 
         dependency += 1;
     }
     false
+}
+
+/// The row holding `Grant::ConsoleService`, whose live instance the console client grants name.
+pub const fn console_service_row(manifest: &[ServiceSpec]) -> Option<&ServiceSpec> {
+    let mut index = 0;
+    while index < manifest.len() {
+        if manifest[index].grants(Grant::ConsoleService) {
+            return Some(&manifest[index]);
+        }
+        index += 1;
+    }
+    None
 }
 
 /// The row holding `Grant::GraphicsPort`, whose live instance the graphics role grants name.
@@ -685,9 +754,9 @@ mod tests {
     }
 
     #[test]
-    fn system_manifest_declares_storage_network_shell_then_audit() {
+    fn system_manifest_declares_storage_network_shell_audit_then_console() {
         let ids: Vec<u32> = SYSTEM_MANIFEST.iter().map(|spec| spec.id.0).collect();
-        assert_eq!(ids, [0x5100, 0x5200, 0x5400, 0x5500]);
+        assert_eq!(ids, [0x5100, 0x5200, 0x5400, 0x5500, 0x5600]);
         assert_eq!(validate_manifest(SYSTEM_MANIFEST), Ok(()));
     }
 
@@ -991,9 +1060,9 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            [0x5100, 0x5200, 0x5400, 0x5500, 0x5300, 0x5301, 0x5302]
+            [0x5100, 0x5200, 0x5400, 0x5500, 0x5600, 0x5300, 0x5301, 0x5302]
         );
-        assert_eq!(SYSTEM_DESKTOP_MANIFEST[..4], *SYSTEM_MANIFEST);
+        assert_eq!(SYSTEM_DESKTOP_MANIFEST[..5], *SYSTEM_MANIFEST);
         assert_eq!(validate_manifest(SYSTEM_DESKTOP_MANIFEST), Ok(()));
     }
 
@@ -1015,10 +1084,17 @@ mod tests {
         assert_eq!(shell.grants, [Grant::Console, Grant::GraphicsShellRole]);
         assert_eq!(shell.depends_on, [COMPOSITOR_SERVICE_ID]);
         let app = find_service(SYSTEM_DESKTOP_MANIFEST, PLAYGROUND_SERVICE_ID).unwrap();
-        assert_eq!(app.grants, [Grant::Console, Grant::GraphicsAppRole]);
+        assert_eq!(
+            app.grants,
+            [Grant::Console, Grant::GraphicsAppRole, Grant::ConsoleClient]
+        );
         assert_eq!(
             app.depends_on,
-            [COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID]
+            [
+                COMPOSITOR_SERVICE_ID,
+                DESKTOP_SHELL_SERVICE_ID,
+                CONSOLE_SERVICE_ID
+            ]
         );
         for spec in [compositor, shell, app] {
             assert_eq!(spec.restart, SYSTEM_SHELL_SPEC.restart);
@@ -1028,6 +1104,79 @@ mod tests {
             Some(COMPOSITOR_SERVICE_ID)
         );
         assert_eq!(graphics_port_row(SYSTEM_MANIFEST), None);
+    }
+
+    #[test]
+    fn the_console_row_serves_streams_and_depends_on_nothing() {
+        let console = find_service(SYSTEM_MANIFEST, CONSOLE_SERVICE_ID).unwrap();
+        assert_eq!(console.image, ServiceImage::Console);
+        assert_eq!(console.grants, [Grant::ConsoleService, Grant::Console]);
+        assert!(console.depends_on.is_empty());
+        assert_eq!(console.restart, STORAGE_SERVICE_SPEC.restart);
+        assert!(!ServiceImage::Console.is_linux());
+        assert!(!ServiceImage::Console.is_desktop());
+        assert_eq!(
+            console_service_row(SYSTEM_DESKTOP_MANIFEST).map(|spec| spec.id),
+            Some(CONSOLE_SERVICE_ID)
+        );
+    }
+
+    #[test]
+    fn console_service_is_exclusive_and_on_the_console_image_only() {
+        let twice = [
+            row(7, ServiceImage::Console, &[Grant::ConsoleService]),
+            row(8, ServiceImage::Console, &[Grant::ConsoleService]),
+        ];
+        assert_eq!(
+            validate_manifest(&twice),
+            Err(ManifestError::DuplicateExclusiveGrant { row: 1 })
+        );
+        for image in [
+            ServiceImage::Storage,
+            ServiceImage::LinuxShell,
+            ServiceImage::Compositor,
+            ServiceImage::Playground,
+            ServiceImage::Audit,
+        ] {
+            assert_eq!(
+                validate_manifest(&[row(7, image, &[Grant::ConsoleService])]),
+                Err(ManifestError::GrantNotSupportedByImage { row: 0 }),
+                "{image:?}"
+            );
+        }
+        let foreign: [&'static [Grant]; 3] = [
+            &[Grant::BlockDevice],
+            &[Grant::NetworkService],
+            &[Grant::ConsoleClient],
+        ];
+        for grant in foreign {
+            assert_eq!(
+                validate_manifest(&[row(7, ServiceImage::Console, grant)]),
+                Err(ManifestError::GrantNotSupportedByImage { row: 0 }),
+                "{grant:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_console_client_must_depend_on_the_console_service_row() {
+        let service = row(7, ServiceImage::Console, &[Grant::ConsoleService]);
+        let mut client = row(8, ServiceImage::Playground, &[Grant::ConsoleClient]);
+        assert_eq!(
+            validate_manifest(&[service, client]),
+            Err(ManifestError::ConsoleClientWithoutServiceDependency { row: 1 })
+        );
+        client.depends_on = &[ServiceId(7)];
+        assert_eq!(validate_manifest(&[service, client]), Ok(()));
+        let unrelated = row(7, ServiceImage::Audit, &[]);
+        assert_eq!(
+            validate_manifest(&[unrelated, client]),
+            Err(ManifestError::ConsoleClientWithoutServiceDependency { row: 1 })
+        );
+        assert_eq!(
+            validate_manifest(&[row(8, ServiceImage::LinuxShell, &[Grant::ConsoleClient])]),
+            Err(ManifestError::GrantNotSupportedByImage { row: 0 })
+        );
     }
 
     #[test]

@@ -1,4 +1,26 @@
 //! Acceptance serial markers: strict order plus unordered groups where logs race.
+//!
+//! A line the kernel tags [`CONSOLE_LINE_TAG`] is a console-service stream's output (#310):
+//! text a client process wrote. No marker can be satisfied by text on such a line, so a client
+//! cannot print a gate's marker for it. Only a marker that is itself a console line (it starts
+//! with the tag) matches there.
+
+pub use clean_slate_native_abi::console::CONSOLE_LINE_TAG;
+
+/// The first `marker` in `output` at or after `from` that is not inside a console-stream line
+/// (unless `marker` is one), as an offset into `output`.
+pub fn find_marker(output: &str, from: usize, marker: &str) -> Option<usize> {
+    if marker.starts_with(CONSOLE_LINE_TAG) {
+        return output[from..].find(marker).map(|at| from + at);
+    }
+    output[from..]
+        .match_indices(marker)
+        .map(|(at, _)| from + at)
+        .find(|&at| {
+            let line_start = output[..at].rfind('\n').map_or(0, |newline| newline + 1);
+            !output[line_start..].starts_with(CONSOLE_LINE_TAG)
+        })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkerStep<'a> {
@@ -108,10 +130,10 @@ impl<'a> MarkerTracker<'a> {
                 let Some(marker) = markers.get(self.next_step) else {
                     break;
                 };
-                let Some(offset) = output[self.search_start..].find(marker) else {
+                let Some(at) = find_marker(output, self.search_start, marker) else {
                     break;
                 };
-                self.search_start += offset + marker.len();
+                self.search_start = at + marker.len();
                 self.next_step += 1;
                 continue;
             }
@@ -121,10 +143,10 @@ impl<'a> MarkerTracker<'a> {
             };
             match steps[self.next_step] {
                 MarkerStep::Ordered(marker) => {
-                    let Some(offset) = output[self.search_start..].find(marker) else {
+                    let Some(at) = find_marker(output, self.search_start, marker) else {
                         break;
                     };
-                    self.search_start += offset + marker.len();
+                    self.search_start = at + marker.len();
                     self.next_step += 1;
                 }
                 MarkerStep::UnorderedGroup(texts) => {
@@ -140,10 +162,9 @@ impl<'a> MarkerTracker<'a> {
                     self.next_step += 1;
                 }
                 MarkerStep::Line { prefix, fields } => {
-                    let Some(offset) = output[self.search_start..].find(prefix) else {
+                    let Some(line_start) = find_marker(output, self.search_start, prefix) else {
                         break;
                     };
-                    let line_start = self.search_start + offset;
                     let Some(line_len) = output[line_start..].find('\n') else {
                         break;
                     };
@@ -171,20 +192,11 @@ impl<'a> MarkerTracker<'a> {
     ) -> bool {
         let mut max_end = *search_start;
         for text in texts {
-            let haystack = if anywhere {
-                output
-            } else {
-                &output[*search_start..]
-            };
-            let Some(offset) = haystack.find(text) else {
+            let from = if anywhere { 0 } else { *search_start };
+            let Some(at) = find_marker(output, from, text) else {
                 return false;
             };
-            let end = if anywhere {
-                offset + text.len()
-            } else {
-                *search_start + offset + text.len()
-            };
-            max_end = max_end.max(end);
+            max_end = max_end.max(at + text.len());
         }
         *search_start = max_end;
         true
@@ -444,6 +456,32 @@ mod tests {
             unexpected_guest_failure("[FAIL] boom", line_set, true),
             Some("[FAIL] boom".to_owned())
         );
+    }
+
+    #[test]
+    fn a_console_stream_line_cannot_satisfy_a_marker() {
+        let forged = "[CON ] pid=7: [M4  ] PASS\n[CON ] pid=7: x [INIT] boot settled running=5\n";
+        let markers = ["[M4  ] PASS"];
+        assert!(!MarkerTracker::from_ordered(&markers).consume(forged));
+        let steps = [MarkerStep::UnorderedGroupAnywhere(&["[INIT] boot settled"])];
+        assert!(!MarkerTracker::from_steps(&steps).consume(forged));
+        let steps = [MarkerStep::Line {
+            prefix: "[INIT] boot settled",
+            fields: &[("running=", "5")],
+        }];
+        assert!(!MarkerTracker::from_steps(&steps).consume(forged));
+        // The real line after a forged one still counts, as does a line wrapped by the kernel.
+        let real = format!("{forged}[M4  ] PASS\n");
+        assert!(MarkerTracker::from_ordered(&markers).consume(&real));
+        let wrapped = "[IPC ] console pid=1: [INIT] boot settled running=5\n";
+        assert!(MarkerTracker::from_steps(&steps).consume(wrapped));
+        // A marker that is itself a console line matches one.
+        let greeting = ["[CON ] pid=7: playground: console stream open"];
+        assert!(MarkerTracker::from_ordered(&greeting).consume(
+            forged
+                .replace("[M4  ] PASS", "playground: console stream open")
+                .as_str()
+        ));
     }
 
     #[test]

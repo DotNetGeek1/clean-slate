@@ -982,6 +982,10 @@ fn dispatch_native(frame: &mut SyscallContext) {
         clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY => {
             crate::service::service_ready::handle_syscall(frame)
         }
+        #[cfg(clean_slate_system_init)]
+        clean_slate_native_abi::console::SYSCALL_NR_CONSOLE_DEVICE => {
+            crate::service::console_device::handle_syscall(frame)
+        }
         cap_abi::SYSCALL_NR_DISPLAY => {
             crate::service::display_syscall::handle_syscall_display(frame)
         }

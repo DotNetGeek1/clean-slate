@@ -5,8 +5,8 @@
 //! pixel buffers, then blocks in `RECV_EVENT` and hands each event to the session. It never
 //! wakes on its own; every frame is the result of an event that changed what the panel shows.
 //!
-//! Authority is exactly the `Graphics{GFX_CONNECT}` capability its manifest row grants plus
-//! the buffers this process allocates. There is no framebuffer, display or input access.
+//! Authority is exactly the `Graphics{GFX_CONNECT}` and `Console{CONSOLE_CONNECT}`
+//! capabilities its manifest row grants plus the buffers this process allocates. There is no framebuffer, display or input access.
 
 #![no_std]
 #![no_main]
@@ -20,8 +20,8 @@ use clean_slate_native_abi::is_status;
 use clean_slate_playground::host::{allocate_buffers, Client};
 use clean_slate_playground::launch::{PlaygroundBootstrap, BOOTSTRAP_ADDRESS};
 use clean_slate_playground::{diag, ExitReason, Outcome, Session};
-use clean_slate_runtime::console::Console;
-use clean_slate_runtime::port::Wait;
+use clean_slate_runtime::console::{Console, ConsoleStream};
+use clean_slate_runtime::port::{Deadline, Wait};
 use clean_slate_runtime::{process, Kernel, Syscalls};
 use clean_slate_ui::QualityTier;
 
@@ -45,6 +45,19 @@ fn console(boot: &PlaygroundBootstrap, line: &ConsoleLine) {
     }
     if let Some(handle) = boot.console() {
         let _ = Console::new(handle).send(&mut Kernel, line.as_bytes());
+    }
+}
+
+/// Says hello through the console service (#310), the first native client of its streams. The
+/// service prints it as `[CON ] pid=N: playground: console stream open`. The app runs on
+/// whether or not the service answers.
+fn greet_console() {
+    if let Ok(stream) = ConsoleStream::connect(&mut Kernel) {
+        let _ = stream.write_str(
+            &mut Kernel,
+            "playground: console stream open\n",
+            Deadline::NEVER,
+        );
     }
 }
 
@@ -118,6 +131,7 @@ pub extern "C" fn _start() -> ! {
     let session = unsafe { &mut *addr_of_mut!(SESSION) };
     *session = Session::new(tier);
     console(&boot, &probe_authority());
+    greet_console();
     run(&boot, session, tier);
     process::exit();
 }
