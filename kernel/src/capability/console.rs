@@ -54,6 +54,8 @@ pub(crate) fn grant_serial_console_device(holder: HolderId) -> Result<(), Capabi
 
 /// Whether `record` is a client's `CONSOLE_CONNECT` on a console port of service `service`
 /// other than generation `generation`: a port that instance's restart left behind.
+// The caller, the console service's port grant, exists only where the desktop rows do.
+#[cfg_attr(not(clean_slate_desktop), allow(dead_code))]
 fn is_stale_client(record: &CapabilityRecord, service: u64, generation: u64) -> bool {
     record.state == CapabilityState::Live
         && record.resource != ResourceRef::serial_console_device()
@@ -68,6 +70,8 @@ fn is_stale_client(record: &CapabilityRecord, service: u64, generation: u64) -> 
 /// The kernel is the console client of those holders (a Linux process's console fds,
 /// `service::console_stream`), so the new record needs no handle handed to anyone. Calls
 /// `reissued` with each holder and the result; returns how many holders were reissued.
+// The caller, the console service's port grant, exists only where the desktop rows do.
+#[cfg_attr(not(clean_slate_desktop), allow(dead_code))]
 fn reissue_clients_in<const N: usize>(
     table: &mut CapabilityTable<N>,
     port: ResourceRef,
@@ -131,6 +135,8 @@ fn reissue_clients_in<const N: usize>(
 
 /// [`reissue_clients_in`] on the kernel's capability space, for the Linux processes, whose
 /// console streams the kernel connects.
+// The caller, the console service's port grant, exists only where the desktop rows do.
+#[cfg_attr(not(clean_slate_desktop), allow(dead_code))]
 pub(crate) fn reissue_kernel_console_clients(port: ResourceRef) {
     use crate::process::personality::{execution_personality_for_pid, ExecutionPersonality};
     let table = unsafe { super::capability_space_mut() };
