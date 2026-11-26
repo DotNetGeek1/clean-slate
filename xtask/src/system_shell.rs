@@ -228,6 +228,9 @@ pub(crate) fn lines(segment: &str) -> impl Iterator<Item = &str> {
 
 /// The text from the first occurrence of `prefix` to the end of its line, wherever the line
 /// starts: kernel lines can follow a prompt that has no newline.
+/// The console service's line, once a boot, when typed input first answers a read.
+const SERIAL_INPUT_SERVED: &str = "[CONS] serial input answered a read";
+
 pub(crate) fn kernel_lines<'a>(segment: &'a str, prefix: &'a str) -> impl Iterator<Item = &'a str> {
     lines(segment).filter_map(move |line| line.find(prefix).map(|at| &line[at..]))
 }
@@ -527,6 +530,12 @@ fn validate(segments: &[&str], served: &[Served]) -> Result<Vec<Shell>, String> 
             "a lane's marker reader accepts the shell's {FORGED_MARKER:?}"
         ));
     }
+    // Typed input reaches the shell through the console service (#310), which says so once.
+    if kernel_lines(&whole, SERIAL_INPUT_SERVED).count() != 1 {
+        return Err(format!(
+            "the console service must answer a read with typed input, once saying {SERIAL_INPUT_SERVED:?}"
+        ));
+    }
     let launches = kernel_lines(&whole, &format!("[SVC ] launch service={SHELL_SERVICE} ")).count();
     if launches != shells.len() {
         return Err(format!(
@@ -797,7 +806,11 @@ mod tests {
     fn good_segments() -> Vec<String> {
         vec![
             boot(),
-            format!("echo hel''lo-shell\r\n{}{}", con(6, &["hello-shell"]), prompt(6)),
+            format!(
+                "echo hel''lo-shell\r\n[IPC ] console pid=4: {SERIAL_INPUT_SERVED}\n{}{}",
+                con(6, &["hello-shell"]),
+                prompt(6)
+            ),
             format!("ls /bin\r\n{}{}", con(8, &BIN_ENTRIES), prompt(6)),
             format!(
                 "printf 'pipe-%s\\n' yes no | grep yes\r\n[LNX ] exit pid=7 status=0\n{}{}",

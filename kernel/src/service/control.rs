@@ -1335,7 +1335,7 @@ impl InstanceGrantAuthority for KernelInstanceGrants {
         grant_serial_console_device(HolderId(pid))
             .map_err(|_| self.grant_failed(pid, "console device", "capability refused"))?;
         kernel_log_fmt(format_args!(
-            "[CONS] authority granted pid={pid} port={}:{} rights=serve registered=1 device=write\n",
+            "[CONS] authority granted pid={pid} port={}:{} rights=serve registered=1 device=read|write\n",
             self.service_id.0, generation.0
         ));
         Ok(())

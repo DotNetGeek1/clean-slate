@@ -516,7 +516,7 @@ fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopS
     let console_port = grant_line(
         output,
         &format!("[CONS] authority granted pid={console_service} port={CONSOLE}:"),
-        " rights=serve registered=1 device=write",
+        " rights=serve registered=1 device=read|write",
         audit_at(CONSOLE),
     )?;
     let console_port = format!("{CONSOLE}:{console_port}");
@@ -1134,7 +1134,7 @@ mod tests {
             (
                 CONSOLE,
                 9,
-                "[CONS] authority granted pid=9 port=22016:9 rights=serve registered=1 device=write\n",
+                "[CONS] authority granted pid=9 port=22016:9 rights=serve registered=1 device=read|write\n",
                 "ports=1 port-connections=0 work-sets=1 service-reported detail=0x0",
             ),
             (NETWORK, 3, "", "raw-backend=virtio service-reported link-up=1"),

@@ -600,6 +600,8 @@ Syscalls run with interrupts masked: `IA32_FMASK` is written with `SYSCALL_ENTRY
 
 `poll` reports fd 0 readable while a read would not block, and never writable. A `poll` that waits on fd 0 records a producer interest; after every commit or end-of-file the receive interrupt calls the input notifier, which wakes every poller with an interest in console input. If the interest table is full, a poll that includes console input returns `ENOMEM` instead of sleeping through input it could never be woken for.
 
+**Through the console service (#310).** For a process whose console goes through the console service (it holds `CONSOLE_CONNECT` on the console port, as the shell's tree does), `read(0)` asks its console stream instead: the kernel sends a `READ` of up to 62 bytes and blocks on the connection, and the service answers the oldest waiting `READ` with a committed line, an end of input, or nothing. A read returns the answer's bytes (what does not fit stays for the next read), 0 for an end of input, and `EAGAIN` on an `O_NONBLOCK` description while the `READ` waits. `poll` sends that `READ` ahead of time, and any event on a kernel-held console connection wakes every poller with an interest in console input. The rules above hold unchanged; while the service cannot be reached, fd 0 reads the line discipline directly.
+
 **Waiting cannot exhaust a kernel table.** A blocked `read(0)` takes one waiter slot, and the waiter table has one slot per scheduler thread (`MAX_WAITERS` is defined as `TASK_COUNT` in `sched/wait.rs`) and a blocked thread waits on one key at a time, so no number of blocked readers can fill it. The poll interest table is shared and fixed (16 entries, at most 8 fds per `poll`); a full table is `ENOMEM` for the caller, never a kernel error.
 
 **Children.** `fork` copies the fd table, so commands the shell runs inherit fd 0 (and fd 1, fd 2 and the `/tmp` capabilities); `exec` keeps it. A pipeline's `dup2` replaces fd 0 with the pipe in the reading command. The authority audit runs once, when the service instance is launched, so children are not audited; they hold no more than the shell did.
@@ -609,7 +611,7 @@ Syscalls run with interrupts masked: `IA32_FMASK` is written with `SYSCALL_ENTRY
 **Limits.**
 
 - Ctrl-C, Ctrl-Z and Ctrl-\ are dropped control bytes, and signals are stored but never delivered, so nothing can interrupt a command.
-- All processes holding fd 0 read one input stream; each committed line goes to whichever reader takes it first.
+- All processes holding fd 0 read one input stream; each committed line goes to whichever reader takes it first (through the console service, the one that has waited longest).
 - `ioctl` returns `ENOTTY` for every request on every open fd, so no program sees a terminal and ash runs without line editing or history.
 - There is no job control. This BusyBox has no `jobs`, `fg` or `bg`, and a background command fails because ash opens `/dev/null` for its stdin and there is no `/dev`.
 - The prompt is `# `. A fresh shell prints it just before its banner, so the first prompt of each instance is not on the last line.

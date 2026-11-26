@@ -82,6 +82,9 @@ struct ConsoleState {
     wakes: u32,
     woken: u32,
     notifier: Option<fn()>,
+    /// The console service's work-set bit for committed input (#310), set on each wake.
+    #[cfg(clean_slate_system_init)]
+    input_binding: Option<(crate::sched::work_set::WorkSetBinding, u32)>,
     #[cfg(clean_slate_serial_console)]
     vector: Option<u8>,
 }
@@ -103,6 +106,8 @@ impl ConsoleState {
             wakes: 0,
             woken: 0,
             notifier: None,
+            #[cfg(clean_slate_system_init)]
+            input_binding: None,
             #[cfg(clean_slate_serial_console)]
             vector: None,
         }
@@ -117,6 +122,10 @@ impl ConsoleState {
             .saturating_add(u32::try_from(woken).unwrap_or(u32::MAX));
         if let Some(notifier) = self.notifier {
             notifier();
+        }
+        #[cfg(clean_slate_system_init)]
+        if let Some((binding, bit)) = self.input_binding {
+            crate::sched::work_set::signal(binding, bit);
         }
     }
 }
@@ -152,6 +161,14 @@ pub(crate) fn would_block() -> bool {
 /// Consumes the pending end-of-file if no committed input is ahead of it.
 pub(crate) fn take_eof() -> bool {
     without_interrupts(|| console_mut().discipline.take_eof())
+}
+
+/// Sets `bit` of `binding` on every later wake, replacing an earlier binding: how the console
+/// service learns that input was committed (#310). A binding to a work set that is gone is
+/// harmless, since signalling a stale work set does nothing.
+#[cfg(clean_slate_system_init)]
+pub(crate) fn bind_input(binding: crate::sched::work_set::WorkSetBinding, bit: u32) {
+    without_interrupts(|| console_mut().input_binding = Some((binding, bit)));
 }
 
 /// Runs `notifier` after each wake of [`CONSOLE_INPUT_KEY`], in interrupt context or in the

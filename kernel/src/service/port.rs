@@ -175,6 +175,15 @@ pub(crate) fn with_ports_for_test<R>(
 }
 
 fn apply(effects: &Effects<WorkSetBinding>) {
+    // An event on a console stream (#310) can make a Linux process's fd 0 readable: wake every
+    // `poll` on console input, which checks again. Over-waking is harmless.
+    #[cfg(clean_slate_system_init)]
+    if effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::WakeConnection(_)))
+    {
+        crate::syscall::linux::poll::wake_console_input_pollers();
+    }
     for effect in effects.iter() {
         match effect {
             Effect::WakeServer(key) => {
@@ -403,6 +412,12 @@ pub(crate) fn kernel_client_close(
 
 pub(crate) fn connection_port_key(connection: ConnectionId) -> Result<PortKey, PortError> {
     with_ports(|core, _, _| core.connection_port_key(connection.encode()))
+}
+
+/// Whether a `RECV_EVENT` on the connection would complete at once.
+#[cfg(clean_slate_system_init)]
+pub(crate) fn event_ready(connection: ConnectionId) -> bool {
+    with_ports(|core, _, _| core.event_ready(connection.encode()))
 }
 
 /// The connection's requests its server has not received yet.

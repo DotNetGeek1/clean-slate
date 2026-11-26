@@ -14,9 +14,12 @@
 //! echo of what is typed continues it; it is ended when its writer closes. The device starts a
 //! line of its own for every write, so a writer's next text starts a new labeled line.
 //!
-//! Input reaches a stream through [`ConsoleCore::feed_input`] from whichever front end is
-//! attached to it. In this first stage no front end is: the serial line's input still goes to
-//! the Linux shell's fd 0, and attaching it here is the next stage of #310.
+//! The serial line's input is the service's too: the kernel's line discipline edits, echoes and
+//! commits lines, and the oldest waiting `READ` among all streams gets them
+//! ([`ConsoleCore::pump_input`], [`InputSource`]). While the shell waits for a command, its
+//! `READ` is the only one; while a command reads, the command's is the newer and the shell's,
+//! waiting in `wait4`, is not there. Input also reaches one stream through
+//! [`ConsoleCore::feed_input`], from a front end attached to it.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -72,6 +75,32 @@ pub trait StreamPort {
     fn disconnect(&mut self, connection: ConnectionId, reason: u32);
 }
 
+/// What reading the serial line's committed input gave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputRead {
+    /// This many bytes, at most a line.
+    Bytes(usize),
+    /// The end of input (Ctrl-D on an empty line), now consumed.
+    End,
+    /// Nothing is committed.
+    Nothing,
+}
+
+/// The serial line's input: what the kernel's line discipline committed (syscall 25
+/// `READ_INPUT`).
+pub trait InputSource {
+    fn read_input(&mut self, out: &mut [u8]) -> InputRead;
+}
+
+/// No serial input: for a core driven without the serial line.
+pub struct NoSerialInput;
+
+impl InputSource for NoSerialInput {
+    fn read_input(&mut self, _out: &mut [u8]) -> InputRead {
+        InputRead::Nothing
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PostFailure {
     /// The client's event queue is full; the event is posted again later.
@@ -89,6 +118,8 @@ pub struct ConsoleStats {
     pub protocol_errors: u64,
     pub refused_streams: u64,
     pub input_dropped: u64,
+    /// Serial input bytes handed to streams.
+    pub serial_input_bytes: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -102,6 +133,8 @@ struct Stream {
     end_of_input: bool,
     /// The most bytes a `READ` still waiting for input wants.
     pending_read: Option<u8>,
+    /// When that `READ` arrived: the oldest waiting `READ` gets the serial line's input.
+    read_seq: u64,
 }
 
 impl Stream {
@@ -115,6 +148,7 @@ impl Stream {
             input_len: 0,
             end_of_input: false,
             pending_read: None,
+            read_seq: 0,
         }
     }
 }
@@ -122,6 +156,7 @@ impl Stream {
 pub struct ConsoleCore {
     streams: [Option<Stream>; MAX_STREAMS],
     stats: ConsoleStats,
+    next_read_seq: u64,
 }
 
 impl Default for ConsoleCore {
@@ -142,7 +177,9 @@ impl ConsoleCore {
                 protocol_errors: 0,
                 refused_streams: 0,
                 input_dropped: 0,
+                serial_input_bytes: 0,
             },
+            next_read_seq: 0,
         }
     }
 
@@ -154,16 +191,28 @@ impl ConsoleCore {
         self.streams.iter().flatten().count()
     }
 
-    /// Handles one record from the port's `RECV`.
+    /// Handles one record from the port's `RECV`, with no serial input.
     pub fn handle(
         &mut self,
         record: &PortRecvRecord,
         device: &mut impl SerialDevice,
         port: &mut impl StreamPort,
     ) {
+        self.handle_with_input(record, device, port, &mut NoSerialInput);
+    }
+
+    /// Handles one record from the port's `RECV`; a `READ` that is now the oldest waiting one
+    /// takes serial input from `source`.
+    pub fn handle_with_input(
+        &mut self,
+        record: &PortRecvRecord,
+        device: &mut impl SerialDevice,
+        port: &mut impl StreamPort,
+        source: &mut impl InputSource,
+    ) {
         let connection = record.envelope.connection;
         match record.kind {
-            RecvKind::Request => self.request(connection, record, device, port),
+            RecvKind::Request => self.request(connection, record, device, port, source),
             RecvKind::ClientClosed | RecvKind::ClientExited | RecvKind::ClientRevoked => {
                 if let Some(index) = self.find(connection) {
                     self.close(index, device);
@@ -178,6 +227,7 @@ impl ConsoleCore {
         record: &PortRecvRecord,
         device: &mut impl SerialDevice,
         port: &mut impl StreamPort,
+        source: &mut impl InputSource,
     ) {
         let Ok(request) = ConsoleRequest::decode(&record.frame) else {
             self.stats.protocol_errors += 1;
@@ -197,14 +247,64 @@ impl ConsoleCore {
             ConsoleRequest::Read { max, nonblock } => {
                 // A writer that asks to read shows what it wrote so far, such as a prompt.
                 self.show_partial(index, device);
+                let seq = self.next_read_seq;
+                self.next_read_seq += 1;
                 let stream = self.streams[index].as_mut().expect("open stream");
                 stream.pending_read = Some(max);
-                if !self.answer_read(index, port) && nonblock {
+                stream.read_seq = seq;
+                if !self.answer_read(index, port, source) && nonblock {
                     let stream = self.streams[index].as_mut().expect("open stream");
                     stream.pending_read = None;
                     let _ = port.post(connection, &ConsoleEvent::NoInput.encode());
                 }
             }
+        }
+    }
+
+    /// Hands committed serial input to the waiting `READ`s, oldest first, until the input or the
+    /// readers run out: what the service does when the kernel signals that input was committed.
+    pub fn pump_input(&mut self, port: &mut impl StreamPort, source: &mut impl InputSource) {
+        while let Some(index) = self.oldest_reader() {
+            if !self.answer_read(index, port, source) {
+                break;
+            }
+        }
+    }
+
+    /// The stream whose `READ` has waited longest, if any is waiting.
+    fn oldest_reader(&self) -> Option<usize> {
+        (0..MAX_STREAMS)
+            .filter(|&index| {
+                self.streams[index]
+                    .as_ref()
+                    .is_some_and(|stream| stream.pending_read.is_some())
+            })
+            .min_by_key(|&index| self.streams[index].as_ref().map_or(0, |s| s.read_seq))
+    }
+
+    /// Takes serial input for the stream at `index`, the oldest reader, into its buffer.
+    fn take_serial_input(&mut self, index: usize, source: &mut impl InputSource) {
+        let stream = self.streams[index].as_mut().expect("open stream");
+        let Some(max) = stream.pending_read else {
+            return;
+        };
+        let room = (INPUT_BYTES - stream.input_len)
+            .min(usize::from(max))
+            .min(CONSOLE_FRAME_PAYLOAD);
+        if room == 0 {
+            return;
+        }
+        let mut bytes = [0u8; CONSOLE_FRAME_PAYLOAD];
+        match source.read_input(&mut bytes[..room]) {
+            InputRead::Bytes(count) => {
+                let count = count.min(room);
+                stream.input[stream.input_len..stream.input_len + count]
+                    .copy_from_slice(&bytes[..count]);
+                stream.input_len += count;
+                self.stats.serial_input_bytes += count as u64;
+            }
+            InputRead::End => stream.end_of_input = true,
+            InputRead::Nothing => {}
         }
     }
 
@@ -241,13 +341,25 @@ impl ConsoleCore {
         stream.input_len += taken;
         stream.end_of_input |= end_of_input;
         self.stats.input_dropped += (bytes.len() - taken) as u64;
-        self.answer_read(index, port);
+        self.answer_read(index, port, &mut NoSerialInput);
         true
     }
 
     /// Posts the answer to the stream's waiting `READ` if it has one to give. Returns whether
     /// it posted.
-    fn answer_read(&mut self, index: usize, port: &mut impl StreamPort) -> bool {
+    fn answer_read(
+        &mut self,
+        index: usize,
+        port: &mut impl StreamPort,
+        source: &mut impl InputSource,
+    ) -> bool {
+        let stream = self.streams[index].as_ref().expect("open stream");
+        if stream.pending_read.is_none() {
+            return false;
+        }
+        if stream.input_len == 0 && !stream.end_of_input && self.oldest_reader() == Some(index) {
+            self.take_serial_input(index, source);
+        }
         let stream = self.streams[index].as_mut().expect("open stream");
         let Some(max) = stream.pending_read else {
             return false;

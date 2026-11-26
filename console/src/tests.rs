@@ -316,3 +316,144 @@ fn an_idle_service_shows_every_partial_line_open_once() {
     h.handle(write(1, 4, b"ls\n"));
     assert_eq!(h.device.text()[3], "pid=4: ls\n");
 }
+
+/// The serial line's committed input: whole lines, then an optional end of input.
+#[derive(Default)]
+struct Serial {
+    lines: std::collections::VecDeque<Vec<u8>>,
+    end: bool,
+    reads: usize,
+}
+
+impl Serial {
+    fn typed(lines: &[&[u8]]) -> Self {
+        Self {
+            lines: lines.iter().map(|line| line.to_vec()).collect(),
+            ..Self::default()
+        }
+    }
+}
+
+impl InputSource for Serial {
+    fn read_input(&mut self, out: &mut [u8]) -> InputRead {
+        self.reads += 1;
+        let Some(line) = self.lines.front_mut() else {
+            if core::mem::take(&mut self.end) {
+                return InputRead::End;
+            }
+            return InputRead::Nothing;
+        };
+        let count = line.len().min(out.len());
+        out[..count].copy_from_slice(&line[..count]);
+        line.drain(..count);
+        if line.is_empty() {
+            self.lines.pop_front();
+        }
+        InputRead::Bytes(count)
+    }
+}
+
+impl Harness {
+    fn handle_serial(&mut self, record: PortRecvRecord, serial: &mut Serial) {
+        self.core
+            .handle_with_input(&record, &mut self.device, &mut self.port, serial);
+    }
+}
+
+fn events(port: &Port) -> Vec<(u16, ConsoleEvent)> {
+    port.posted
+        .iter()
+        .map(|(connection, event)| (connection.slot(), *event))
+        .collect()
+}
+
+fn input(bytes: &[u8]) -> ConsoleEvent {
+    ConsoleEvent::Input(ConsoleBytes::new(bytes).unwrap())
+}
+
+#[test]
+fn a_read_takes_committed_serial_input_at_once() {
+    let mut h = Harness::new();
+    let mut serial = Serial::typed(&[b"ls\n"]);
+    h.handle_serial(read(1, 4, 62, false), &mut serial);
+    assert_eq!(events(&h.port), [(1, input(b"ls\n"))]);
+    assert_eq!(h.core.stats().serial_input_bytes, 3);
+}
+
+#[test]
+fn serial_input_waits_in_the_kernel_until_a_read_and_goes_to_the_oldest_reader() {
+    let mut h = Harness::new();
+    let mut serial = Serial::default();
+    h.handle_serial(read(1, 4, 62, false), &mut serial);
+    h.handle_serial(read(2, 7, 62, false), &mut serial);
+    assert!(h.port.posted.is_empty());
+    serial.lines.push_back(b"one\n".to_vec());
+    serial.lines.push_back(b"two\n".to_vec());
+    serial.lines.push_back(b"three\n".to_vec());
+    h.core.pump_input(&mut h.port, &mut serial);
+    assert_eq!(
+        events(&h.port),
+        [(1, input(b"one\n")), (2, input(b"two\n"))]
+    );
+    assert_eq!(
+        serial.lines.len(),
+        1,
+        "no reader is left for the third line"
+    );
+}
+
+#[test]
+fn with_no_reader_the_service_takes_nothing() {
+    let mut h = Harness::new();
+    let mut serial = Serial::typed(&[b"ls\n"]);
+    h.handle_serial(write(1, 4, b"# "), &mut serial);
+    h.core.pump_input(&mut h.port, &mut serial);
+    assert_eq!(serial.reads, 0);
+    assert!(h.port.posted.is_empty());
+}
+
+#[test]
+fn serial_input_is_cut_to_the_read_size_and_the_rest_stays_in_the_kernel() {
+    let mut h = Harness::new();
+    let mut serial = Serial::typed(&[b"abcdef\n"]);
+    h.handle_serial(read(1, 4, 4, false), &mut serial);
+    h.handle_serial(read(1, 4, 62, false), &mut serial);
+    assert_eq!(events(&h.port), [(1, input(b"abcd")), (1, input(b"ef\n"))]);
+}
+
+#[test]
+fn the_serial_end_of_input_answers_the_oldest_reader() {
+    let mut h = Harness::new();
+    let mut serial = Serial::default();
+    h.handle_serial(read(1, 4, 62, false), &mut serial);
+    serial.end = true;
+    h.core.pump_input(&mut h.port, &mut serial);
+    assert_eq!(events(&h.port), [(1, ConsoleEvent::EndOfInput)]);
+}
+
+#[test]
+fn a_nonblocking_read_with_nothing_typed_is_answered_no_input() {
+    let mut h = Harness::new();
+    let mut serial = Serial::default();
+    h.handle_serial(read(1, 4, 62, true), &mut serial);
+    assert_eq!(events(&h.port), [(1, ConsoleEvent::NoInput)]);
+    serial.lines.push_back(b"late\n".to_vec());
+    h.core.pump_input(&mut h.port, &mut serial);
+    assert_eq!(
+        events(&h.port).len(),
+        1,
+        "the read was answered and is gone"
+    );
+}
+
+#[test]
+fn serial_input_taken_for_a_full_queue_is_kept_for_that_reader() {
+    let mut h = Harness::new();
+    let mut serial = Serial::typed(&[b"ls\n"]);
+    h.port.full = true;
+    h.handle_serial(read(1, 4, 62, false), &mut serial);
+    assert!(h.port.posted.is_empty());
+    h.port.full = false;
+    h.core.pump_input(&mut h.port, &mut serial);
+    assert_eq!(events(&h.port), [(1, input(b"ls\n"))]);
+}

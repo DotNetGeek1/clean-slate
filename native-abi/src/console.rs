@@ -36,12 +36,21 @@
 //!
 //! ```text
 //! | Register | Meaning                                                        |
-//! | rdi      | sub-operation: FIND_HANDLE (0), WRITE (1)                      |
-//! | rsi      | WRITE: device handle                                           |
-//! | rdx      | WRITE: buffer address                                          |
-//! | r10      | WRITE: length, 1..=CONSOLE_DEVICE_WRITE_MAX                    |
+//! | rdi      | sub-operation: FIND_HANDLE (0), WRITE (1), BIND_INPUT (2), READ_INPUT (3) |
+//! | rsi      | WRITE, BIND_INPUT, READ_INPUT: device handle                   |
+//! | rdx      | WRITE, READ_INPUT: buffer address; BIND_INPUT: work set id     |
+//! | r10      | WRITE, READ_INPUT: length, 1..=CONSOLE_DEVICE_WRITE_MAX; BIND_INPUT: work-set bit |
 //! | r8, r9   | reserved, must be 0 (FIND_HANDLE: rsi, rdx and r10 too)        |
 //! ```
+//!
+//! The serial line's input is the device's too. The kernel's line discipline edits and echoes
+//! what is typed and commits whole lines; the service takes them with READ_INPUT and answers
+//! the oldest waiting `READ` among its streams with them. BIND_INPUT names a work-set bit of
+//! the caller's own work set that the kernel sets whenever a line is committed or an end of
+//! input recorded; a later BIND_INPUT replaces it. READ_INPUT copies committed bytes, stopping
+//! after a `\n` and before an end of input, and returns the count; it returns
+//! [`CONSOLE_INPUT_END`] when the end of input is next (and consumes it), and `STATUS_EAGAIN`
+//! when nothing is committed. Both need `READ` on the device, WRITE needs `WRITE`.
 //!
 //! FIND_HANDLE returns the caller's device handle. WRITE returns the bytes written, which is
 //! always the whole buffer. The kernel starts every line it writes for the device with
@@ -50,9 +59,10 @@
 //!
 //! | Status | Meaning |
 //! |--------|---------|
-//! | `STATUS_EINVAL` | unknown sub-operation, a reserved register set, a length of 0 or above the limit, or a buffer the caller cannot read |
+//! | `STATUS_EINVAL` | unknown sub-operation, a reserved register set, a length of 0 or above the limit, a buffer the caller cannot read (WRITE) or write (READ_INPUT), or BIND_INPUT naming a work set or bit the caller does not own |
 //! | `STATUS_EBADF` | FIND_HANDLE: the caller holds no device capability |
-//! | `STATUS_EACCES` | WRITE: the capability lacks `WRITE`, or names a `Console` resource other than the device |
+//! | `STATUS_EACCES` | the capability lacks the right the operation needs, or names a `Console` resource other than the device |
+//! | `STATUS_EAGAIN` | READ_INPUT: no committed input |
 //! | other capability statuses | WRITE: the handle is invalid, stale or revoked, as for every capability syscall |
 //! | `STATUS_ESTALE` | the capability was revoked |
 
@@ -66,6 +76,11 @@ pub const CONSOLE_PORT_RESOURCE_ID: u64 = 0x5600;
 
 pub const CONSOLE_DEVICE_OP_FIND_HANDLE: u64 = 0;
 pub const CONSOLE_DEVICE_OP_WRITE: u64 = 1;
+pub const CONSOLE_DEVICE_OP_BIND_INPUT: u64 = 2;
+pub const CONSOLE_DEVICE_OP_READ_INPUT: u64 = 3;
+
+/// What READ_INPUT returns for a consumed end of input (Ctrl-D on an empty line).
+pub const CONSOLE_INPUT_END: u64 = 0;
 
 /// Most bytes one `CONSOLE_DEVICE` WRITE takes.
 pub const CONSOLE_DEVICE_WRITE_MAX: usize = 256;
