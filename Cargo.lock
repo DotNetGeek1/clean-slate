@@ -303,6 +303,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "clean-slate-terminal"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-graphics",
+ "clean-slate-raster",
+ "clean-slate-runtime",
+ "clean-slate-ui",
+]
+
+[[package]]
 name = "clean-slate-ui"
 version = "0.0.1"
 dependencies = [
