@@ -404,6 +404,7 @@ impl ServiceLifecycleController {
         feature = "m6-capabilities-self-test",
         feature = "m6-fixture-smoke-self-test",
         feature = "m10-native-memory-self-test",
+        feature = "m10-clock-self-test",
         feature = "m7-net-service-self-test",
         feature = "m8-linux-hello",
         clean_slate_system_init

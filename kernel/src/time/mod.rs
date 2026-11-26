@@ -1,8 +1,10 @@
-//! Calibrated LAPIC IRQ ticks (#163) and TSC monotonic ns (#103 Linux clocks).
+//! Calibrated LAPIC IRQ ticks (#163), TSC monotonic ns (#103 Linux clocks) and the wall clock
+//! ([`wall`], #308).
 
 #![cfg_attr(not(feature = "m9-linux-runtime-self-test"), allow(dead_code))]
 
 pub(crate) mod calibration;
+pub(crate) mod wall;
 
 use clean_slate_linux_abi::{LinuxErrno, Timespec, EINVAL};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -73,6 +75,11 @@ pub(crate) fn tsc_hz() -> Option<u64> {
     } else {
         Some(value)
     }
+}
+
+/// The TSC value at monotonic 0.
+pub(crate) fn tsc_origin() -> u64 {
+    TSC_ORIGIN.load(Ordering::Acquire)
 }
 
 /// Host-testable: `(value * numer) / denom` with u128 intermediate.

@@ -23,6 +23,8 @@ pub(crate) mod m2_kernel_guards;
     feature = "m10-input-self-test"
 ))]
 pub(crate) mod boot_wait;
+#[cfg(feature = "m10-clock-self-test")]
+pub(crate) mod m10_clock;
 #[cfg(feature = "m10-framebuffer-self-test")]
 pub(crate) mod m10_framebuffer;
 #[cfg(feature = "m10-input-self-test")]
@@ -93,6 +95,7 @@ pub(crate) mod m6_delegation;
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test",
     feature = "m10-native-memory-self-test",
+    feature = "m10-clock-self-test",
     feature = "m7-net-caps-self-test",
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test"
@@ -108,6 +111,7 @@ pub(crate) mod m6_fixture;
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test",
     feature = "m10-native-memory-self-test",
+    feature = "m10-clock-self-test",
     feature = "m7-net-caps-self-test",
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test"

@@ -1,12 +1,13 @@
 //! Generic native kernel ABI shared by the kernel and userspace binaries.
 //!
-//! Shared buffers, the bounded service port, work-set, lifecycle-wait, service-ready and memory
-//! ABI live here; the port engine is the separate `clean-slate-port` crate. Graphics protocol types remain in
-//! `clean-slate-graphics`.
+//! Shared buffers, the bounded service port, work-set, lifecycle-wait, service-ready, memory and
+//! clock ABI live here; the port engine is the separate `clean-slate-port` crate. Graphics protocol
+//! types remain in `clean-slate-graphics`.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod clock;
 pub mod desktop;
 pub mod lifecycle;
 pub mod memory;
@@ -34,8 +35,9 @@ pub use shared_buffer::{
 };
 pub use status::{
     is_status, NETWORK_STATUS_PENDING, STATUS_EACCES, STATUS_EAGAIN, STATUS_EBADF,
-    STATUS_ECONNREFUSED, STATUS_EEXIST, STATUS_EINVAL, STATUS_ENOMEM, STATUS_ENOSPC, STATUS_ENOSYS,
-    STATUS_EPIPE, STATUS_ESTALE, STATUS_ETIMEDOUT, STATUS_RANGE_START,
+    STATUS_ECONNREFUSED, STATUS_EEXIST, STATUS_EINVAL, STATUS_ENODATA, STATUS_ENOMEM,
+    STATUS_ENOSPC, STATUS_ENOSYS, STATUS_EPIPE, STATUS_ESTALE, STATUS_ETIMEDOUT,
+    STATUS_RANGE_START,
 };
 
 pub use port::{
