@@ -15,6 +15,7 @@ on:
       - "net-service/**"
       - "network/**"
       - "playground/**"
+      - "terminal/**"
       - "console/**"
       - "port/**"
       - "runtime/**"
@@ -49,6 +50,7 @@ on:
       - "net-service/**"
       - "network/**"
       - "playground/**"
+      - "terminal/**"
       - "console/**"
       - "port/**"
       - "runtime/**"
@@ -146,6 +148,9 @@ jobs:
 
       - name: Clippy (playground)
         run: cargo clippy -p clean-slate-playground --all-targets -- -D warnings
+
+      - name: Clippy (terminal)
+        run: cargo clippy -p clean-slate-terminal --all-targets -- -D warnings
 
       - name: Clippy (console)
         run: cargo clippy -p clean-slate-console --all-targets -- -D warnings
@@ -334,6 +339,7 @@ jobs:
           cargo test -p clean-slate-runtime
           cargo test -p clean-slate-compositor
           cargo test -p clean-slate-playground
+          cargo test -p clean-slate-terminal
           cargo test -p clean-slate-console
           cargo test -p clean-slate-desktop-shell
           cargo test -p clean-slate-linux-abi

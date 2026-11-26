@@ -1,0 +1,19 @@
+[package]
+name = "clean-slate-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Native terminal window (#311): a VT100 character grid on a compositor toplevel, attached to a console service stream"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+clean-slate-graphics = { path = "../graphics" }
+clean-slate-raster = { path = "../raster" }
+clean-slate-runtime = { path = "../runtime" }
+clean-slate-ui = { path = "../ui" }
+
+[lints]
+workspace = true
