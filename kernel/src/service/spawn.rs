@@ -13,6 +13,23 @@ use crate::mm::frame_allocator::PageAllocator;
     feature = "m2-timer-self-test"
 )))]
 use crate::mm::PAGE_SIZE;
+#[cfg(clean_slate_system_init)]
+include!(concat!(env!("OUT_DIR"), "/console_userspace_entry.rs"));
+#[cfg(clean_slate_system_init)]
+const CONSOLE_USERSPACE_IMAGE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/console_userspace.bin"));
+#[cfg(clean_slate_system_init)]
+const CONSOLE_STACK_PAGES: u64 = 4;
+#[cfg(clean_slate_system_init)]
+const _: () = assert!(CONSOLE_USERSPACE_MAPPED_CODE_PAGES <= INIT_MAX_CODE_PAGES);
+#[cfg(clean_slate_system_init)]
+const _: () = assert!(CONSOLE_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDRESS);
+#[cfg(clean_slate_system_init)]
+const _: () = assert!(
+    CONSOLE_USERSPACE_MAPPED_CODE_PAGES + (CONSOLE_STACK_PAGES as usize)
+        < crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
+);
+
 #[cfg(any(
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
@@ -407,6 +424,9 @@ pub(crate) enum BuiltinServiceImage {
     /// #219 capability audit log reader.
     #[cfg(clean_slate_system_init)]
     AuditUserspacePayload,
+    /// #310 console service.
+    #[cfg(clean_slate_system_init)]
+    ConsoleUserspacePayload,
     /// #118 desktop images: the system build's desktop rows.
     #[cfg(clean_slate_desktop)]
     Desktop(super::desktop_image::DesktopRole),
@@ -468,6 +488,10 @@ impl BuiltinServiceImage {
             #[cfg(clean_slate_system_init)]
             id if id == clean_slate_service_fixtures::AUDIT_SERVICE_ID.0 => {
                 Self::AuditUserspacePayload
+            }
+            #[cfg(clean_slate_system_init)]
+            id if id == clean_slate_service_fixtures::CONSOLE_SERVICE_ID.0 => {
+                Self::ConsoleUserspacePayload
             }
             _ => Self::ImmediateExit,
         }
@@ -609,6 +633,10 @@ pub(crate) fn launch_builtin_service(
         #[cfg(clean_slate_system_init)]
         BuiltinServiceImage::AuditUserspacePayload => {
             launch_audit_userspace_service(allocator, kernel_stack_top, scheduler_slot, context)
+        }
+        #[cfg(clean_slate_system_init)]
+        BuiltinServiceImage::ConsoleUserspacePayload => {
+            launch_console_userspace_service(allocator, kernel_stack_top, scheduler_slot, context)
         }
         #[cfg(clean_slate_desktop)]
         BuiltinServiceImage::Desktop(role) => {
@@ -948,6 +976,10 @@ fn launch_single_page_service(
             BuiltinServiceImage::AuditUserspacePayload => {
                 return Err("audit userspace image must use the audit launch path");
             }
+            #[cfg(clean_slate_system_init)]
+            BuiltinServiceImage::ConsoleUserspacePayload => {
+                return Err("console userspace image must use the console launch path");
+            }
             #[cfg(any(
                 feature = "m6-object-self-test",
                 feature = "m6-process-control-self-test",
@@ -1164,6 +1196,47 @@ fn launch_audit_userspace_service(
                 console_capability: handles
                     .console
                     .ok_or("audit service row grants no console")?,
+            })
+        },
+    )
+}
+
+/// Launches the console service (`clean-slate-console-userspace`, #310). Its console handle
+/// comes from its manifest row; the port and device grants (`Grant::ConsoleService`) are
+/// instance grants, applied once the instance has a generation.
+#[cfg(clean_slate_system_init)]
+#[inline(never)]
+fn launch_console_userspace_service(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+    context: LaunchContext,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    use crate::service::grants::apply_bootstrap_grants;
+    use clean_slate_service_fixtures::console_service::{
+        ConsoleServiceBootstrap, CONSOLE_SERVICE_BOOTSTRAP_ADDRESS,
+    };
+
+    let spec = context.spec.ok_or("console service has no manifest row")?;
+    launch_bootstrap_page_image(
+        allocator,
+        kernel_stack_top,
+        scheduler_slot,
+        &BootstrapPageImage {
+            bytes: CONSOLE_USERSPACE_IMAGE,
+            segments: &CONSOLE_USERSPACE_SEGMENTS,
+            entry_offset: CONSOLE_USERSPACE_ENTRY_OFFSET,
+            stack_pages: CONSOLE_STACK_PAGES,
+            bootstrap_address: CONSOLE_SERVICE_BOOTSTRAP_ADDRESS,
+        },
+        |pid| {
+            let handles = apply_bootstrap_grants(spec.grants, pid, &mut KernelBootstrapGrants)?;
+            Ok(ConsoleServiceBootstrap {
+                self_pid: pid,
+                console_capability: handles
+                    .console
+                    .ok_or("console service row grants no console")?,
+                port_resource_id: u64::from(spec.id.0),
             })
         },
     )

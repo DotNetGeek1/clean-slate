@@ -7,6 +7,7 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod console;
 pub mod desktop;
 pub mod lifecycle;
 pub mod memory;

@@ -268,6 +268,11 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
         Via("service/capability.rs", "grant_block_device_capability"),
     ),
     (
+        "service/console_device.rs",
+        "find_handle",
+        NoDecision(LOOKUP),
+    ),
+    (
         "service/input_syscall.rs",
         "find_handle",
         NoDecision(LOOKUP),

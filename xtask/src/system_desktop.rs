@@ -1,11 +1,11 @@
 //! `test-system`'s three desktop boots (#218 S6c, S6f), all headless and on the hooks build.
 //!
 //! 1. **Desktop.** `opt/clean-slate/desktop=q1` and a modern-only VirtIO-GPU: the kernel declares
-//!    the four base rows and the compositor, desktop shell and app rows, and init launches all
-//!    seven. Each desktop row must hold exactly its manifest grants (the kernel's `[GFX ]`, `[DISP]`
-//!    and `[SEAT]` grant lines, then a launch audit that matches the row), report ready from its
+//!    the five base rows and the compositor, desktop shell and app rows, and init launches all
+//!    eight. Each desktop row must hold exactly its manifest grants (the kernel's `[GFX ]`, `[DISP]`,
+//!    `[SEAT]` and, for the app's console stream, `[CONS]` grant lines, then a launch audit that matches the row), report ready from its
 //!    launched pid with the bindings the kernel observes, and the compositor must have submitted a
-//!    frame before it reports ready. Init settles with seven rows running and the hooks build
+//!    frame before it reports ready. Init settles with eight rows running and the hooks build
 //!    prints its desktop resource baseline. Then, over COM1 (S6d), the host faults the
 //!    compositor, the desktop shell and the app in turn ([`check_row_fault`]): each faulted row is reaped
 //!    with no residue; on a compositor fault the shell and app see the port go and exit with
@@ -28,8 +28,9 @@ use clean_slate_ui::QualityTier;
 
 use crate::marker_spec::first_guest_failure;
 use crate::system_boot::{
-    check_audit_service, check_no_desktop_rows, expected_audit_authority, field, number,
-    start_shell_fixture_peer, system_vm_config, AUDIT_SERVICE,
+    check_audit_service, check_console_service, check_no_desktop_rows, expected_audit_authority,
+    expected_console_authority, field, number, start_shell_fixture_peer, system_vm_config,
+    AUDIT_SERVICE, CONSOLE_SERVICE,
 };
 use crate::system_desktop_faults::Step;
 use crate::system_shell::{expected_authority as expected_shell_authority, lines};
@@ -44,11 +45,13 @@ pub(crate) const COMPOSITOR: u32 = 0x5300;
 pub(crate) const DESKTOP_SHELL: u32 = 0x5301;
 pub(crate) const APP: u32 = 0x5302;
 pub(crate) const AUDIT: u32 = AUDIT_SERVICE;
-/// In init's start order: storage and the audit service at boot, then network and the shell with
-/// the compositor once storage is ready.
-const SERVICES: [u32; 7] = [
+pub(crate) const CONSOLE: u32 = CONSOLE_SERVICE;
+/// In init's start order: storage, the audit service and the console service at boot, then
+/// network and the shell with the compositor once storage is ready.
+const SERVICES: [u32; 8] = [
     STORAGE,
     AUDIT,
+    CONSOLE,
     NETWORK,
     SHELL,
     COMPOSITOR,
@@ -103,8 +106,10 @@ impl DesktopMachine {
 const NO_DISPLAY: &str =
     "[KERN] boot profile=desktop has no display output; booting base, desktop rows not declared";
 pub(crate) const SETTLED_DESKTOP: &str =
-    "[INIT] boot settled running=7 down=0; waiting, no deadline";
-const SETTLED_BASE: &str = "[INIT] boot settled running=4 down=0; waiting, no deadline";
+    "[INIT] boot settled running=8 down=0; waiting, no deadline";
+const SETTLED_BASE: &str = "[INIT] boot settled running=5 down=0; waiting, no deadline";
+/// What the app writes through its console stream once it starts (#310).
+const APP_CONSOLE_GREETING: &str = "playground: console stream open";
 /// A desktop row that never reports ready is restarted until init gives up on it.
 pub(crate) const GIVE_UP_LINES: [&str; 2] = ["[INIT] gave up", "[INIT] not starting"];
 
@@ -118,7 +123,7 @@ const DESKTOP_MARKERS: [MarkerStep<'static>; 13] = [
     },
     MarkerStep::Line {
         prefix: "[KERN] init launched pid=",
-        fields: &[("declared-services=", "7")],
+        fields: &[("declared-services=", "8")],
     },
     MarkerStep::Line {
         prefix: "[INIT] boot profile=",
@@ -148,7 +153,7 @@ const NO_DISPLAY_MARKERS: [MarkerStep<'static>; 5] = [
     MarkerStep::Ordered(NO_DISPLAY),
     MarkerStep::Line {
         prefix: "[KERN] init launched pid=",
-        fields: &[("declared-services=", "4")],
+        fields: &[("declared-services=", "5")],
     },
     MarkerStep::Line {
         prefix: "[INIT] boot profile=",
@@ -171,7 +176,7 @@ const FRAMEBUFFER_TIER_MARKERS: [MarkerStep<'static>; 5] = [
     MarkerStep::Ordered(FRAMEBUFFER_TIER),
     MarkerStep::Line {
         prefix: "[KERN] init launched pid=",
-        fields: &[("declared-services=", "7")],
+        fields: &[("declared-services=", "8")],
     },
     MarkerStep::Line {
         prefix: "[INIT] boot profile=",
@@ -220,7 +225,7 @@ pub(crate) fn run(features: &[&str], disk: &Path) -> Result<(), XtaskError> {
     )?;
     let (first, last) = (&states[0], &states[states.len() - 1]);
     println!(
-        "[STM ] desktop boot: seven rows running, compositor port {}; the compositor, the desktop shell and the app each faulted and came back in dependency order (compositor pid={} gen={} port {} at the end), resources matched the baseline after each, and the serial shell answered",
+        "[STM ] desktop boot: eight rows running, compositor port {}; the compositor, the desktop shell and the app each faulted and came back in dependency order (compositor pid={} gen={} port {} at the end), resources matched the baseline after each, and the serial shell answered",
         first.port, last.rows[0].pid, last.rows[0].generation, last.port
     );
 
@@ -271,7 +276,7 @@ pub(crate) fn run(features: &[&str], disk: &Path) -> Result<(), XtaskError> {
         XtaskError::Validation(format!("desktop boot on the framebuffer alone: {reason}"))
     })?;
     println!(
-        "[STM ] desktop boot on the framebuffer alone: one {FRAMEBUFFER_TIER:?}, seven rows at Q0"
+        "[STM ] desktop boot on the framebuffer alone: one {FRAMEBUFFER_TIER:?}, eight rows at Q0"
     );
     Ok(())
 }
@@ -330,12 +335,15 @@ fn expected_audit(service: u32, pid: u64) -> String {
     if service == AUDIT {
         return expected_audit_authority(pid);
     }
+    if service == CONSOLE {
+        return expected_console_authority(pid);
+    }
     let counts = match service {
-        STORAGE => "lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
-        NETWORK => "lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1",
-        COMPOSITOR => "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 audit-read=0 other=0 revoked=0 allowance=24 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
-        DESKTOP_SHELL => "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=1 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
-        _ => "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=1 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
+        STORAGE => "lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
+        NETWORK => "lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1",
+        COMPOSITOR => "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=24 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
+        DESKTOP_SHELL => "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=1 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
+        _ => "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=1 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
     };
     format!(
         "[SVC ] authority service={service} pid={pid} {counts} linux=0 console-input=0 matches-manifest=1"
@@ -343,7 +351,8 @@ fn expected_audit(service: u32, pid: u64) -> String {
 }
 
 /// What a desktop row's ready line must show the kernel observed: the compositor serves one port
-/// and holds the presenter and the input consumer; each client holds one port connection.
+/// and holds the presenter and the input consumer; the desktop shell holds its compositor
+/// connection, and the app that and its console stream (#310).
 fn check_bindings(service: u32, ready: &str) -> Result<(), String> {
     let want: [(&str, u64); 4] = if service == COMPOSITOR {
         [
@@ -355,7 +364,7 @@ fn check_bindings(service: u32, ready: &str) -> Result<(), String> {
     } else {
         [
             ("ports", 0),
-            ("port-connections", 1),
+            ("port-connections", if service == APP { 2 } else { 1 }),
             ("presenter", 0),
             ("input-consumer", 0),
         ]
@@ -408,8 +417,8 @@ fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopS
     }
     let launched = only(output, "[KERN] init launched pid=")?;
     let init_pid = number(launched, "pid")?;
-    if number(launched, "declared-services")? != 7 {
-        return Err(format!("expected seven declared rows: {launched:?}"));
+    if number(launched, "declared-services")? != 8 {
+        return Err(format!("expected eight declared rows: {launched:?}"));
     }
     let console = format!("[IPC ] console pid={init_pid}: ");
     only(
@@ -425,7 +434,7 @@ fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopS
         }
     }
 
-    let mut pids = [0u64; 7];
+    let mut pids = [0u64; 8];
     for (index, service) in SERVICES.iter().copied().enumerate() {
         let launch = only(output, &format!("[SVC ] launch service={service} "))?;
         let pid = number(launch, "pid")?;
@@ -460,9 +469,12 @@ fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopS
         if service == AUDIT {
             check_audit_service(output, pid, audit, ready)?;
         }
+        if service == CONSOLE {
+            check_console_service(output, pid, audit, ready)?;
+        }
         pids[index] = pid;
     }
-    let [_, _, _, _, compositor, shell, app] = pids;
+    let [_, _, console_service, _, _, compositor, shell, app] = pids;
     let audit_at = |service: u32| {
         output
             .find(&format!("[SVC ] authority service={service} "))
@@ -501,13 +513,34 @@ fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopS
             ));
         }
     }
+    let console_port = grant_line(
+        output,
+        &format!("[CONS] authority granted pid={console_service} port={CONSOLE}:"),
+        " rights=serve registered=1 device=write",
+        audit_at(CONSOLE),
+    )?;
+    let console_port = format!("{CONSOLE}:{console_port}");
+    let prefix = format!("[CONS] authority granted pid={app} port={console_port} rights=connect");
+    if !grant_line(output, &prefix, "", audit_at(APP))?.is_empty() {
+        return Err(format!(
+            "expected {prefix:?}, got {:?}",
+            only(output, &prefix)?
+        ));
+    }
     for prefix in [
         "[GFX ] authority granted",
         "[DISP] authority granted",
         "[SEAT] authority granted",
+        "[CONS] authority granted",
     ] {
         let count = lines(output).filter(|line| line.contains(prefix)).count();
-        let want = if prefix.starts_with("[GFX ]") { 3 } else { 1 };
+        let want = if prefix.starts_with("[GFX ]") {
+            3
+        } else if prefix.starts_with("[CONS]") {
+            2
+        } else {
+            1
+        };
         if count != want {
             return Err(format!("{count} lines {prefix:?}, expected {want}"));
         }
@@ -532,6 +565,14 @@ fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopS
         (app, "[APP ] ready".to_owned()),
     ] {
         only(output, &format!("[IPC ] console pid={pid}: {line}"))?;
+    }
+    // The app's line through its console stream: the kernel's tag, then the service's label
+    // naming the app's pid, at the start of a line of its own.
+    let greeting = format!("[CON ] pid={app}: {APP_CONSOLE_GREETING}");
+    if !output.lines().any(|line| line.trim_end() == greeting) {
+        return Err(format!(
+            "no line {greeting:?} from the app's console stream"
+        ));
     }
     Ok(DesktopSummary {
         compositor_pid: compositor,
@@ -623,7 +664,7 @@ fn position(segment: &str, needle: &str) -> Result<usize, String> {
     segment.find(needle).ok_or_else(|| format!("no {needle:?}"))
 }
 
-/// The boot: the S6c checks, init settled with seven rows, and the hooks build's resource
+/// The boot: the S6c checks, init settled with eight rows, and the hooks build's resource
 /// baseline taken with the three desktop rows' pids.
 pub(crate) fn check_baseline_boot(
     segment: &str,
@@ -1060,7 +1101,7 @@ fn check_no_display_boot(output: &str) -> Result<(), String> {
         output,
         &format!("[IPC ] console pid={init_pid}: [INIT] boot profile=base"),
     )?;
-    for service in [STORAGE, AUDIT, NETWORK, SHELL] {
+    for service in [STORAGE, AUDIT, CONSOLE, NETWORK, SHELL] {
         only(output, &format!("[SVC ] ready service={service} "))?;
     }
     Ok(())
@@ -1076,12 +1117,18 @@ mod tests {
         let mut text = format!(
             "[DISP] backend=virtio-gpu output=0 epoch=1\n\
              {DESKTOP_PROFILE}\n\
-             [KERN] init launched pid={INIT} slot=0 declared-services=7\n\
+             [KERN] init launched pid={INIT} slot=0 declared-services=8\n\
              [IPC ] console pid={INIT}: [INIT] boot profile=desktop tier=Q1\n"
         );
-        let rows: [(u32, u64, &str, &str); 7] = [
+        let rows: [(u32, u64, &str, &str); 8] = [
             (STORAGE, 2, "", "block-write-requests=0 service-reported formatted=1 store-generation=1"),
             (AUDIT, 8, "", "audit-read-through=60 audit-next=61 audit-dropped=40 service-reported first-drain-records=20"),
+            (
+                CONSOLE,
+                9,
+                "[CONS] authority granted pid=9 port=22016:9 rights=serve registered=1 device=write\n",
+                "ports=1 port-connections=0 work-sets=1 service-reported detail=0x0",
+            ),
             (NETWORK, 3, "", "raw-backend=virtio service-reported link-up=1"),
             (SHELL, 4, "", "first-console-input-wait"),
             (
@@ -1101,8 +1148,9 @@ mod tests {
             (
                 APP,
                 7,
-                "[GFX ] authority granted pid=7 port=21248:7 rights=connect\n",
-                "ports=0 port-connections=1 presenter=0 presents-submitted=0 input-consumer=0 shared-mappings=1 free-pages=88000 service-reported detail=0x0",
+                "[GFX ] authority granted pid=7 port=21248:7 rights=connect\n\
+                 [CONS] authority granted pid=7 port=22016:9 rights=connect\n",
+                "ports=0 port-connections=2 presenter=0 presents-submitted=0 input-consumer=0 shared-mappings=1 free-pages=88000 service-reported detail=0x0",
             ),
         ];
         for (service, pid, grants, observed) in rows {
@@ -1124,7 +1172,8 @@ mod tests {
         text.push_str(
             "[IPC ] console pid=5: [COMP] started output=1280x800 tier=Q1\n\
              [IPC ] console pid=6: [SHELL] ready rail=88x800 surfaces=2 dock=none tier=Q1\n\
-             [IPC ] console pid=7: [APP ] ready\n",
+             [IPC ] console pid=7: [APP ] ready\n\
+             [CON ] pid=7: playground: console stream open\n",
         );
         text.push_str(&format!("[IPC ] console pid={INIT}: {SETTLED_DESKTOP}\n"));
         text
@@ -1197,6 +1246,36 @@ mod tests {
     }
 
     #[test]
+    fn the_app_needs_its_console_grant_and_its_own_line_on_the_stream() {
+        let text = desktop_boot().replace(
+            "[CONS] authority granted pid=7 port=22016:9 rights=connect\n",
+            "",
+        );
+        assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1)
+            .unwrap_err()
+            .contains("[CONS] authority granted pid=7"));
+        let text = desktop_boot().replace(
+            "[CON ] pid=7: playground: console stream open\n",
+            "[CON ] pid=6: playground: console stream open\n",
+        );
+        assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1)
+            .unwrap_err()
+            .contains("console stream"));
+        let text = desktop_boot().replace(
+            "[CON ] pid=7: playground: console stream open\n",
+            "[IPC ] console pid=7: [CON ] pid=7: playground: console stream open\n",
+        );
+        assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1).is_err());
+        let text = desktop_boot().replace(
+            "port-connections=2 presenter=0",
+            "port-connections=1 presenter=0",
+        );
+        assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1)
+            .unwrap_err()
+            .contains("port-connections=1 instead of 2"));
+    }
+
+    #[test]
     fn no_compositor_ready_line_leaves_the_markers_pending_on_it() {
         let text: String = desktop_boot()
             .lines()
@@ -1216,8 +1295,8 @@ mod tests {
     }
 
     #[test]
-    fn the_desktop_boot_needs_seven_rows_settled_and_no_restart() {
-        let text = desktop_boot().replace("declared-services=7", "declared-services=4");
+    fn the_desktop_boot_needs_eight_rows_settled_and_no_restart() {
+        let text = desktop_boot().replace("declared-services=8", "declared-services=5");
         let mut tracker = crate::MarkerTracker::from_steps(&DESKTOP_MARKERS);
         tracker.consume(&text);
         assert!(tracker.mismatch().is_some());
@@ -1228,7 +1307,7 @@ mod tests {
         assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1)
             .unwrap_err()
             .contains("restart"));
-        let text = desktop_boot().replace("running=7", "running=6");
+        let text = desktop_boot().replace("running=8", "running=7");
         let mut tracker = crate::MarkerTracker::from_steps(&DESKTOP_MARKERS);
         assert!(!tracker.consume(&text));
     }
@@ -1237,10 +1316,11 @@ mod tests {
         format!(
             "{DESKTOP_PROFILE}\n\
              {NO_DISPLAY}\n\
-             [KERN] init launched pid={INIT} slot=0 declared-services=4\n\
+             [KERN] init launched pid={INIT} slot=0 declared-services=5\n\
              [IPC ] console pid={INIT}: [INIT] boot profile=base\n\
              [SVC ] ready service=20736 pid=2 gen=1 source=live-instance\n\
              [SVC ] ready service=21760 pid=5 gen=1 source=live-instance\n\
+             [SVC ] ready service=22016 pid=6 gen=1 source=live-instance\n\
              [SVC ] ready service=20992 pid=3 gen=1 source=live-instance\n\
              [SVC ] ready service=21504 pid=4 gen=1 source=live-instance\n\
              [IPC ] console pid={INIT}: {SETTLED_BASE}\n"
@@ -1261,7 +1341,7 @@ mod tests {
         assert!(check_no_display_boot(&shown)
             .unwrap_err()
             .contains("display was installed"));
-        let declared = text.replace("declared-services=4", "declared-services=7");
+        let declared = text.replace("declared-services=5", "declared-services=8");
         assert!(check_no_display_boot(&declared)
             .unwrap_err()
             .contains("declared desktop rows"));

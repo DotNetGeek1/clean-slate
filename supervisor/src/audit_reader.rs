@@ -323,6 +323,7 @@ const fn class_name(class: ResourceClass) -> &'static str {
         ResourceClass::Graphics => "gfx",
         ResourceClass::Display => "display",
         ResourceClass::Input => "input",
+        ResourceClass::Console => "console",
     }
 }
 

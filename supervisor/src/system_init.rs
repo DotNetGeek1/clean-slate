@@ -502,7 +502,8 @@ mod tests {
 
     use clean_slate_service_fixtures::manifest::SYSTEM_MANIFEST;
     use clean_slate_service_fixtures::{
-        AUDIT_SERVICE_ID, NETWORK_SERVICE_ID, STORAGE_SERVICE_ID, SYSTEM_SHELL_SERVICE_ID,
+        AUDIT_SERVICE_ID, CONSOLE_SERVICE_ID, NETWORK_SERVICE_ID, STORAGE_SERVICE_ID,
+        SYSTEM_SHELL_SERVICE_ID,
     };
     use clean_slate_service_lifecycle::{
         ControlRequest, ControlRequestKind, DomainId, InstanceGeneration, LifecycleEvent,
@@ -624,11 +625,12 @@ mod tests {
             Self::boot_manifest(SYSTEM_MANIFEST)
         }
 
-        /// Boots `manifest`; its audit service, which depends on nothing, reports ready at once
-        /// so that the tests below follow the other rows.
+        /// Boots `manifest`; its audit and console services, which depend on nothing, report
+        /// ready at once so that the tests below follow the other rows.
         fn boot_manifest(manifest: &'static [ServiceSpec]) -> Self {
             let mut harness = Self::boot_manifest_unready(manifest);
             harness.report(0, AUDIT_SERVICE_ID, LifecycleEventKind::Ready);
+            harness.report(0, CONSOLE_SERVICE_ID, LifecycleEventKind::Ready);
             harness
         }
 
@@ -716,22 +718,24 @@ mod tests {
     }
 
     #[test]
-    fn boot_starts_storage_and_the_audit_service_and_announces_itself() {
+    fn boot_starts_storage_and_the_audit_and_console_services_and_announces_itself() {
         let harness = Harness::boot_manifest_unready(SYSTEM_MANIFEST);
         assert_eq!(
             harness.requests(),
             [
                 (STORAGE_SERVICE_ID, ControlRequestKind::Start),
                 (AUDIT_SERVICE_ID, ControlRequestKind::Start),
+                (CONSOLE_SERVICE_ID, ControlRequestKind::Start),
             ]
         );
         assert_eq!(
-            harness.lines_with("[INIT] started pid=3 services=4").len(),
+            harness.lines_with("[INIT] started pid=3 services=5").len(),
             1
         );
         assert_eq!(harness.lines_with("[INIT] starting service=20736").len(), 1);
         assert_eq!(harness.lines_with("[INIT] starting service=21760").len(), 1);
-        for service in [STORAGE_SERVICE_ID, AUDIT_SERVICE_ID] {
+        assert_eq!(harness.lines_with("[INIT] starting service=22016").len(), 1);
+        for service in [STORAGE_SERVICE_ID, AUDIT_SERVICE_ID, CONSOLE_SERVICE_ID] {
             assert_eq!(harness.state(service), ServiceLifecycleState::Starting);
         }
         assert_eq!(
@@ -753,6 +757,7 @@ mod tests {
             [
                 (STORAGE_SERVICE_ID, ControlRequestKind::Start),
                 (AUDIT_SERVICE_ID, ControlRequestKind::Start),
+                (CONSOLE_SERVICE_ID, ControlRequestKind::Start),
                 (NETWORK_SERVICE_ID, ControlRequestKind::Start),
                 (SYSTEM_SHELL_SERVICE_ID, ControlRequestKind::Start),
             ]
@@ -769,7 +774,7 @@ mod tests {
     /// waits for the compositor's ready, the app for the shell's; the serial shell still waits
     /// for storage only.
     #[test]
-    fn the_desktop_rows_start_in_dependency_order_and_settle_at_seven() {
+    fn the_desktop_rows_start_in_dependency_order_and_settle_at_eight() {
         use clean_slate_service_fixtures::manifest::SYSTEM_DESKTOP_MANIFEST;
         use clean_slate_service_fixtures::{
             COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
@@ -781,11 +786,12 @@ mod tests {
             [
                 (STORAGE_SERVICE_ID, ControlRequestKind::Start),
                 (AUDIT_SERVICE_ID, ControlRequestKind::Start),
+                (CONSOLE_SERVICE_ID, ControlRequestKind::Start),
                 (COMPOSITOR_SERVICE_ID, ControlRequestKind::Start),
             ]
         );
         assert_eq!(
-            harness.lines_with("[INIT] started pid=3 services=7").len(),
+            harness.lines_with("[INIT] started pid=3 services=8").len(),
             1
         );
         harness.report(SECOND, COMPOSITOR_SERVICE_ID, LifecycleEventKind::Ready);
@@ -799,7 +805,7 @@ mod tests {
         );
         assert_eq!(harness.starts_of(PLAYGROUND_SERVICE_ID), 1);
         harness
-            .position_of("[INIT] service=21248 ready, service=21249 ready; starting service=21250");
+            .position_of("[INIT] service=21248 ready, service=21249 ready, service=22016 ready; starting service=21250");
         for (service, at) in [
             (PLAYGROUND_SERVICE_ID, 3),
             (STORAGE_SERVICE_ID, 3),
@@ -809,8 +815,8 @@ mod tests {
             harness.report(at * SECOND, service, LifecycleEventKind::Ready);
         }
         assert_eq!(
-            harness.lines_with("[INIT] boot settled running=7 down=0; waiting, no deadline"),
-            ["[INIT] boot settled running=7 down=0; waiting, no deadline"]
+            harness.lines_with("[INIT] boot settled running=8 down=0; waiting, no deadline"),
+            ["[INIT] boot settled running=8 down=0; waiting, no deadline"]
         );
         assert_eq!(harness.init.next_deadline(), None);
     }
@@ -855,8 +861,8 @@ mod tests {
 
         assert_eq!(harness.init.next_deadline(), None);
         assert_eq!(
-            harness.lines_with("[INIT] boot settled running=4 down=0; waiting, no deadline"),
-            ["[INIT] boot settled running=4 down=0; waiting, no deadline"]
+            harness.lines_with("[INIT] boot settled running=5 down=0; waiting, no deadline"),
+            ["[INIT] boot settled running=5 down=0; waiting, no deadline"]
         );
 
         let requests = harness.requests().len();
@@ -908,7 +914,7 @@ mod tests {
         );
         assert_eq!(
             harness.lines_with("[INIT] boot settled"),
-            ["[INIT] boot settled running=1 down=3; waiting, no deadline"]
+            ["[INIT] boot settled running=2 down=3; waiting, no deadline"]
         );
 
         let requests = harness.requests().len();
@@ -927,7 +933,7 @@ mod tests {
         assert_eq!(harness.starts_of(STORAGE_SERVICE_ID), 1);
         harness.init.on_wake(3 * SECOND, None);
         assert_eq!(
-            harness.requests()[2..],
+            harness.requests()[3..],
             [
                 (STORAGE_SERVICE_ID, ControlRequestKind::Restart),
                 (STORAGE_SERVICE_ID, ControlRequestKind::Start),
@@ -1235,7 +1241,7 @@ mod tests {
         COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
     };
 
-    const SETTLED_SEVEN: &str = "[INIT] boot settled running=7 down=0; waiting, no deadline";
+    const SETTLED_EIGHT: &str = "[INIT] boot settled running=8 down=0; waiting, no deadline";
 
     impl Harness {
         /// The desktop manifest booted with all seven rows ready and init settled, at 4 s.
@@ -1252,7 +1258,7 @@ mod tests {
             ] {
                 harness.report(at * SECOND, service, LifecycleEventKind::Ready);
             }
-            assert_eq!(harness.lines_with(SETTLED_SEVEN).len(), 1);
+            assert_eq!(harness.lines_with(SETTLED_EIGHT).len(), 1);
             harness
         }
 
@@ -1351,7 +1357,7 @@ mod tests {
                 "{generation_line}"
             );
         }
-        assert_eq!(harness.lines_with(SETTLED_SEVEN).len(), 2);
+        assert_eq!(harness.lines_with(SETTLED_EIGHT).len(), 2);
         assert_terminated_nothing_and_base_untouched(&harness);
     }
 
@@ -1375,7 +1381,7 @@ mod tests {
             harness.state(PLAYGROUND_SERVICE_ID),
             ServiceLifecycleState::Running
         );
-        assert_eq!(harness.lines_with(SETTLED_SEVEN).len(), 2);
+        assert_eq!(harness.lines_with(SETTLED_EIGHT).len(), 2);
         assert_terminated_nothing_and_base_untouched(&harness);
     }
 

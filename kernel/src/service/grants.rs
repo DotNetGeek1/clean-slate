@@ -41,6 +41,12 @@ pub(crate) trait InstanceGrantAuthority {
     fn grant_input_seat(&mut self, pid: u64) -> Result<(), &'static str>;
     /// `role` on the port of the live `Grant::GraphicsPort` instance; fails when there is none.
     fn grant_graphics_role(&mut self, pid: u64, role: GraphicsRole) -> Result<(), &'static str>;
+    /// Registers the instance's console port, grants it `CONSOLE_SERVE` there and `WRITE` on
+    /// the serial console device.
+    fn grant_console_service(&mut self, pid: u64) -> Result<(), &'static str>;
+    /// `CONSOLE_CONNECT` on the port of the live `Grant::ConsoleService` instance; fails when
+    /// there is none.
+    fn grant_console_client(&mut self, pid: u64) -> Result<(), &'static str>;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -81,7 +87,9 @@ pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
             | Grant::DisplayPresenter
             | Grant::InputSeat
             | Grant::GraphicsShellRole
-            | Grant::GraphicsAppRole => {}
+            | Grant::GraphicsAppRole
+            | Grant::ConsoleService
+            | Grant::ConsoleClient => {}
             // Applied by the Linux launch path while it builds the process.
             Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {}
         }
@@ -104,6 +112,8 @@ pub(crate) fn apply_instance_grants<A: InstanceGrantAuthority>(
             Grant::InputSeat => authority.grant_input_seat(pid),
             Grant::GraphicsShellRole => authority.grant_graphics_role(pid, GraphicsRole::Shell),
             Grant::GraphicsAppRole => authority.grant_graphics_role(pid, GraphicsRole::App),
+            Grant::ConsoleService => authority.grant_console_service(pid),
+            Grant::ConsoleClient => authority.grant_console_client(pid),
             Grant::ObjectServiceRole
             | Grant::AuditReader
             | Grant::Console
@@ -136,6 +146,8 @@ mod tests {
         DisplayPresenter(u64),
         InputSeat(u64),
         GraphicsRole(u64, GraphicsRole),
+        ConsoleService(u64),
+        ConsoleClient(u64),
     }
 
     #[derive(Default)]
@@ -211,6 +223,16 @@ mod tests {
                 GraphicsRole::Shell => Grant::GraphicsShellRole,
                 GraphicsRole::App => Grant::GraphicsAppRole,
             })
+        }
+
+        fn grant_console_service(&mut self, pid: u64) -> Result<(), &'static str> {
+            self.calls.push(Call::ConsoleService(pid));
+            self.outcome(Grant::ConsoleService)
+        }
+
+        fn grant_console_client(&mut self, pid: u64) -> Result<(), &'static str> {
+            self.calls.push(Call::ConsoleClient(pid));
+            self.outcome(Grant::ConsoleClient)
         }
     }
 
@@ -371,8 +393,27 @@ mod tests {
         );
         assert_eq!(
             calls(PLAYGROUND_SERVICE_ID),
-            [Call::GraphicsRole(7, GraphicsRole::App)]
+            [
+                Call::GraphicsRole(7, GraphicsRole::App),
+                Call::ConsoleClient(7)
+            ]
         );
+    }
+
+    #[test]
+    fn the_console_row_registers_its_port_and_gets_its_console_at_bootstrap() {
+        use clean_slate_service_fixtures::CONSOLE_SERVICE_ID;
+        let mut recorder = Recorder::default();
+        let handles = apply_both(
+            grants_for(SYSTEM_MANIFEST, CONSOLE_SERVICE_ID),
+            &mut recorder,
+        );
+        assert_eq!(
+            recorder.calls,
+            [Call::Console(7), Call::ConsoleService(7)],
+            "bootstrap grants first, then the instance grants"
+        );
+        assert_eq!(handles.console, Some(0xc0e5));
     }
 
     /// The first failing grant stops the row and is named, so the caller rolls the whole

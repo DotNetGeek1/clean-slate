@@ -77,7 +77,7 @@ const READER_POLLS_SETTLE: Duration = Duration::from_secs(3);
 const RESET_ERROR: &str = "wget: error getting response: Connection reset by peer";
 const HOOKS_BANNER: &str =
     "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service";
-const SETTLED: &str = "[INIT] boot settled running=4 down=0; waiting, no deadline";
+const SETTLED: &str = "[INIT] boot settled running=5 down=0; waiting, no deadline";
 /// How many denials the flood step asks for: well past the budget, so most are lost.
 const AUDIT_FLOOD_DENIALS: u64 = 100;
 /// `clean_slate_capability::AUDIT_HOLDER_BUDGET`, the records one holder keeps in the audit
@@ -183,7 +183,7 @@ struct State {
 /// The kernel's launch audit for a network instance must be exactly the row's grants.
 fn expected_network_authority(pid: u64) -> String {
     format!(
-        "[SVC ] authority service={NETWORK_SERVICE} pid={pid} lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1"
+        "[SVC ] authority service={NETWORK_SERVICE} pid={pid} lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1"
     )
 }
 
@@ -231,7 +231,7 @@ fn check_network_instance(
 }
 
 /// The boot: the hooks build's banner, network generation 1, the first shell, the audit service
-/// and init settled with all four services running.
+/// and init settled with all five services running.
 fn check_boot_segment(segment: &str) -> Result<State, String> {
     if !lines(segment).any(|line| line.contains(HOOKS_BANNER)) {
         return Err(format!("no {HOOKS_BANNER:?}: this is not the hooks build"));
@@ -769,7 +769,7 @@ mod tests {
             "{HOOKS_BANNER}\n\
              [KERN] serial console input on vector=0x31\n\
              [KERN] boot profile=base\n\
-             [KERN] init launched pid={INIT} slot=0 declared-services=4\n\
+             [KERN] init launched pid={INIT} slot=0 declared-services=5\n\
              [IPC ] console pid={INIT}: [INIT] boot profile=base\n\
              [SVC ] launch service=21760 pid={AUDIT} gen=1\n\
              {}\
@@ -856,7 +856,7 @@ mod tests {
     fn the_boot_must_be_the_hooks_build_and_settled() {
         let error = check_boot_segment(&boot().replace(HOOKS_BANNER, "")).unwrap_err();
         assert!(error.contains("not the hooks build"), "{error}");
-        assert!(check_boot_segment(&boot().replace("running=4", "running=3")).is_err());
+        assert!(check_boot_segment(&boot().replace("running=5", "running=4")).is_err());
         assert!(check_boot_segment(&boot().replace("service=21760", "service=21761")).is_err());
         let wrong_audit = boot().replace("raw-net-link=1", "raw-net-link=0");
         assert!(check_boot_segment(&wrong_audit)

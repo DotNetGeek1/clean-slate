@@ -355,10 +355,16 @@ fn main() {
     emit_selftest_timer_wait_cfg();
     emit_bump_allocator_cfg();
     emit_userspace_spawn_cfg();
-    // Init and the audit service are embedded only in the build that launches them.
+    // Init, the audit service and the console service are embedded only in the build that
+    // launches them.
     if system_init {
         embed_userspace_image("init_userspace.bin", "clean-slate-supervisor-init", true);
         embed_userspace_image("audit_userspace.bin", "clean-slate-audit-userspace", true);
+        embed_userspace_image(
+            "console_userspace.bin",
+            "clean-slate-console-userspace",
+            true,
+        );
     }
     let m6_fixture_self_test = env::var("CARGO_FEATURE_M6_PROCESS_CONTROL_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M6_DELEGATION_SELF_TEST").is_ok()
@@ -644,6 +650,7 @@ fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
         | "clean-slate-m6-fixture-userspace" => {
             ("clean-slate-supervisor", "core,compiler_builtins")
         }
+        "clean-slate-console-userspace" => ("clean-slate-console", "core,compiler_builtins"),
         "clean-slate-storage-userspace" => ("clean-slate-store", "core,alloc,compiler_builtins"),
         "clean-slate-network-userspace" => {
             ("clean-slate-net-service", "core,alloc,compiler_builtins")
@@ -709,6 +716,7 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
             "recovery_userspace.bin" => ("recovery_userspace_entry.rs", "RECOVERY_SUPERVISOR"),
             "init_userspace.bin" => ("init_userspace_entry.rs", "INIT_USERSPACE"),
             "audit_userspace.bin" => ("audit_userspace_entry.rs", "AUDIT_USERSPACE"),
+            "console_userspace.bin" => ("console_userspace_entry.rs", "CONSOLE_USERSPACE"),
             "storage_userspace.bin" => ("storage_userspace_entry.rs", "STORAGE_USERSPACE"),
             "m6_fixture_userspace.bin" => ("m6_fixture_userspace_entry.rs", "M6_FIXTURE_USERSPACE"),
             "network_userspace.bin" => ("network_userspace_entry.rs", "NETWORK_USERSPACE"),

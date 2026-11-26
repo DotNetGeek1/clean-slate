@@ -15,6 +15,7 @@ on:
       - "net-service/**"
       - "network/**"
       - "playground/**"
+      - "console/**"
       - "port/**"
       - "runtime/**"
       - "raster/**"
@@ -48,6 +49,7 @@ on:
       - "net-service/**"
       - "network/**"
       - "playground/**"
+      - "console/**"
       - "port/**"
       - "runtime/**"
       - "raster/**"
@@ -145,6 +147,9 @@ jobs:
       - name: Clippy (playground)
         run: cargo clippy -p clean-slate-playground --all-targets -- -D warnings
 
+      - name: Clippy (console)
+        run: cargo clippy -p clean-slate-console --all-targets -- -D warnings
+
       - name: Clippy (desktop-shell)
         run: cargo clippy -p clean-slate-desktop-shell --all-targets -- -D warnings
 
@@ -176,6 +181,7 @@ jobs:
             cargo clippy -p clean-slate-compositor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           done
           cargo clippy -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
+          cargo clippy -p clean-slate-console --bin clean-slate-console-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-desktop-shell --bin clean-slate-desktop-shell-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-store --bin clean-slate-storage-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-net-service --bin clean-slate-network-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
@@ -192,7 +198,7 @@ jobs:
 
       # Every kernel build embeds the storage and network ELFs (kernel/build.rs), including
       # clippy, the bare kernel build, and host tests below; the featureless build (the default
-      # image, also the host tests) embeds init and the audit service as well. The M4 supervisor
+      # image, also the host tests) embeds init, the audit service and the console service as well. The M4 supervisor
       # and recovery self-tests embed their supervisor ELFs, and the M6 fixture self-tests (with
       # m7-net-caps, m9-linux-fs, m9-userspace, m10-port and m10-shared-buffer) the M6 fixture.
       - name: Build embedded userspace images
@@ -204,6 +210,7 @@ jobs:
           for bin in clean-slate-supervisor-init clean-slate-audit-userspace clean-slate-supervisor-userspace clean-slate-supervisor-recovery-userspace clean-slate-m6-fixture-userspace; do
             cargo build -p clean-slate-supervisor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
           done
+          cargo build -p clean-slate-console --bin clean-slate-console-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
 
       # Every kernel feature set xtask builds needs a line here: `cargo test -p xtask` fails
       # (ci_coverage) when one is missing.
@@ -326,6 +333,7 @@ jobs:
           cargo test -p clean-slate-runtime
           cargo test -p clean-slate-compositor
           cargo test -p clean-slate-playground
+          cargo test -p clean-slate-console
           cargo test -p clean-slate-desktop-shell
           cargo test -p clean-slate-linux-abi
           cargo test -p clean-slate-elf

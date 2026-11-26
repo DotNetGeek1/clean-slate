@@ -42,6 +42,10 @@ impl Rights {
     pub const DISPLAY_PRESENT: Self = Self(1 << 18);
     /// Drain the kernel normalised raw input queue.
     pub const INPUT_CONSUME: Self = Self(1 << 19);
+    /// Open a console stream on the console service's port (#310).
+    pub const CONSOLE_CONNECT: Self = Self(1 << 20);
+    /// Serve the console port (recv/post/disconnect).
+    pub const CONSOLE_SERVE: Self = Self(1 << 21);
 
     const ALL_KNOWN: u32 = (1 << 0)
         | (1 << 1)
@@ -62,7 +66,9 @@ impl Rights {
         | (1 << 16)
         | (1 << 17)
         | (1 << 18)
-        | (1 << 19);
+        | (1 << 19)
+        | (1 << 20)
+        | (1 << 21);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -151,6 +157,10 @@ impl Rights {
             ),
             ResourceClass::Display => Self(Self::DISPLAY_PRESENT.0 | Self::INSPECT.0),
             ResourceClass::Input => Self(Self::INPUT_CONSUME.0 | Self::INSPECT.0),
+            // `WRITE` is on the serial device only, and `READ` is reserved for its input.
+            ResourceClass::Console => {
+                Self(Self::CONSOLE_CONNECT.0 | Self::CONSOLE_SERVE.0 | Self::READ.0 | Self::WRITE.0)
+            }
         }
     }
 
@@ -165,13 +175,15 @@ impl Rights {
             ResourceClass::SharedBuffer => Self(Self::WRITE.0 | Self::DELEGATE.0 | Self::REVOKE.0),
             // Raw NIC authority is granted by the kernel to the live network service only.
             ResourceClass::Network => Self::NET_RAW_DEVICE,
+            // Serving the port and driving the serial device are the console service's alone.
+            ResourceClass::Console => Self(Self::CONSOLE_SERVE.0 | Self::READ.0 | Self::WRITE.0),
             _ => Self::empty(),
         }
     }
 
     /// Lowercase, pipe-separated names in deterministic bit order.
     pub fn write_names(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        const NAMES: [(&str, u32); 20] = [
+        const NAMES: [(&str, u32); 22] = [
             ("read", 1 << 0),
             ("write", 1 << 1),
             ("inspect", 1 << 2),
@@ -192,6 +204,8 @@ impl Rights {
             ("gfx_serve", 1 << 17),
             ("display_present", 1 << 18),
             ("input_consume", 1 << 19),
+            ("console_connect", 1 << 20),
+            ("console_serve", 1 << 21),
         ];
         let mut first = true;
         for (name, bit) in NAMES {
