@@ -232,7 +232,7 @@ impl Session {
                 major: PROTOCOL_MAJOR,
                 minor: PROTOCOL_MINOR,
             },
-            features: Features(0),
+            features: Features(Features::TEXT_INPUT),
         };
         self.phase = Phase::Hello;
         self.send(host, &hello, None)
@@ -260,7 +260,11 @@ impl Session {
             return Outcome::Continue;
         }
         match (self.phase, *event) {
-            (Phase::Hello, Event::Welcome { .. }) => self.register(host, BufferSlot(0)),
+            (Phase::Hello, Event::Welcome { features, .. }) => {
+                self.app
+                    .use_text_events(features.contains(Features(Features::TEXT_INPUT)));
+                self.register(host, BufferSlot(0))
+            }
             (Phase::Registering(slot), Event::BufferRegistered { buffer }) => {
                 self.slots[slot.index()].id = Some(buffer);
                 match slot.0 {
@@ -402,6 +406,8 @@ impl Session {
                 modifiers,
                 ..
             } => self.app.key(usage, state, modifiers),
+            Event::Text { text, .. } => self.app.text_input(text.as_str()),
+            Event::KeyRepeat { usage, .. } => self.app.key_repeat(usage),
             Event::ModifiersChanged { modifiers } => self.app.modifiers_changed(modifiers),
             Event::PointerEnter { surface, x, y, .. } if Some(surface) == self.surface => {
                 self.app.pointer_motion(point(x, y));

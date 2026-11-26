@@ -122,6 +122,12 @@ fn event_body_layout_tiles_with_spec_fields() {
         (super::OP_POINTER_BUTTON, &[(12, 27)]),
         (super::OP_POINTER_AXIS, &[(12, 28)]),
         (super::OP_INPUT_RESET, &[]),
+        // Text: serial, time_ns, len; the UTF-8 run 28..64 is checked against `len` at decode.
+        (super::OP_TEXT, &[(12, 16), (16, 24), (24, 25), (28, 64)]),
+        (
+            super::OP_KEY_REPEAT,
+            &[(12, 16), (16, 24), (24, 26), (28, 30)],
+        ),
     ];
     for (op, fields) in cases {
         assert_tiles_12_64(fields, &spec_pads(*op, EVENT_SPECS));

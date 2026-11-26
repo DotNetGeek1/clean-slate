@@ -2,7 +2,9 @@
 
 use crate::geometry::{Fixed24_8, Scale120, Size};
 use crate::ids::{ClientBufferId, ObjectId, OutputId, Serial, SurfaceId, WindowId};
-use crate::input::{AxisValue120, KeyState, KeyUsage, Modifiers, PointerButton};
+use crate::input::{
+    AxisValue120, KeyState, KeyUsage, Modifiers, PointerButton, TextRun, TEXT_RUN_MAX_BYTES,
+};
 use crate::mode::{DisplayMode, OutputInfo};
 use crate::pixel::PixelFormat;
 use crate::window::{DecorationMode, WindowStates};
@@ -94,6 +96,21 @@ pub enum Event {
     },
     /// `InputReset` (0x8060): reset input state.
     InputReset,
+    /// `Text` (0x8100, `TEXT_INPUT`): text typed into the focused surface. Follows the `Key`
+    /// press or `KeyRepeat` that produced it and carries the same serial.
+    Text {
+        serial: Serial,
+        time_ns: u64,
+        text: TextRun,
+    },
+    /// `KeyRepeat` (0x8101, `TEXT_INPUT`): the compositor repeated a held key. The key is
+    /// still pressed; a `Key` release ends it.
+    KeyRepeat {
+        serial: Serial,
+        time_ns: u64,
+        usage: KeyUsage,
+        modifiers: Modifiers,
+    },
 }
 
 impl Event {
@@ -118,6 +135,8 @@ impl Event {
             Self::PointerButton { .. } => OP_POINTER_BUTTON,
             Self::PointerAxis { .. } => OP_POINTER_AXIS,
             Self::InputReset => OP_INPUT_RESET,
+            Self::Text { .. } => OP_TEXT,
+            Self::KeyRepeat { .. } => OP_KEY_REPEAT,
         }
     }
 
@@ -246,6 +265,17 @@ impl Event {
                 write_i32_le(&mut out, 24, horizontal.0);
             }
             Self::InputReset => {}
+            Self::Text {
+                serial,
+                time_ns,
+                text,
+            } => Self::encode_text_body(&mut out, serial, time_ns, &text)?,
+            Self::KeyRepeat {
+                serial,
+                time_ns,
+                usage,
+                modifiers,
+            } => Self::encode_key_repeat_body(&mut out, serial, time_ns, usage, modifiers)?,
         }
         Ok(out)
     }
@@ -342,6 +372,10 @@ impl Event {
                 horizontal: AxisValue120(read_i32_le(bytes, 24)),
             },
             OP_INPUT_RESET => Self::InputReset,
+            OP_TEXT => Self::decode_text_body(bytes).map_err(|c| decode_error(c, bytes))?,
+            OP_KEY_REPEAT => {
+                Self::decode_key_repeat_body(bytes).map_err(|c| decode_error(c, bytes))?
+            }
             _ => return Err(decode_error(ProtocolError::UnknownOpcode, bytes)),
         };
         Ok(Tagged { tag, message })
@@ -525,6 +559,76 @@ impl Event {
         Ok(Self::ModifiersChanged { modifiers })
     }
 }
+
+impl Event {
+    fn encode_text_body(
+        out: &mut [u8; FRAME_BYTES],
+        serial: Serial,
+        time_ns: u64,
+        text: &TextRun,
+    ) -> Result<(), ProtocolError> {
+        serial_required_event(serial.0)?;
+        write_u32_le(out, 12, serial.0);
+        write_u64_le(out, 16, time_ns);
+        out[24] = text.len() as u8;
+        out[TEXT_OFFSET..TEXT_OFFSET + text.len()].copy_from_slice(text.as_bytes());
+        Ok(())
+    }
+
+    fn decode_text_body(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let serial = serial_required_event(read_u32_le(bytes, 12))?;
+        let len = usize::from(bytes[24]);
+        if len == 0 || len > TEXT_RUN_MAX_BYTES {
+            return Err(ProtocolError::MalformedFrame);
+        }
+        check_range_zero(bytes, TEXT_OFFSET + len, FRAME_BYTES)?;
+        let text = TextRun::from_utf8(&bytes[TEXT_OFFSET..TEXT_OFFSET + len])
+            .ok_or(ProtocolError::MalformedFrame)?;
+        Ok(Self::Text {
+            serial,
+            time_ns: read_u64_le(bytes, 16),
+            text,
+        })
+    }
+
+    fn encode_key_repeat_body(
+        out: &mut [u8; FRAME_BYTES],
+        serial: Serial,
+        time_ns: u64,
+        usage: KeyUsage,
+        modifiers: Modifiers,
+    ) -> Result<(), ProtocolError> {
+        serial_required_event(serial.0)?;
+        if !usage.is_valid() {
+            return Err(ProtocolError::MalformedFrame);
+        }
+        Modifiers::from_bits(modifiers.bits()).ok_or(ProtocolError::ReservedBitsSet)?;
+        write_u32_le(out, 12, serial.0);
+        write_u64_le(out, 16, time_ns);
+        write_u16_le(out, 24, usage.0);
+        write_u16_le(out, 28, modifiers.bits());
+        Ok(())
+    }
+
+    fn decode_key_repeat_body(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let serial = serial_required_event(read_u32_le(bytes, 12))?;
+        let usage = KeyUsage(read_u16_le(bytes, 24));
+        if !usage.is_valid() {
+            return Err(ProtocolError::MalformedFrame);
+        }
+        let modifiers =
+            Modifiers::from_bits(read_u16_le(bytes, 28)).ok_or(ProtocolError::ReservedBitsSet)?;
+        Ok(Self::KeyRepeat {
+            serial,
+            time_ns: read_u64_le(bytes, 16),
+            usage,
+            modifiers,
+        })
+    }
+}
+
+/// First UTF-8 byte of a `Text` body.
+const TEXT_OFFSET: usize = 28;
 
 fn required_id(raw: u32) -> Result<ObjectId, ProtocolError> {
     decode_object_required(raw)

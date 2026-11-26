@@ -655,3 +655,21 @@ fn a_compositor_that_ended_mid_send_is_compositor_gone() {
     );
     assert_eq!(exit_reason(Outcome::Exit(ExitReason::NoPixels)), "failed");
 }
+
+#[test]
+fn with_text_events_printable_keys_type_only_from_text() {
+    let mut app = app(QualityTier::Q1);
+    app.use_text_events(true);
+    tap(&mut app, KeyUsage(0x04), none());
+    assert_eq!(app.text(), "", "the Key alone types nothing");
+    app.text_input("a");
+    app.text_input("B");
+    app.text_input(" ");
+    assert_eq!(app.text(), "aB", "space activates here, so it is not typed");
+    app.key_repeat(KEY_BACKSPACE);
+    assert_eq!(app.text(), "a");
+    app.key_repeat(KeyUsage(0x04));
+    assert_eq!(app.text(), "a", "printable repeats arrive as Text");
+    tap(&mut app, KEY_BACKSPACE, none());
+    assert_eq!(app.text(), "", "Backspace still edits from the Key");
+}

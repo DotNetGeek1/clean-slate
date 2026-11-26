@@ -160,6 +160,9 @@ pub struct Playground {
     key_held: bool,
     presses: u32,
     text: TypedText,
+    /// The compositor sends `Text` and `KeyRepeat` (#309); printable keys are then typed from
+    /// `Text` instead of the local US table.
+    text_events: bool,
 }
 
 const NO_MODIFIERS: Modifiers = match Modifiers::from_bits(0) {
@@ -187,6 +190,7 @@ impl Playground {
             key_held: false,
             presses: 0,
             text: Line::new(),
+            text_events: false,
         }
     }
 
@@ -359,8 +363,31 @@ impl Playground {
             self.text.pop();
         } else if usage == KEY_ESCAPE {
             self.text.clear();
+        } else if self.text_events {
+            // Printable keys arrive as `Text`.
         } else if let Some(byte) = keys::ascii(usage, modifiers) {
             self.text.push(byte);
+        }
+    }
+
+    /// The compositor negotiated text input: type from `Text` from now on.
+    pub fn use_text_events(&mut self, on: bool) {
+        self.text_events = on;
+    }
+
+    /// `Text` (#309): appends its printable ASCII. Space is the activate key here, so a typed
+    /// space is not added; other characters this line cannot hold are dropped.
+    pub fn text_input(&mut self, text: &str) {
+        for byte in text.bytes().filter(|b| *b != b' ') {
+            self.text.push(byte);
+        }
+    }
+
+    /// `KeyRepeat` (#309): a held Backspace keeps deleting. Printable repeats arrive as
+    /// `Text`, and the controls do not repeat-activate.
+    pub fn key_repeat(&mut self, usage: KeyUsage) {
+        if usage == KEY_BACKSPACE {
+            self.text.pop();
         }
     }
 

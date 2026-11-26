@@ -174,17 +174,33 @@ fn hello_establishes_and_welcomes_with_negotiated_version_and_features() {
         Admission::Welcome {
             tag: 0xA5A5_0001,
             version: version(1, 0),
-            features: Features(0),
+            features: Features(Features::TEXT_INPUT),
         }
     );
     assert_eq!(
         phase,
         ConnectionPhase::Established {
             version: version(1, 0),
+            features: Features(Features::TEXT_INPUT),
+        }
+    );
+    assert_eq!(
+        phase.negotiated(),
+        Some((version(1, 0), Features(Features::TEXT_INPUT)))
+    );
+}
+
+#[test]
+fn hello_without_text_input_negotiates_no_features() {
+    let mut phase = ConnectionPhase::new();
+    assert_eq!(
+        phase.admit(&hello_frame(1, 0, 0, 3)),
+        Admission::Welcome {
+            tag: 3,
+            version: version(1, 0),
             features: Features(0),
         }
     );
-    assert_eq!(phase.negotiated(), Some((version(1, 0), Features(0))));
 }
 
 #[test]

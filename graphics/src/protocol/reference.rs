@@ -221,5 +221,27 @@
 //! | 24 | 4 | `horizontal` i32 |
 //! | 28..64 | — | static padding |
 //!
+//! ## `Text` (`0x8100`, `TEXT_INPUT`, object must be 0)
+//!
+//! | Off | W | Field |
+//! |---|---|---|
+//! | 12 | 4 | `serial` u32 (the producing `Key` or `KeyRepeat`) |
+//! | 16 | 8 | `time_ns` u64 |
+//! | 24 | 1 | `len` u8, `1..=36` |
+//! | 25..28 | — | static padding |
+//! | 28 | `len` | UTF-8, no control characters |
+//! | 28+`len`..64 | — | padding, checked against `len` |
+//!
+//! ## `KeyRepeat` (`0x8101`, `TEXT_INPUT`, object must be 0)
+//!
+//! | Off | W | Field |
+//! |---|---|---|
+//! | 12 | 4 | `serial` u32 |
+//! | 16 | 8 | `time_ns` u64 |
+//! | 24 | 2 | `usage` u16 |
+//! | 26..28 | — | static padding |
+//! | 28 | 2 | `modifiers` u16 |
+//! | 30..64 | — | static padding |
+//!
 //! Empty-body events (`BufferRegistered`, `BufferReleased`, `BufferUnregistered`, `SurfaceCreated`,
 //! `WindowCreated`, `CloseRequested`, `KeyboardFocus`, `InputReset`): 12..64 static padding; see §3.1 for object rules.

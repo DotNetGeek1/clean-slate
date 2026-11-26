@@ -38,6 +38,49 @@ pub(crate) const EXPECTED_INPUT: [&str; 3] = [
     "clicks=1 magenta=1 presses=1 text=a",
 ];
 
+/// #309: after `a`, the lane holds `s` for [`HELD_KEY_HOLD`]. The press logs `text=as` with
+/// `presses=2`, and every compositor repeat adds an `s` without a press, so each repeat logs one
+/// more line. The 64-byte console line cuts the text after `ass`, so the lane counts lines
+/// rather than reading the run; printing coalesces a burst, so the count is a lower bound.
+pub(crate) const HELD_KEY_INPUT: &str = "clicks=1 magenta=1 presses=2 text=a";
+/// How long the lane holds `s`: twice the compositor's 500 ms repeat delay.
+pub(crate) const HELD_KEY_HOLD: std::time::Duration = std::time::Duration::from_millis(1_000);
+/// Repeats the hold must produce at least (about 15 are due at 30 per second).
+pub(crate) const HELD_KEY_MIN_REPEATS: usize = 3;
+
+/// True for an app input line logged while `s` was held (its text may be cut short).
+pub(crate) fn is_held_key_line(line: &str) -> bool {
+    line.strip_prefix(HELD_KEY_INPUT)
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b == b's'))
+}
+
+/// The app 1 lines after [`EXPECTED_INPUT`]: the press (`text=as`), then at least
+/// [`HELD_KEY_MIN_REPEATS`] repeat lines, and nothing else.
+pub(crate) fn check_held_key(lines: &[&str]) -> Result<(), String> {
+    let press = format!("{HELD_KEY_INPUT}s");
+    match lines.first() {
+        Some(first) if *first == press => {}
+        other => {
+            return Err(format!(
+                "the press of `s` should log {press:?} first, got {other:?}"
+            ))
+        }
+    }
+    if let Some(line) = lines.iter().find(|line| !is_held_key_line(line)) {
+        return Err(format!(
+            "{line:?} is not a held-`s` line ({HELD_KEY_INPUT}s...)"
+        ));
+    }
+    let repeats = lines.len() - 1;
+    if repeats < HELD_KEY_MIN_REPEATS {
+        return Err(format!(
+            "holding `s` for {HELD_KEY_HOLD:?} logged {repeats} repeats, expected at least \
+             {HELD_KEY_MIN_REPEATS}: {lines:?}"
+        ));
+    }
+    Ok(())
+}
+
 /// The lane's two machines.
 const RUNS: [LaneRun; 2] = [
     LaneRun {
@@ -135,6 +178,28 @@ mod tests {
     use clean_slate_graphics::Rect;
     use clean_slate_ui::layout::RectExt;
     use clean_slate_ui::{ChromeControl, ChromeStyle, QualityTier};
+
+    #[test]
+    fn held_key_lines_are_the_press_then_enough_repeats() {
+        let line = |n: usize| format!("{HELD_KEY_INPUT}{}", "s".repeat(n));
+        // What the console shows: the text is cut after `ass`.
+        let owned = [line(1), line(2), line(2), line(2)];
+        let good: Vec<&str> = owned.iter().map(String::as_str).collect();
+        assert_eq!(check_held_key(&good), Ok(()));
+        assert!(check_held_key(&good[..3]).is_err(), "too few repeats");
+        assert!(check_held_key(&good[1..]).is_err(), "no press line");
+        let other = [
+            line(1),
+            line(2),
+            line(2),
+            "clicks=2 magenta=1 presses=2 text=as".to_owned(),
+        ];
+        let other: Vec<&str> = other.iter().map(String::as_str).collect();
+        assert!(check_held_key(&other).is_err());
+        assert!(check_held_key(&[]).is_err(), "the hold must be logged");
+        assert!(is_held_key_line(&line(2)));
+        assert!(!is_held_key_line(HELD_KEY_INPUT));
+    }
 
     fn dragged(tier: QualityTier) -> Point {
         let first = window_origin(tier, 0);

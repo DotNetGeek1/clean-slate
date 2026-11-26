@@ -4,9 +4,9 @@
 
 use clean_slate_graphics::geometry::{Fixed24_8, Point, Rect, Size};
 use clean_slate_graphics::ids::{Serial, WindowId};
-use clean_slate_graphics::input::{KeyState, Modifiers, PointerButton};
+use clean_slate_graphics::input::{KeyState, KeyUsage, Modifiers, PointerButton, TextRun};
 use clean_slate_graphics::limits::{MAX_SURFACES, MAX_SURFACES_PER_CLIENT, MAX_SURFACE_EXTENT};
-use clean_slate_graphics::protocol::{Event, ProtocolError};
+use clean_slate_graphics::protocol::{Event, Features, ProtocolError};
 use clean_slate_graphics::role::SurfaceRole;
 use clean_slate_graphics::window::{WindowConfig, WindowStates};
 use clean_slate_native_abi::ConnectionId;
@@ -245,6 +245,7 @@ impl<P: WindowPolicy> Compositor<P> {
             return;
         }
         self.wm.focus = new;
+        self.repeater.stop();
         if let Some(old) = old {
             self.post_event(old.connection, Event::KeyboardFocus { surface: None });
             self.send_activation(old, false);
@@ -386,6 +387,69 @@ impl<P: WindowPolicy> Compositor<P> {
 
     // ---- seat routing ----------------------------------------------------------------------
 
+    /// True when `connection` negotiated `TEXT_INPUT` (#309): it gets `Text` and `KeyRepeat`.
+    fn wants_text(&self, connection: ConnectionId) -> bool {
+        self.slot_of(connection).is_some_and(|slot| {
+            self.clients[slot]
+                .features()
+                .contains(Features(Features::TEXT_INPUT))
+        })
+    }
+
+    /// `Text` for a press or repeat of `usage`, if the layout types anything for it.
+    fn post_text(
+        &mut self,
+        connection: ConnectionId,
+        serial: Serial,
+        time_ns: u64,
+        usage: KeyUsage,
+        modifiers: Modifiers,
+    ) {
+        let Some(text) = self
+            .config
+            .layout
+            .text(usage, modifiers)
+            .and_then(TextRun::from_char)
+        else {
+            return;
+        };
+        self.post_event(
+            connection,
+            Event::Text {
+                serial,
+                time_ns,
+                text,
+            },
+        );
+    }
+
+    /// Sends the held key's repeat to the focused client when it is due at `now_ns`: a
+    /// `KeyRepeat` with the current modifiers, then its `Text`.
+    pub(super) fn fire_repeat(&mut self, now_ns: u64) {
+        let Some((usage, tick)) = self.repeater.due(now_ns, self.config.repeat) else {
+            return;
+        };
+        let Some(focus) = self.wm.focus else {
+            self.repeater.stop();
+            return;
+        };
+        let Some(serial) = self.mint(focus.connection) else {
+            self.repeater.stop();
+            return;
+        };
+        let modifiers = self.seat.modifiers();
+        self.post_event(
+            focus.connection,
+            Event::KeyRepeat {
+                serial,
+                time_ns: tick,
+                usage,
+                modifiers,
+            },
+        );
+        self.post_text(focus.connection, serial, tick, usage, modifiers);
+    }
+
     fn mint(&mut self, connection: ConnectionId) -> Option<Serial> {
         let slot = self.slot_of(connection)?;
         Some(self.clients[slot].minter.mint())
@@ -518,8 +582,12 @@ impl<P: WindowPolicy> Compositor<P> {
                 modifiers,
             } => {
                 let Some(focus) = self.wm.focus else {
+                    self.repeater.stop();
                     return;
                 };
+                let text_input = self.wants_text(focus.connection);
+                let (clock, repeat) = (self.input_clock_ns, self.config.repeat);
+                self.repeater.key(usage, state, clock, text_input, repeat);
                 let Some(serial) = self.mint(focus.connection) else {
                     return;
                 };
@@ -533,6 +601,9 @@ impl<P: WindowPolicy> Compositor<P> {
                         modifiers,
                     },
                 );
+                if text_input && state == KeyState::Pressed {
+                    self.post_text(focus.connection, serial, time_ns, usage, modifiers);
+                }
             }
             SeatEvent::ModifiersChanged { modifiers } => {
                 if let Some(focus) = self.wm.focus {
@@ -690,6 +761,7 @@ impl<P: WindowPolicy> Compositor<P> {
     /// then `ModifiersChanged` (the seat rule); a different pointer-focus client gets
     /// `InputReset`.
     fn reset_input(&mut self, modifiers: Modifiers) {
+        self.repeater.stop();
         self.wm.grab = None;
         self.wm.control_press = None;
         if let Some(capture) = self.wm.capture.take() {

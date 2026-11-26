@@ -63,6 +63,7 @@ Items marked **(planned)** are fixed in shape but not implemented; their owning 
 - **Launch bootstrap (P5, #118).** The adapter reads the [launch page](#desktop-118) and finds its `Graphics{GFX_SERVE}`, `Display` and `Input` handles with each `FIND_HANDLE`. The page's tier selects `Q0` or `Q1`, and its console handle carries the `[COMP]`, `[WIN ]` and `[INPT]` diagnostics.
 - **Window management (#115).** Policy lives in `compositor::wm` (state, pure geometry) and `compositor/src/compositor/routing.rs` (transitions). `WindowPolicy` supplies placement, the `ChromeStyle` and the cursor; `DefaultPolicy` uses `clean-slate-ui` (`CLEAN_SLATE_DARK`, `ARROW`, `ShellZones::window_area`). Rules:
   - *Focus.* Click-to-focus with raise. A newly shown toplevel takes focus only when nothing is focused or the focused window belongs to the same connection; otherwise the focused window stays on top (no focus stealing). When the focused window is hidden, destroyed or its client exits, focus moves to the topmost visible toplevel. Focus changes send `KeyboardFocus`, `ModifiersChanged` and a `Configure` toggling `ACTIVATED`, and damage only the chrome strips. There is no client focus request.
+  - *Text input and key repeat (#309).* For a focused client that negotiated `TEXT_INPUT`, a key press is followed by `Text` when `Config::layout` types something, and the newest held key that repeats is re-sent as `KeyRepeat` (plus its `Text`) after `Config::repeat.delay_ns`, then every `interval_ns` (defaults 500 ms and 30 per second; interval 0 turns repeat off). The repeat deadline joins the loop's wait deadline only while a key is held, so an idle desktop still blocks with none. A late wake sends one repeat, not a burst. Release, another key press, a focus change and `InputReset` stop it.
   - *Seat routing.* Keys go only to the focused client. Pointer events go to the surface under the pointer (input region aware), or to the capturing surface while a button pressed on it is held. `Overflow` ends every gesture and sends `InputReset` then `ModifiersChanged` to the focused client.
   - *Decorations.* Server-side for toplevels: title-bar press starts a move grab, border or resize-margin press starts a resize grab, Close press-and-release posts `CloseRequested` (Minimise and Maximise are reserved no-ops in M10).
   - *Move and resize.* A move only changes the scene origin (no client repaint), keeping `MIN_VISIBLE` pixels and the title bar on the output; all arithmetic is `i64` and saturating. A resize sends `Configure` with the size clamped to the client's limits and the output; a left or top resize keeps the opposite edge fixed when the client commits. Client `BeginMove` / `BeginResize` must quote the live press serial the client received on that window, still held and captured.
@@ -75,7 +76,7 @@ Items marked **(planned)** are fixed in shape but not implemented; their owning 
 
 - **Authority.** One `Graphics{GFX_CONNECT}` capability (found with `FIND_HANDLE` for the launch page's `graphics_resource_id`) and the two buffers it allocates. No `Display`, `Input` or framebuffer access.
 - **Window.** A fixed 520x360 `Toplevel` (`SetSizeLimits` min = max) titled `System Playground`, opaque `Xrgb8888` at every tier with an opaque region covering it. It draws no title bar or frame; chrome belongs to the window manager.
-- **Input.** Only events the compositor routes to its connection: `KeyboardFocus`, `Key`, `ModifiersChanged`, pointer enter/leave/motion/button, `InputReset`, and `Configure` `ACTIVATED`.
+- **Input.** Only events the compositor routes to its connection: `KeyboardFocus`, `Key`, `Text` and `KeyRepeat` (it asks for `TEXT_INPUT`, #309; printable keys come from `Text`, a held Backspace keeps deleting), `ModifiersChanged`, pointer enter/leave/motion/button, `InputReset`, and `Configure` `ACTIVATED`.
 - **Rendering.** The panel is a pure function of a `View` snapshot. An event's damage is the set of regions whose view changed, and a damaged repaint is byte-identical to a full repaint (host-tested at Q0 and Q1).
 - **Buffers.** Two buffers, never written while busy (#110 release rule). Each buffer keeps the regions it is missing. A change with neither buffer free waits for `BufferReleased`. Commits use `request_frame = false` and never wait for `FrameDone`.
 - **Idle.** No timers. The binary blocks in `RECV_EVENT`, and an event that changes nothing visible sends nothing.
@@ -611,10 +612,18 @@ Protocol version `1.0` (`PROTOCOL_MAJOR`, `PROTOCOL_MINOR`); `M10_SERVER_FEATURE
 | keyboard | — | `KeyboardFocus` 0x8040, `Key` 0x8041, `ModifiersChanged` 0x8042 |
 | pointer | — | `PointerEnter` 0x8050, `PointerLeave` 0x8051, `PointerMotion` 0x8052, `PointerButton` 0x8053, `PointerAxis` 0x8054 |
 | seat | — | `InputReset` 0x8060 |
+| text input (`TEXT_INPUT`) | — | `Text` 0x8100, `KeyRepeat` 0x8101 (0x8102 reserved for preedit) |
 
 Per-frame limits: `Damage` carries at most `DAMAGE_RECTS_PER_FRAME` (5) `BufferRect`s and the region requests at most `REGION_RECTS_PER_FRAME` (3) `Rect`s; larger sets use several requests before one `Commit`. `SetTitle` carries a `WindowTitle` of at most `MAX_TITLE_BYTES` (40) bytes of UTF-8, truncated on a character boundary by the encoder. `Commit` carries `request_frame`, `color_space` and an optional configure `ack`.
 
 **Input events** are raw and focus-routed by the compositor: `Key` carries a HID usage (`KeyUsage`, page 0x07) and `KeyState`, not text. Clients never name the surface that receives input; they receive `KeyboardFocus`, `PointerEnter` and `PointerLeave` for their own surfaces only, with surface-local `Fixed24_8` positions. `Key`, `PointerEnter`, `PointerLeave` and `PointerButton` carry a `Serial` from the connection's minter (move, resize and future popup grabs quote it); `Key`, `PointerMotion`, `PointerButton` and `PointerAxis` carry a monotonic `time_ns`. `Key` also carries the current `Modifiers`.
+
+**Text input (#309).** A client that wants typed text sets `Features::TEXT_INPUT` in `Hello`. The compositor owns the keyboard layout (`graphics::keymap`, US first) and key repeat, so every app gets the same text for the same keys; a client that does not ask (a game) keeps raw `Key` events only and gets no repeats.
+
+- `Text` (0x8100): `serial` u32 @12, `time_ns` u64 @16, `len` u8 @24 (1..=36), 25..28 zero, UTF-8 @28 (`len` bytes, the rest zero; `TextRun`, no control characters). It follows the `Key` press or `KeyRepeat` that produced it, carries the same serial, and goes only to the focused surface's client.
+- Text is printable characters only. Enter, Tab, Backspace, Escape, Delete, arrows, navigation and function keys produce none, and nothing is typed while Ctrl, Alt or Super is held: the client maps those from `Key` and `Modifiers`, so no keystroke reaches it twice. Caps Lock changes letters only; keypad digits need Num Lock (Shift inverts it).
+- `KeyRepeat` (0x8101): `serial` u32 @12, `time_ns` u64 @16, `usage` u16 @24, 26..28 zero, `modifiers` u16 @28 (Key's offsets without the state byte). The compositor repeats the most recently pressed key that repeats (`keymap::repeats`: not modifiers or lock keys) after a delay, at a rate; a `Text` follows each repeat that types. Repeat stops on that key's release, on another key press, on a focus change and on `InputReset`.
+- Dead keys and compose will use a preedit event at 0x8102; it decodes as `UnknownOpcode` today.
 
 **Negotiation.** `Hello { version, features }` must be the first request; `Welcome` replies with the negotiated version and features and the output (`OutputInfo`: id, mode, logical size). `negotiate`:
 
@@ -820,11 +829,11 @@ None collides with `NETWORK_STATUS_PENDING` (`u64::MAX - 15`). Capability failur
 
 - **Version.** `ProtocolVersion { major, minor }`, 1.0 in M10. A major bump is incompatible and rejected at `Hello`. A minor bump may only add opcodes inside the reserved ranges below, and the server may use them only when the negotiated minor allows it.
 - **Opcodes.** In 1.0 every reserved or unassigned opcode decodes to `UnknownOpcode` (recoverable). Core growth: requests `0x0002..=0x000F` and unused holes in `0x0010..=0x00FF`; events `0x8003..=0x800F` (`0x8003` is earmarked for `OutputChanged` when `MAX_OUTPUTS > 1`) and unused holes in `0x8010..=0x80FF`. Unassigned: `0x0700..=0x7FFF` and `0x8700..=0xFFFF`.
-- **Features.** `Features(u64)`; `Features::KNOWN` = `0x3F` (the OR of `Features::TEXT_INPUT` … `Features::SUBSURFACES`). The M10 compositor offers `Features(0)`, so every feature below is negotiated off and its opcodes are `UnknownOpcode`. The bit assignments and opcode ranges are frozen in `graphics::protocol`.
+- **Features.** `Features(u64)`; `Features::KNOWN` = `0x3F` (the OR of `Features::TEXT_INPUT` … `Features::SUBSURFACES`). The compositor offers `TEXT_INPUT` (#309) and nothing else, so every other feature below is negotiated off. Opcodes of a feature not negotiated are never sent. The bit assignments and opcode ranges are frozen in `graphics::protocol`.
 
 | Bit | Feature | Opcodes (request / event) | Future content |
 |---|---|---|---|
-| `1 << 0` | text input | `0x0100..=0x01FF` / `0x8100..=0x81FF` | text commit and preedit, enable and disable (IME) |
+| `1 << 0` | text input | `0x0100..=0x01FF` / `0x8100..=0x81FF` | `Text` 0x8100 and `KeyRepeat` 0x8101 (#309); later preedit, enable and disable (IME) |
 | `1 << 1` | presentation detail | `0x0200..=0x02FF` / `0x8200..=0x82FF` | detailed presentation feedback |
 | `1 << 2` | relative pointer | `0x0300..=0x03FF` / `0x8300..=0x83FF` | relative motion, pointer lock |
 | `1 << 3` | fractional scale | `0x0400..=0x04FF` / `0x8400..=0x84FF` | preferred-scale event; `Scale120` ≠ 120 |

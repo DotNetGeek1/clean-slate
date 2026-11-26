@@ -34,6 +34,7 @@ pub mod diag;
 pub mod fake;
 pub mod input;
 pub mod present;
+pub mod repeat;
 pub mod scene;
 pub mod trace;
 pub mod wm;
@@ -41,6 +42,7 @@ pub mod wm;
 pub use compositor::{
     Compositor, Config, Io, Iteration, OutputDamage, ServiceError, Stats, WaitPlan, UNSOLICITED_TAG,
 };
+pub use repeat::{KeyRepeater, RepeatConfig};
 pub use scene::SurfaceKey;
 pub use wm::{DefaultPolicy, WindowPolicy, WmHit};
 
