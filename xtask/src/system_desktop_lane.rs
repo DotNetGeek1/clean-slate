@@ -9,14 +9,15 @@
 //! 3. **The M10 script**, closed loop (#240): every pointer move waits for the compositor's
 //!    `[INPT] pointer settled` at the target, and every button edge for its `[INPT] button` line
 //!    with the expected position and hit, before the next input is sent. Increment, toggle, a
-//!    background click, key `a` (delivered by focus), a title-bar drag and the close control.
+//!    background click, key `a` (delivered by focus), `s` held for a second so the compositor
+//!    repeats it and stops at the release (#309), a title-bar drag and the close control.
 //! 4. **App closed** and 5. **app fault** (`0x1F`): init brings the app back, and after a fault
 //!    not before about half a second (D2).
 //! 6. **Desktop shell fault** (`0x1E`): the app keeps its pid and a click still reaches it.
 //! 7. **Compositor fault** (`0x1D`) and 8. **input after its restart**: a click reaches the new
 //!    app through the re-bound seat.
 //! 9. **Whole transcript**: launch counts per row, one `[PROC] fault` per injected fault, the
-//!    first app's input lines, where each app window was created, and every `[IDLE ] quiet`
+//!    first app's input lines (ending with the held key's growing `s` run), where each app window was created, and every `[IDLE ] quiet`
 //!    stretch with `presents=0`.
 //!
 //! Screendumps are taken once the guest has reported a quiet stretch since the last input and
@@ -30,7 +31,8 @@ use clean_slate_graphics::Point;
 use clean_slate_ui::{ChromeControl, ChromeStyle};
 
 use crate::m10_desktop_lane::{
-    motion_chunks, validate_captures, PlannedCapture, BACKGROUND_POINT, DRAG, EXPECTED_INPUT,
+    check_held_key, held_key_count, motion_chunks, validate_captures, PlannedCapture,
+    BACKGROUND_POINT, DRAG, EXPECTED_INPUT, HELD_KEY_HOLD, HELD_KEY_MIN_REPEATS,
 };
 use crate::m10_desktop_visual::{center, chrome, frame_rect, panel, translate, window_origin};
 use crate::m10_desktop_visual::{Scene, OUTPUT};
@@ -498,11 +500,15 @@ fn check_whole(transcript: &str, first_app: u64, created: &[Point]) -> Result<()
             line.strip_prefix(&format!("[IPC ] console pid={first_app}: {APP_INPUT}"))
         })
         .collect();
-    if first_input != EXPECTED_INPUT {
+    if first_input.len() < EXPECTED_INPUT.len()
+        || first_input[..EXPECTED_INPUT.len()] != EXPECTED_INPUT
+    {
         return Err(format!(
-            "the first app logged {first_input:?}, expected {EXPECTED_INPUT:?}"
+            "the first app logged {first_input:?}, expected {EXPECTED_INPUT:?} then the held key"
         ));
     }
+    check_held_key(&first_input[EXPECTED_INPUT.len()..])
+        .map_err(|reason| format!("the first app's held key: {reason}"))?;
     let windows: Vec<Point> = lines(transcript)
         .filter_map(|line| line.find("[WIN ] created ").map(|at| &line[at..]))
         .filter_map(|line| {
@@ -515,6 +521,64 @@ fn check_whole(transcript: &str, first_app: u64, created: &[Point]) -> Result<()
     if windows != created {
         return Err(format!(
             "app windows created at {windows:?}, expected {created:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// #309: holds `s` (focus is still app 1) long enough for the compositor to repeat it, then
+/// checks the repeats stop with the release.
+fn hold_key(lane: &mut Lane) -> Result<(), XtaskError> {
+    println!("\n[STD ] step: held key");
+    let prefix = format!("[IPC ] console pid={}: {APP_INPUT}", lane.app_pid());
+    let held = |segment: &str| -> Option<usize> {
+        lines(segment)
+            .filter_map(|line| line.strip_prefix(prefix.as_str()))
+            .filter_map(held_key_count)
+            .max()
+    };
+    lane.session.mark();
+    lane.session.input(
+        "hold s",
+        &[InputAction::Key {
+            qcode: QCode::S,
+            down: true,
+        }],
+    )?;
+    std::thread::sleep(HELD_KEY_HOLD);
+    lane.session.input(
+        "release s",
+        &[InputAction::Key {
+            qcode: QCode::S,
+            down: false,
+        }],
+    )?;
+    let repeated = lane.session.wait(
+        "held key",
+        STEP_TIMEOUT,
+        &mut |segment| match held(segment) {
+            Some(count) if count > HELD_KEY_MIN_REPEATS => Ok(count),
+            other => Err(format!(
+                "holding `s` logged {other:?} `s`, expected more than {HELD_KEY_MIN_REPEATS}"
+            )),
+        },
+    )?;
+    // A repeat already in flight at the release may still print; then nothing may.
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = lane
+        .session
+        .poll("held key settles", Duration::from_millis(1), &mut |_| {
+            Err::<(), _>(String::new())
+        })?;
+    lane.session.mark();
+    let after = lane.session.poll(
+        "no repeat after release",
+        Duration::from_secs(1),
+        &mut |segment| held(segment).ok_or_else(String::new),
+    )?;
+    if let Ok(count) = after {
+        return lane.fail(format!(
+            "`s` kept repeating after its release ({repeated} then {count})"
         ));
     }
     Ok(())
@@ -560,6 +624,7 @@ fn drive(lane: &mut Lane) -> Result<Vec<Point>, XtaskError> {
     lane.session.input("key a", &InputAction::tap(QCode::A))?;
     lane.await_app_input("key a", EXPECTED_INPUT[2])?;
     lane.capture("input", Some(first))?;
+    hold_key(lane)?;
 
     let grip = center(chrome.title_bar_rect(frame_rect(tier, first)));
     lane.move_to("drag", grip)?;

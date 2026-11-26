@@ -391,9 +391,8 @@ impl<P: WindowPolicy> Compositor<P> {
     fn wants_text(&self, connection: ConnectionId) -> bool {
         self.slot_of(connection).is_some_and(|slot| {
             self.clients[slot]
-                .phase
-                .negotiated()
-                .is_some_and(|(_, f)| f.contains(Features(Features::TEXT_INPUT)))
+                .features()
+                .contains(Features(Features::TEXT_INPUT))
         })
     }
 

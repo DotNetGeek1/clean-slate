@@ -69,6 +69,8 @@ impl KeyRepeater {
         config: RepeatConfig,
     ) {
         match state {
+            // A duplicate press of the armed key keeps its timer.
+            KeyState::Pressed if self.held() == Some(usage) => {}
             KeyState::Pressed if keymap::repeats(usage) => {
                 self.armed = (may_repeat && config.enabled()).then_some(Armed {
                     usage,
@@ -176,6 +178,14 @@ mod tests {
             Some(B),
             "releasing the older key keeps the newer one"
         );
+    }
+
+    #[test]
+    fn a_duplicate_press_keeps_the_timer() {
+        let mut r = KeyRepeater::new();
+        r.key(A, KeyState::Pressed, 0, true, CFG);
+        r.key(A, KeyState::Pressed, 300 * MS, true, CFG);
+        assert_eq!(r.deadline(), Some(500 * MS));
     }
 
     #[test]

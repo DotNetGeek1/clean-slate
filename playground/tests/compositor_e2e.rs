@@ -17,7 +17,7 @@ use clean_slate_compositor::fake::{
     FakeInput, FakeSharedMemory, ScriptedWaiter, WAIT_WOULD_BLOCK_FOREVER,
 };
 use clean_slate_compositor::{
-    Compositor, Config, DefaultPolicy, Io, ServiceError, SurfaceKey, WindowPolicy,
+    Compositor, Config, DefaultPolicy, Io, RepeatConfig, ServiceError, SurfaceKey, WindowPolicy,
 };
 use clean_slate_graphics::fake::FakeDisplay;
 use clean_slate_graphics::geometry::{Point, Rect, Scale120};
@@ -130,7 +130,12 @@ impl Host for Link<'_> {
 
 impl World {
     fn new() -> Self {
-        let mut comp = Box::new(Compositor::new(DefaultPolicy::new(), Config::DEFAULT));
+        // A held key would repeat at once: the scripted waiter jumps to every deadline.
+        let config = Config {
+            repeat: RepeatConfig::OFF,
+            ..Config::DEFAULT
+        };
+        let mut comp = Box::new(Compositor::new(DefaultPolicy::new(), config));
         let mut display = Box::new(FakeDisplay::new(mode()).expect("display"));
         comp.start(&mut *display).expect("start");
         Self {
@@ -577,11 +582,15 @@ fn damage_sent_is_limited_to_changed_regions() {
         let before = app.session.stats();
         world.type_key(&mut app, KeyState::Pressed);
         let after = app.session.stats();
-        assert_eq!(after.commits, before.commits + 1);
+        assert_eq!(
+            after.commits,
+            before.commits + 2,
+            "the Key, then its Text (#309)"
+        );
         assert_eq!(
             after.damage_rects - before.damage_rects,
             3,
-            "keycap, key line, text line"
+            "keycap and key line, then text line"
         );
         let changed = [layout.keycap, layout.key_line, layout.text_line];
         let area: u64 = changed

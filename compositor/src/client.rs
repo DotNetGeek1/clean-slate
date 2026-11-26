@@ -6,7 +6,7 @@ use clean_slate_graphics::ids::{ClientBufferId, Serial, SurfaceId, WindowId};
 use clean_slate_graphics::limits::{CLIENT_EVENT_QUEUE_DEPTH, MAX_BUFFERS_PER_CLIENT};
 use clean_slate_graphics::objects::{GlobalBudget, ObjectTable};
 use clean_slate_graphics::pixel::BufferLayout;
-use clean_slate_graphics::protocol::{DisconnectReason, Event, Tagged};
+use clean_slate_graphics::protocol::{DisconnectReason, Event, Features, Tagged};
 use clean_slate_graphics::surface::{ConnectionBufferTracker, SurfaceState};
 use clean_slate_graphics::window::{ConfigureState, SerialMinter, WindowConfig, WindowTitle};
 use clean_slate_native_abi::ConnectionId;
@@ -186,6 +186,13 @@ pub struct ClientSlot {
 }
 
 impl ClientSlot {
+    /// Features negotiated at `Hello`; empty before it.
+    pub fn features(&self) -> Features {
+        self.phase
+            .negotiated()
+            .map_or(Features(0), |(_, features)| features)
+    }
+
     pub const fn new() -> Self {
         Self {
             identity: None,

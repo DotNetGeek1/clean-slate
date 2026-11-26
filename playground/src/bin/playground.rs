@@ -22,7 +22,7 @@ use clean_slate_playground::launch::{PlaygroundBootstrap, BOOTSTRAP_ADDRESS};
 use clean_slate_playground::{diag, ExitReason, Outcome, Session};
 use clean_slate_runtime::console::{Console, ConsoleStream};
 use clean_slate_runtime::port::{Deadline, Wait};
-use clean_slate_runtime::{process, Kernel, Syscalls};
+use clean_slate_runtime::{process, Error, Kernel, Syscalls};
 use clean_slate_ui::QualityTier;
 
 const SYSCALL_NR_DISPLAY: u64 = 18;
@@ -85,17 +85,34 @@ fn run(boot: &PlaygroundBootstrap, session: &mut Session, tier: QualityTier) {
         let mut announced = false;
         let mut summary = diag::Summary::of(session.app());
         let mut focus = diag::Focus::default();
+        let mut queued = None;
         while outcome == Outcome::Continue {
-            let event = match client.next_event(Wait::FOREVER) {
-                Ok(event) => event,
-                Err(error) => {
-                    outcome = Outcome::Exit(ExitReason::HostFailed(error));
-                    break;
-                }
+            let event = match queued.take() {
+                Some(event) => event,
+                None => match client.next_event(Wait::FOREVER) {
+                    Ok(event) => event,
+                    Err(error) => {
+                        outcome = Outcome::Exit(ExitReason::HostFailed(error));
+                        break;
+                    }
+                },
             };
             outcome = session.handle(&event, &mut client);
             if !session.is_running() {
                 continue;
+            }
+            // Report once per burst: a key's `Text` (#309) follows its `Key`, and the lane
+            // reads one state line per keystroke.
+            match client.next_event(Wait::No) {
+                Ok(event) => {
+                    queued = Some(event);
+                    continue;
+                }
+                Err(Error::WouldBlock) => {}
+                Err(error) => {
+                    outcome = Outcome::Exit(ExitReason::HostFailed(error));
+                    break;
+                }
             }
             if !announced {
                 announced = true;

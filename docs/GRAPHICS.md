@@ -76,7 +76,7 @@ Items marked **(planned)** are fixed in shape but not implemented; their owning 
 
 - **Authority.** One `Graphics{GFX_CONNECT}` capability (found with `FIND_HANDLE` for the launch page's `graphics_resource_id`) and the two buffers it allocates. No `Display`, `Input` or framebuffer access.
 - **Window.** A fixed 520x360 `Toplevel` (`SetSizeLimits` min = max) titled `System Playground`, opaque `Xrgb8888` at every tier with an opaque region covering it. It draws no title bar or frame; chrome belongs to the window manager.
-- **Input.** Only events the compositor routes to its connection: `KeyboardFocus`, `Key`, `ModifiersChanged`, pointer enter/leave/motion/button, `InputReset`, and `Configure` `ACTIVATED`.
+- **Input.** Only events the compositor routes to its connection: `KeyboardFocus`, `Key`, `Text` and `KeyRepeat` (it asks for `TEXT_INPUT`, #309; printable keys come from `Text`, a held Backspace keeps deleting), `ModifiersChanged`, pointer enter/leave/motion/button, `InputReset`, and `Configure` `ACTIVATED`.
 - **Rendering.** The panel is a pure function of a `View` snapshot. An event's damage is the set of regions whose view changed, and a damaged repaint is byte-identical to a full repaint (host-tested at Q0 and Q1).
 - **Buffers.** Two buffers, never written while busy (#110 release rule). Each buffer keeps the regions it is missing. A change with neither buffer free waits for `BufferReleased`. Commits use `request_frame = false` and never wait for `FrameDone`.
 - **Idle.** No timers. The binary blocks in `RECV_EVENT`, and an event that changes nothing visible sends nothing.
