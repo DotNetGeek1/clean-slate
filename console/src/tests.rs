@@ -13,10 +13,9 @@ impl SerialDevice for Device {
         if self.fail {
             return Err(1);
         }
-        assert_eq!(
-            line.last(),
-            Some(&b'\n'),
-            "a device write is one whole line"
+        assert!(
+            !line[..line.len() - 1].contains(&b'\n'),
+            "a device write is at most one line"
         );
         assert!(line.len() <= CONSOLE_DEVICE_WRITE_MAX);
         self.lines.push(line.to_vec());
@@ -171,14 +170,14 @@ fn the_label_fits_the_largest_pid() {
 }
 
 #[test]
-fn a_partial_line_is_written_when_its_writer_closes_or_reads() {
+fn a_partial_line_is_written_open_when_its_writer_reads_and_ended_when_it_closes() {
     let mut h = Harness::new();
     h.handle(write(1, 4, b"# "));
     h.handle(read(1, 4, 16, true));
-    assert_eq!(h.device.text(), ["pid=4: # \n"]);
+    assert_eq!(h.device.text(), ["pid=4: # "]);
     h.handle(write(1, 4, b"bye"));
     h.handle(record(RecvKind::ClientExited, 1, 4, [0; PORT_FRAME_BYTES]));
-    assert_eq!(h.device.text(), ["pid=4: # \n", "pid=4: bye\n"]);
+    assert_eq!(h.device.text(), ["pid=4: # ", "pid=4: bye\n"]);
     assert_eq!(h.core.open_streams(), 0);
     assert_eq!(h.core.stats().streams_closed, 1);
 }
@@ -304,4 +303,16 @@ fn a_device_failure_is_counted_and_the_line_dropped() {
     h.handle(write(1, 4, b"kept\n"));
     assert_eq!(h.device.text(), ["pid=4: kept\n"]);
     assert_eq!(h.core.stats().device_failures, 1);
+}
+
+#[test]
+fn an_idle_service_shows_every_partial_line_open_once() {
+    let mut h = Harness::new();
+    h.handle(write(1, 4, b"# "));
+    h.handle(write(2, 5, b"a\nb"));
+    h.core.idle(&mut h.device);
+    h.core.idle(&mut h.device);
+    assert_eq!(h.device.text(), ["pid=5: a\n", "pid=4: # ", "pid=5: b"]);
+    h.handle(write(1, 4, b"ls\n"));
+    assert_eq!(h.device.text()[3], "pid=4: ls\n");
 }

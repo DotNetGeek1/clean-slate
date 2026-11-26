@@ -863,6 +863,13 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
             .map(|index| self.connections[index].port)
     }
 
+    /// How many of the connection's requests the server has not received yet. Its send-space
+    /// key is woken as each is received.
+    pub fn undelivered_requests(&self, connection: u64) -> Result<u16, PortError> {
+        self.connection_index(connection)
+            .map(|index| self.connections[index].outstanding)
+    }
+
     #[cfg(test)]
     pub(crate) fn set_connection_generation_for_test(&mut self, index: usize, generation: u32) {
         self.connections[index].generation = generation;

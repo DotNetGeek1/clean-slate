@@ -73,7 +73,10 @@ fn write(raw_handle: u64, buffer: u64, len: u64) -> u64 {
     if copy_from_user(&mut bytes[..len], buffer).is_err() {
         return STATUS_EINVAL;
     }
-    crate::diagnostics::serial::serial_write_console_device(&bytes[..len]);
+    crate::diagnostics::serial::serial_write_console_device(
+        crate::diagnostics::serial::ConsoleWriter::Service,
+        &bytes[..len],
+    );
     len as u64
 }
 

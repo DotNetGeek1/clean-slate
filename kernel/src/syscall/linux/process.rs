@@ -157,6 +157,10 @@ mod enabled {
         request: &LinuxSyscallRequest,
         ctx: &mut LinuxSyscallContext<'_>,
     ) -> LinuxSyscallResult {
+        #[cfg(clean_slate_system_init)]
+        if let Some(blocked) = crate::service::console_stream::drain_before_exit(request, ctx) {
+            return blocked;
+        }
         let status = exit_status_from_linux(request.args[0]);
         let pid = ctx.pid;
         let id = ProcId {

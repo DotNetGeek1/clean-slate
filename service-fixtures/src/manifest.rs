@@ -257,9 +257,11 @@ pub const SYSTEM_SHELL_SPEC: ServiceSpec = ServiceSpec {
         Grant::ConsoleInput,
         Grant::TmpObjects,
         Grant::NetworkClient,
+        Grant::ConsoleClient,
     ],
     restart: SHELL_RESTART,
-    depends_on: &[STORAGE_SERVICE_ID],
+    // The console service carries the shell's output (#310).
+    depends_on: &[STORAGE_SERVICE_ID, CONSOLE_SERVICE_ID],
     slot_allowance: None,
     memory_pages: 0,
 };
@@ -295,9 +297,9 @@ pub const CONSOLE_SERVICE_SPEC: ServiceSpec = ServiceSpec {
 pub const SYSTEM_MANIFEST: &[ServiceSpec] = &[
     STORAGE_SERVICE_SPEC,
     NETWORK_SERVICE_SPEC,
+    CONSOLE_SERVICE_SPEC,
     SYSTEM_SHELL_SPEC,
     AUDIT_SERVICE_SPEC,
-    CONSOLE_SERVICE_SPEC,
 ];
 
 const _: () = assert!(validate_manifest(SYSTEM_MANIFEST).is_ok());
@@ -373,9 +375,9 @@ pub const PLAYGROUND_SERVICE_SPEC: ServiceSpec = ServiceSpec {
 pub const SYSTEM_DESKTOP_MANIFEST: &[ServiceSpec] = &[
     STORAGE_SERVICE_SPEC,
     NETWORK_SERVICE_SPEC,
+    CONSOLE_SERVICE_SPEC,
     SYSTEM_SHELL_SPEC,
     AUDIT_SERVICE_SPEC,
-    CONSOLE_SERVICE_SPEC,
     COMPOSITOR_SERVICE_SPEC,
     DESKTOP_SHELL_SERVICE_SPEC,
     PLAYGROUND_SERVICE_SPEC,
@@ -572,7 +574,7 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
 /// Linux-personality grants go only to Linux rows, and Linux rows hold nothing else: the native
 /// grants are applied through the native bootstrap page or service registration. `Console` is
 /// shared with the desktop, audit and console images, and `ConsoleClient` with the desktop
-/// images; each graphics, display, input, audit and console-service grant has one image.
+/// images and the Linux shell, whose output goes through the console service (#310); each graphics, display, input, audit and console-service grant has one image.
 const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
     match grant {
         Grant::ObjectServiceRole => matches!(image, ServiceImage::Storage),
@@ -589,7 +591,7 @@ const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
             ) || image.is_desktop()
         }
         Grant::ConsoleService => matches!(image, ServiceImage::Console),
-        Grant::ConsoleClient => image.is_desktop(),
+        Grant::ConsoleClient => image.is_desktop() || matches!(image, ServiceImage::LinuxShell),
         Grant::AuditReader => matches!(image, ServiceImage::Audit),
         Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
             matches!(image, ServiceImage::LinuxShell)
@@ -754,9 +756,9 @@ mod tests {
     }
 
     #[test]
-    fn system_manifest_declares_storage_network_shell_audit_then_console() {
+    fn system_manifest_declares_storage_network_console_shell_then_audit() {
         let ids: Vec<u32> = SYSTEM_MANIFEST.iter().map(|spec| spec.id.0).collect();
-        assert_eq!(ids, [0x5100, 0x5200, 0x5400, 0x5500, 0x5600]);
+        assert_eq!(ids, [0x5100, 0x5200, 0x5600, 0x5400, 0x5500]);
         assert_eq!(validate_manifest(SYSTEM_MANIFEST), Ok(()));
     }
 
@@ -823,7 +825,8 @@ mod tests {
     }
 
     #[test]
-    fn shell_row_holds_console_stdin_tmp_and_network_client_and_waits_for_storage_only() {
+    fn shell_row_holds_console_stdin_tmp_network_and_console_client_and_waits_for_storage_and_console(
+    ) {
         let shell = find_service(SYSTEM_MANIFEST, SYSTEM_SHELL_SERVICE_ID).unwrap();
         assert_eq!(shell.image, ServiceImage::LinuxShell);
         assert_eq!(shell.mode, 0);
@@ -833,10 +836,11 @@ mod tests {
                 Grant::Console,
                 Grant::ConsoleInput,
                 Grant::TmpObjects,
-                Grant::NetworkClient
+                Grant::NetworkClient,
+                Grant::ConsoleClient
             ]
         );
-        assert_eq!(shell.depends_on, [STORAGE_SERVICE_ID]);
+        assert_eq!(shell.depends_on, [STORAGE_SERVICE_ID, CONSOLE_SERVICE_ID]);
         assert_eq!(
             shell.restart,
             RestartSpec::OnExitUntilUnready {
@@ -1060,7 +1064,7 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            [0x5100, 0x5200, 0x5400, 0x5500, 0x5600, 0x5300, 0x5301, 0x5302]
+            [0x5100, 0x5200, 0x5600, 0x5400, 0x5500, 0x5300, 0x5301, 0x5302]
         );
         assert_eq!(SYSTEM_DESKTOP_MANIFEST[..5], *SYSTEM_MANIFEST);
         assert_eq!(validate_manifest(SYSTEM_DESKTOP_MANIFEST), Ok(()));
@@ -1174,8 +1178,12 @@ mod tests {
             Err(ManifestError::ConsoleClientWithoutServiceDependency { row: 1 })
         );
         assert_eq!(
-            validate_manifest(&[row(8, ServiceImage::LinuxShell, &[Grant::ConsoleClient])]),
+            validate_manifest(&[row(8, ServiceImage::Audit, &[Grant::ConsoleClient])]),
             Err(ManifestError::GrantNotSupportedByImage { row: 0 })
+        );
+        assert_eq!(
+            validate_manifest(&[row(8, ServiceImage::LinuxShell, &[Grant::ConsoleClient])]),
+            Err(ManifestError::ConsoleClientWithoutServiceDependency { row: 0 })
         );
     }
 

@@ -273,6 +273,11 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
         NoDecision(LOOKUP),
     ),
     (
+        "service/console_stream.rs",
+        "connect_capability",
+        NoDecision(LOOKUP),
+    ),
+    (
         "service/input_syscall.rs",
         "find_handle",
         NoDecision(LOOKUP),
@@ -306,6 +311,11 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
         "service/port.rs",
         "connection_port_key",
         NoDecision("maps a connection to its port"),
+    ),
+    (
+        "service/port.rs",
+        "undelivered_requests",
+        NoDecision("counts a connection's queued requests"),
     ),
     ("service/port.rs", "find_handle", Records),
     ("service/port.rs", "serve_port_key", Records),

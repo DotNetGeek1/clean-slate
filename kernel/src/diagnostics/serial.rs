@@ -65,17 +65,30 @@ pub(crate) struct SerialLineState {
     pub(crate) console_line_open: bool,
 }
 
+/// Who writes console-device bytes.
+#[cfg(any(test, clean_slate_system_init))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConsoleWriter {
+    /// The console service (syscall 25): each write starts a line of its own.
+    Service,
+    /// The kernel's echo of typed input: it continues a console line left open, such as the
+    /// prompt the service wrote, and otherwise starts a line of its own.
+    Echo,
+}
+
 /// Renders a console-device write (#310) for a line in `state`, through `emit`. Every line the
-/// device starts begins with [`CONSOLE_LINE_TAG`]. A write that finds someone else's line open
-/// ends it first, and a write that finds the device's own line open continues it, so the tag is
+/// device starts begins with [`CONSOLE_LINE_TAG`]. A write that finds a line open ends it first,
+/// unless it is [`ConsoleWriter::Echo`] and the open line is the device's own, so the tag is
 /// always at the start of a line and nothing the device writes can start a line without it.
 #[cfg(any(test, clean_slate_system_init))]
 pub(crate) fn render_console_device_bytes(
     state: &mut SerialLineState,
+    writer: ConsoleWriter,
     bytes: &[u8],
     mut emit: impl FnMut(u8),
 ) {
-    let mut at_start = if state.console_line_open && !state.at_line_start {
+    let continues = writer == ConsoleWriter::Echo && state.console_line_open;
+    let mut at_start = if continues && !state.at_line_start {
         false
     } else {
         if !state.at_line_start {
@@ -94,17 +107,17 @@ pub(crate) fn render_console_device_bytes(
     state.console_line_open = !at_start;
 }
 
-/// Writes `bytes` from the console device (syscall 25) as one record, tagged per line by
+/// Writes `bytes` from the console device as one record, tagged per line by
 /// [`render_console_device_bytes`].
 #[cfg(any(test, clean_slate_system_init))]
 #[cfg_attr(test, allow(dead_code))]
-pub(crate) fn serial_write_console_device(bytes: &[u8]) {
+pub(crate) fn serial_write_console_device(writer: ConsoleWriter, bytes: &[u8]) {
     let write = || {
         let mut state = SerialLineState {
             at_line_start: AT_LINE_START.load(Ordering::Relaxed),
             console_line_open: CONSOLE_LINE_OPEN.load(Ordering::Relaxed),
         };
-        render_console_device_bytes(&mut state, bytes, serial_write_byte);
+        render_console_device_bytes(&mut state, writer, bytes, serial_write_byte);
         CONSOLE_LINE_OPEN.store(state.console_line_open, Ordering::Relaxed);
     };
     #[cfg(not(test))]
@@ -167,8 +180,12 @@ mod tests {
     use std::vec::Vec;
 
     fn render(state: &mut SerialLineState, bytes: &[u8]) -> Vec<u8> {
+        render_as(state, ConsoleWriter::Service, bytes)
+    }
+
+    fn render_as(state: &mut SerialLineState, writer: ConsoleWriter, bytes: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
-        render_console_device_bytes(state, bytes, |byte| out.push(byte));
+        render_console_device_bytes(state, writer, bytes, |byte| out.push(byte));
         out
     }
 
@@ -197,9 +214,9 @@ mod tests {
     }
 
     #[test]
-    fn the_devices_own_open_line_is_continued() {
+    fn echo_continues_the_devices_open_line_and_the_service_does_not() {
         let mut state = FRESH;
-        assert_eq!(render(&mut state, b"# "), b"[CON ] # ");
+        assert_eq!(render(&mut state, b"pid=6: # "), b"[CON ] pid=6: # ");
         assert_eq!(
             state,
             SerialLineState {
@@ -207,7 +224,28 @@ mod tests {
                 console_line_open: true,
             }
         );
-        assert_eq!(render(&mut state, b"ls\n[M4  ]"), b"ls\n[CON ] [M4  ]");
+        assert_eq!(
+            render_as(&mut state, ConsoleWriter::Echo, b"ls\r\n[M4  ]"),
+            b"ls\r\n[CON ] [M4  ]"
+        );
         assert!(state.console_line_open);
+        assert_eq!(render(&mut state, b"pid=6: x\n"), b"\n[CON ] pid=6: x\n");
+    }
+
+    #[test]
+    fn echo_on_a_line_someone_else_left_open_starts_a_tagged_line() {
+        let mut state = SerialLineState {
+            at_line_start: false,
+            console_line_open: false,
+        };
+        assert_eq!(
+            render_as(&mut state, ConsoleWriter::Echo, b"[M4  ] PASS\r\n"),
+            b"\n[CON ] [M4  ] PASS\r\n"
+        );
+        let mut state = FRESH;
+        assert_eq!(
+            render_as(&mut state, ConsoleWriter::Echo, b"\r\n[M4  ] PASS"),
+            b"[CON ] \r\n[CON ] [M4  ] PASS"
+        );
     }
 }

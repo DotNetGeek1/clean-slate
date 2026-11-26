@@ -414,11 +414,17 @@ where
     fn emit_start_line(&mut self, spec: &ServiceSpec) -> Result<(), ConvergedSupervisorError> {
         let mut line = LineBuffer::new();
         let mut result = write!(line, "[INIT] ");
+        // `service=A,B ready; starting service=C`: one line names every dependency and still
+        // fits one console message.
         for (index, dependency) in spec.depends_on.iter().enumerate() {
-            let separator = if index == 0 { "" } else { ", " };
-            result = result.and(write!(line, "{separator}service={} ready", dependency.0));
+            let separator = if index == 0 { "service=" } else { "," };
+            result = result.and(write!(line, "{separator}{}", dependency.0));
         }
-        let separator = if spec.depends_on.is_empty() { "" } else { "; " };
+        let separator = if spec.depends_on.is_empty() {
+            ""
+        } else {
+            " ready; "
+        };
         result = result.and(writeln!(line, "{separator}starting service={}", spec.id.0));
         result.map_err(|_| ConvergedSupervisorError::UnknownService)?;
         self.supervisor.emit_diagnostic(line.as_str())
@@ -724,8 +730,8 @@ mod tests {
             harness.requests(),
             [
                 (STORAGE_SERVICE_ID, ControlRequestKind::Start),
-                (AUDIT_SERVICE_ID, ControlRequestKind::Start),
                 (CONSOLE_SERVICE_ID, ControlRequestKind::Start),
+                (AUDIT_SERVICE_ID, ControlRequestKind::Start),
             ]
         );
         assert_eq!(
@@ -733,8 +739,8 @@ mod tests {
             1
         );
         assert_eq!(harness.lines_with("[INIT] starting service=20736").len(), 1);
-        assert_eq!(harness.lines_with("[INIT] starting service=21760").len(), 1);
         assert_eq!(harness.lines_with("[INIT] starting service=22016").len(), 1);
+        assert_eq!(harness.lines_with("[INIT] starting service=21760").len(), 1);
         for service in [STORAGE_SERVICE_ID, AUDIT_SERVICE_ID, CONSOLE_SERVICE_ID] {
             assert_eq!(harness.state(service), ServiceLifecycleState::Starting);
         }
@@ -756,8 +762,8 @@ mod tests {
             harness.requests(),
             [
                 (STORAGE_SERVICE_ID, ControlRequestKind::Start),
-                (AUDIT_SERVICE_ID, ControlRequestKind::Start),
                 (CONSOLE_SERVICE_ID, ControlRequestKind::Start),
+                (AUDIT_SERVICE_ID, ControlRequestKind::Start),
                 (NETWORK_SERVICE_ID, ControlRequestKind::Start),
                 (SYSTEM_SHELL_SERVICE_ID, ControlRequestKind::Start),
             ]
@@ -765,14 +771,15 @@ mod tests {
         let storage_ready = harness.position_of("[INIT] service=20736 ready gen=1");
         let network_start =
             harness.position_of("[INIT] service=20736 ready; starting service=20992");
-        let shell_start = harness.position_of("[INIT] service=20736 ready; starting service=21504");
+        let shell_start =
+            harness.position_of("[INIT] service=20736,22016 ready; starting service=21504");
         assert!(storage_ready < network_start);
         assert!(network_start < shell_start);
     }
 
     /// The compositor starts at boot beside storage and the audit service; the desktop shell
     /// waits for the compositor's ready, the app for the shell's; the serial shell still waits
-    /// for storage only.
+    /// for storage and the console service only.
     #[test]
     fn the_desktop_rows_start_in_dependency_order_and_settle_at_eight() {
         use clean_slate_service_fixtures::manifest::SYSTEM_DESKTOP_MANIFEST;
@@ -785,8 +792,8 @@ mod tests {
             harness.requests(),
             [
                 (STORAGE_SERVICE_ID, ControlRequestKind::Start),
-                (AUDIT_SERVICE_ID, ControlRequestKind::Start),
                 (CONSOLE_SERVICE_ID, ControlRequestKind::Start),
+                (AUDIT_SERVICE_ID, ControlRequestKind::Start),
                 (COMPOSITOR_SERVICE_ID, ControlRequestKind::Start),
             ]
         );
@@ -804,8 +811,7 @@ mod tests {
             LifecycleEventKind::Ready,
         );
         assert_eq!(harness.starts_of(PLAYGROUND_SERVICE_ID), 1);
-        harness
-            .position_of("[INIT] service=21248 ready, service=21249 ready, service=22016 ready; starting service=21250");
+        harness.position_of("[INIT] service=21248,21249,22016 ready; starting service=21250");
         for (service, at) in [
             (PLAYGROUND_SERVICE_ID, 3),
             (STORAGE_SERVICE_ID, 3),
