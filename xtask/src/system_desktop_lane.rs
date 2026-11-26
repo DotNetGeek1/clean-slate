@@ -31,7 +31,7 @@ use clean_slate_graphics::Point;
 use clean_slate_ui::{ChromeControl, ChromeStyle};
 
 use crate::m10_desktop_lane::{
-    check_held_key, held_key_count, motion_chunks, validate_captures, PlannedCapture,
+    check_held_key, is_held_key_line, motion_chunks, validate_captures, PlannedCapture,
     BACKGROUND_POINT, DRAG, EXPECTED_INPUT, HELD_KEY_HOLD, HELD_KEY_MIN_REPEATS,
 };
 use crate::m10_desktop_visual::{center, chrome, frame_rect, panel, translate, window_origin};
@@ -531,11 +531,12 @@ fn check_whole(transcript: &str, first_app: u64, created: &[Point]) -> Result<()
 fn hold_key(lane: &mut Lane) -> Result<(), XtaskError> {
     println!("\n[STD ] step: held key");
     let prefix = format!("[IPC ] console pid={}: {APP_INPUT}", lane.app_pid());
-    let held = |segment: &str| -> Option<usize> {
+    // Held-key lines in a segment: the press, then one per (coalesced) repeat.
+    let held = |segment: &str| -> usize {
         lines(segment)
             .filter_map(|line| line.strip_prefix(prefix.as_str()))
-            .filter_map(held_key_count)
-            .max()
+            .filter(|line| is_held_key_line(line))
+            .count()
     };
     lane.session.mark();
     lane.session.input(
@@ -557,9 +558,10 @@ fn hold_key(lane: &mut Lane) -> Result<(), XtaskError> {
         "held key",
         STEP_TIMEOUT,
         &mut |segment| match held(segment) {
-            Some(count) if count > HELD_KEY_MIN_REPEATS => Ok(count),
-            other => Err(format!(
-                "holding `s` logged {other:?} `s`, expected more than {HELD_KEY_MIN_REPEATS}"
+            count if count > HELD_KEY_MIN_REPEATS => Ok(count),
+            count => Err(format!(
+                "holding `s` logged {count} lines, expected the press and at least \
+                 {HELD_KEY_MIN_REPEATS} repeats"
             )),
         },
     )?;
@@ -574,11 +576,14 @@ fn hold_key(lane: &mut Lane) -> Result<(), XtaskError> {
     let after = lane.session.poll(
         "no repeat after release",
         Duration::from_secs(1),
-        &mut |segment| held(segment).ok_or_else(String::new),
+        &mut |segment| match held(segment) {
+            0 => Err(String::new()),
+            count => Ok(count),
+        },
     )?;
     if let Ok(count) = after {
         return lane.fail(format!(
-            "`s` kept repeating after its release ({repeated} then {count})"
+            "`s` kept repeating after its release ({repeated} lines, then {count} more)"
         ));
     }
     Ok(())

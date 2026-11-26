@@ -39,42 +39,43 @@ pub(crate) const EXPECTED_INPUT: [&str; 3] = [
 ];
 
 /// #309: after `a`, the lane holds `s` for [`HELD_KEY_HOLD`]. The press logs `text=as` with
-/// `presses=2`; every compositor repeat adds an `s` without a press. Printing coalesces a burst,
-/// so counts may skip, but they only grow, and the line stops at the text line's capacity.
+/// `presses=2`, and every compositor repeat adds an `s` without a press, so each repeat logs one
+/// more line. The 64-byte console line cuts the text after `ass`, so the lane counts lines
+/// rather than reading the run; printing coalesces a burst, so the count is a lower bound.
 pub(crate) const HELD_KEY_INPUT: &str = "clicks=1 magenta=1 presses=2 text=a";
 /// How long the lane holds `s`: twice the compositor's 500 ms repeat delay.
 pub(crate) const HELD_KEY_HOLD: std::time::Duration = std::time::Duration::from_millis(1_000);
 /// Repeats the hold must produce at least (about 15 are due at 30 per second).
 pub(crate) const HELD_KEY_MIN_REPEATS: usize = 3;
 
-/// The `s` count of one held-key line, if it is one.
-pub(crate) fn held_key_count(line: &str) -> Option<usize> {
-    let rest = line.strip_prefix(HELD_KEY_INPUT)?;
-    (!rest.is_empty() && rest.bytes().all(|b| b == b's')).then_some(rest.len())
+/// True for an app input line logged while `s` was held (its text may be cut short).
+pub(crate) fn is_held_key_line(line: &str) -> bool {
+    line.strip_prefix(HELD_KEY_INPUT)
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b == b's'))
 }
 
-/// The app 1 lines after [`EXPECTED_INPUT`]: the press, then repeats only, growing, at least
-/// [`HELD_KEY_MIN_REPEATS`] of them.
+/// The app 1 lines after [`EXPECTED_INPUT`]: the press (`text=as`), then at least
+/// [`HELD_KEY_MIN_REPEATS`] repeat lines, and nothing else.
 pub(crate) fn check_held_key(lines: &[&str]) -> Result<(), String> {
-    let mut last = 0;
-    for line in lines {
-        let count = held_key_count(line)
-            .ok_or_else(|| format!("{line:?} is not a held-`s` line ({HELD_KEY_INPUT}s...)"))?;
-        if count <= last {
-            return Err(format!("held-key text shrank or repeated in {lines:?}"));
-        }
-        if last == 0 && count != 1 {
+    let press = format!("{HELD_KEY_INPUT}s");
+    match lines.first() {
+        Some(first) if *first == press => {}
+        other => {
             return Err(format!(
-                "the press of `s` should log one `s` first, got {line:?}"
-            ));
+                "the press of `s` should log {press:?} first, got {other:?}"
+            ))
         }
-        last = count;
     }
-    if last < 1 + HELD_KEY_MIN_REPEATS {
+    if let Some(line) = lines.iter().find(|line| !is_held_key_line(line)) {
         return Err(format!(
-            "holding `s` for {HELD_KEY_HOLD:?} repeated it {} times, expected at least \
-             {HELD_KEY_MIN_REPEATS}: {lines:?}",
-            last.saturating_sub(1)
+            "{line:?} is not a held-`s` line ({HELD_KEY_INPUT}s...)"
+        ));
+    }
+    let repeats = lines.len() - 1;
+    if repeats < HELD_KEY_MIN_REPEATS {
+        return Err(format!(
+            "holding `s` for {HELD_KEY_HOLD:?} logged {repeats} repeats, expected at least \
+             {HELD_KEY_MIN_REPEATS}: {lines:?}"
         ));
     }
     Ok(())
@@ -179,22 +180,25 @@ mod tests {
     use clean_slate_ui::{ChromeControl, ChromeStyle, QualityTier};
 
     #[test]
-    fn held_key_lines_must_grow_from_one_press() {
+    fn held_key_lines_are_the_press_then_enough_repeats() {
         let line = |n: usize| format!("{HELD_KEY_INPUT}{}", "s".repeat(n));
-        let owned = [line(1), line(2), line(4), line(5)];
+        // What the console shows: the text is cut after `ass`.
+        let owned = [line(1), line(2), line(2), line(2)];
         let good: Vec<&str> = owned.iter().map(String::as_str).collect();
         assert_eq!(check_held_key(&good), Ok(()));
-        assert!(check_held_key(&good[..2]).is_err(), "too few repeats");
+        assert!(check_held_key(&good[..3]).is_err(), "too few repeats");
         assert!(check_held_key(&good[1..]).is_err(), "no press line");
-        let shrank = [line(1), line(3), line(2), line(5)];
-        let shrank: Vec<&str> = shrank.iter().map(String::as_str).collect();
-        assert!(check_held_key(&shrank).is_err());
-        let other = [line(1), "clicks=2 magenta=1 presses=2 text=as".to_owned()];
+        let other = [
+            line(1),
+            line(2),
+            line(2),
+            "clicks=2 magenta=1 presses=2 text=as".to_owned(),
+        ];
         let other: Vec<&str> = other.iter().map(String::as_str).collect();
         assert!(check_held_key(&other).is_err());
         assert!(check_held_key(&[]).is_err(), "the hold must be logged");
-        assert_eq!(held_key_count(&line(3)), Some(3));
-        assert_eq!(held_key_count(HELD_KEY_INPUT), None);
+        assert!(is_held_key_line(&line(2)));
+        assert!(!is_held_key_line(HELD_KEY_INPUT));
     }
 
     fn dragged(tier: QualityTier) -> Point {
