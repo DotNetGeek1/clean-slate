@@ -15,7 +15,7 @@ use clean_slate_compositor::fake::{
     FakeInput, FakeSharedMemory, ScriptedWaiter, WAIT_WOULD_BLOCK_FOREVER,
 };
 use clean_slate_compositor::{
-    Compositor, Config, DefaultPolicy, Io, ServiceError, SurfaceKey, WindowPolicy,
+    Compositor, Config, DefaultPolicy, Io, RepeatConfig, ServiceError, SurfaceKey, WindowPolicy,
 };
 use clean_slate_desktop_shell::session::{surface_layout, RAIL_SLOTS};
 use clean_slate_desktop_shell::{
@@ -198,7 +198,12 @@ impl clean_slate_playground::Host for Link<'_> {
 impl World {
     fn new(tier: QualityTier) -> Self {
         let policy = DefaultPolicy::with_theme(&CLEAN_SLATE_DARK, tier, ShellConfig::M10);
-        let mut comp = Box::new(Compositor::new(policy, Config::DEFAULT));
+        // A held key would repeat at once: the scripted waiter jumps to every deadline (#309).
+        let config = Config {
+            repeat: RepeatConfig::OFF,
+            ..Config::DEFAULT
+        };
+        let mut comp = Box::new(Compositor::new(policy, config));
         let mut display = Box::new(FakeDisplay::new(mode()).expect("display"));
         comp.start(&mut *display).expect("start");
         Self {
