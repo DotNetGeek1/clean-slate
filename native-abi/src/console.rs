@@ -29,8 +29,32 @@
 //! | 1 | length, 1..=[`CONSOLE_FRAME_PAYLOAD`] | 0 | 0 |
 //! | 2.. | input bytes | zero | zero |
 //!
-//! Other request and event bytes are reserved (dead keys and compose, window size and attach
-//! requests come later); a service refuses an unknown request by closing the stream.
+//! # The session and its front end (#311)
+//!
+//! A stream whose connection carries `CONSOLE_SESSION` (stamped by the kernel in the envelope's
+//! rights) belongs to the console session: its output is still framed on the serial line, and
+//! is also kept, raw, for the session's front end; its `READ`s are answered only with what the
+//! front end typed, never with serial input. A connection carrying `CONSOLE_ATTACH` may become
+//! the front end, one at a time:
+//!
+//! | Byte | `ATTACH` | `READ_OUTPUT` | `FEED` | `FEED_END` |
+//! |------|----------|---------------|--------|------------|
+//! | 0 | [`CONSOLE_REQUEST_ATTACH`] | [`CONSOLE_REQUEST_READ_OUTPUT`] | [`CONSOLE_REQUEST_FEED`] | [`CONSOLE_REQUEST_FEED_END`] |
+//! | 1 | 0 | 0 | length, 1..=[`CONSOLE_FRAME_PAYLOAD`] | 0 |
+//! | 2.. | zero | byte 2: most bytes wanted | input bytes | zero |
+//!
+//! `ATTACH` makes the connection the front end; the session's output kept so far, up to the
+//! service's bound, is then the first thing `READ_OUTPUT` returns. `READ_OUTPUT` is answered
+//! with one [`CONSOLE_EVENT_OUTPUT`] event (same layout as `INPUT`) once there is output, so the
+//! front end's reads pace the flow. `FEED` is typed input and `FEED_END` an end of input (Ctrl-D
+//! on an empty line). When the front end's connection closes, the session's open streams read
+//! an end of input (a hang-up) and its kept output is dropped; streams opened afterwards wait
+//! for the next front end. A front-end request without `CONSOLE_ATTACH`, a second `ATTACH`
+//! while another front end is attached, or a front-end request before `ATTACH` is refused by
+//! closing the connection.
+//!
+//! Other request and event bytes are reserved (dead keys and compose and window size come
+//! later); a service refuses an unknown request by closing the stream.
 //!
 //! # Syscall 25 `CONSOLE_DEVICE`
 //!
@@ -93,12 +117,18 @@ pub const CONSOLE_FRAME_PAYLOAD: usize = PORT_FRAME_BYTES - 2;
 
 pub const CONSOLE_REQUEST_WRITE: u8 = 1;
 pub const CONSOLE_REQUEST_READ: u8 = 2;
+pub const CONSOLE_REQUEST_ATTACH: u8 = 3;
+pub const CONSOLE_REQUEST_READ_OUTPUT: u8 = 4;
+pub const CONSOLE_REQUEST_FEED: u8 = 5;
+pub const CONSOLE_REQUEST_FEED_END: u8 = 6;
 /// `READ` flag: answer at once, with [`CONSOLE_EVENT_NO_INPUT`] when there is no input.
 pub const CONSOLE_READ_NONBLOCK: u8 = 1;
 
 pub const CONSOLE_EVENT_INPUT: u8 = 1;
 pub const CONSOLE_EVENT_END_OF_INPUT: u8 = 2;
 pub const CONSOLE_EVENT_NO_INPUT: u8 = 3;
+/// The session's output, for its front end.
+pub const CONSOLE_EVENT_OUTPUT: u8 = 4;
 
 type Frame = [u8; PORT_FRAME_BYTES];
 
@@ -155,11 +185,38 @@ pub enum ConsoleFrameError {
     ReservedNonZero,
 }
 
+fn kind_only(kind: u8) -> Frame {
+    let mut frame = [0u8; PORT_FRAME_BYTES];
+    frame[0] = kind;
+    frame
+}
+
+fn zero_after(frame: &Frame, from: usize) -> Result<(), ConsoleFrameError> {
+    if frame[from..].iter().any(|byte| *byte != 0) {
+        Err(ConsoleFrameError::ReservedNonZero)
+    } else {
+        Ok(())
+    }
+}
+
 /// A client's request on its stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConsoleRequest {
     Write(ConsoleBytes),
-    Read { max: u8, nonblock: bool },
+    Read {
+        max: u8,
+        nonblock: bool,
+    },
+    /// Become the session's front end.
+    Attach,
+    /// The front end asks for up to `max` bytes of the session's output.
+    ReadOutput {
+        max: u8,
+    },
+    /// The front end's typed input.
+    Feed(ConsoleBytes),
+    /// The front end's end of input.
+    FeedEnd,
 }
 
 impl ConsoleRequest {
@@ -173,6 +230,14 @@ impl ConsoleRequest {
                 frame[2] = *max;
                 frame
             }
+            Self::Attach => kind_only(CONSOLE_REQUEST_ATTACH),
+            Self::ReadOutput { max } => {
+                let mut frame = kind_only(CONSOLE_REQUEST_READ_OUTPUT);
+                frame[2] = *max;
+                frame
+            }
+            Self::Feed(bytes) => bytes.encode_into(CONSOLE_REQUEST_FEED),
+            Self::FeedEnd => kind_only(CONSOLE_REQUEST_FEED_END),
         }
     }
 
@@ -196,6 +261,19 @@ impl ConsoleRequest {
                     nonblock: flags & CONSOLE_READ_NONBLOCK != 0,
                 })
             }
+            CONSOLE_REQUEST_ATTACH => zero_after(frame, 1).map(|()| Self::Attach),
+            CONSOLE_REQUEST_READ_OUTPUT => {
+                if frame[1] != 0 {
+                    return Err(ConsoleFrameError::UnknownFlags);
+                }
+                let max = frame[2];
+                if max == 0 || usize::from(max) > CONSOLE_FRAME_PAYLOAD {
+                    return Err(ConsoleFrameError::Length);
+                }
+                zero_after(frame, 3).map(|()| Self::ReadOutput { max })
+            }
+            CONSOLE_REQUEST_FEED => ConsoleBytes::decode_from(frame).map(Self::Feed),
+            CONSOLE_REQUEST_FEED_END => zero_after(frame, 1).map(|()| Self::FeedEnd),
             _ => Err(ConsoleFrameError::UnknownKind),
         }
     }
@@ -207,6 +285,8 @@ pub enum ConsoleEvent {
     Input(ConsoleBytes),
     EndOfInput,
     NoInput,
+    /// Session output, answering a front end's `READ_OUTPUT`.
+    Output(ConsoleBytes),
 }
 
 impl ConsoleEvent {
@@ -216,6 +296,7 @@ impl ConsoleEvent {
             Self::Input(bytes) => return bytes.encode_into(CONSOLE_EVENT_INPUT),
             Self::EndOfInput => frame[0] = CONSOLE_EVENT_END_OF_INPUT,
             Self::NoInput => frame[0] = CONSOLE_EVENT_NO_INPUT,
+            Self::Output(bytes) => return bytes.encode_into(CONSOLE_EVENT_OUTPUT),
         }
         frame
     }
@@ -232,6 +313,7 @@ impl ConsoleEvent {
             CONSOLE_EVENT_INPUT => ConsoleBytes::decode_from(frame).map(Self::Input),
             CONSOLE_EVENT_END_OF_INPUT => empty(Self::EndOfInput),
             CONSOLE_EVENT_NO_INPUT => empty(Self::NoInput),
+            CONSOLE_EVENT_OUTPUT => ConsoleBytes::decode_from(frame).map(Self::Output),
             _ => Err(ConsoleFrameError::UnknownKind),
         }
     }
@@ -252,6 +334,42 @@ mod tests {
             let read = ConsoleRequest::Read { max: 62, nonblock };
             assert_eq!(ConsoleRequest::decode(&read.encode()), Ok(read));
         }
+        for request in [
+            ConsoleRequest::Attach,
+            ConsoleRequest::ReadOutput { max: 62 },
+            ConsoleRequest::Feed(ConsoleBytes::new(b"ls\n").unwrap()),
+            ConsoleRequest::FeedEnd,
+        ] {
+            assert_eq!(ConsoleRequest::decode(&request.encode()), Ok(request));
+        }
+    }
+
+    #[test]
+    fn front_end_requests_refuse_stray_bytes() {
+        let mut attach = ConsoleRequest::Attach.encode();
+        attach[1] = 1;
+        assert_eq!(
+            ConsoleRequest::decode(&attach),
+            Err(ConsoleFrameError::ReservedNonZero)
+        );
+        let mut read = ConsoleRequest::ReadOutput { max: 4 }.encode();
+        read[2] = 0;
+        assert_eq!(
+            ConsoleRequest::decode(&read),
+            Err(ConsoleFrameError::Length)
+        );
+        read[2] = 4;
+        read[1] = 1;
+        assert_eq!(
+            ConsoleRequest::decode(&read),
+            Err(ConsoleFrameError::UnknownFlags)
+        );
+        let mut end = ConsoleRequest::FeedEnd.encode();
+        end[40] = 1;
+        assert_eq!(
+            ConsoleRequest::decode(&end),
+            Err(ConsoleFrameError::ReservedNonZero)
+        );
     }
 
     #[test]
@@ -260,6 +378,7 @@ mod tests {
             ConsoleEvent::Input(ConsoleBytes::new(b"ls\n").unwrap()),
             ConsoleEvent::EndOfInput,
             ConsoleEvent::NoInput,
+            ConsoleEvent::Output(ConsoleBytes::new(b"\x1b[1m~ # ").unwrap()),
         ] {
             assert_eq!(ConsoleEvent::decode(&event.encode()), Ok(event));
         }

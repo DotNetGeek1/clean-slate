@@ -5,6 +5,8 @@
 //!   their own reports.
 //! - [`ConsoleStream`]: a console stream on the console service (#310), with write, read and a
 //!   wait for input. The service frames the stream's output per writer on the serial line.
+//! - [`ConsoleFrontEnd`]: the console session's front end (#311), reading the session's
+//!   output and typing its input.
 
 use clean_slate_capability::ResourceClass;
 use clean_slate_native_abi::console::{
@@ -163,6 +165,8 @@ impl ConsoleStream {
             }
             ConsoleEvent::EndOfInput => Ok(Input::End),
             ConsoleEvent::NoInput => Ok(Input::Empty),
+            // Session output goes only to a front end.
+            ConsoleEvent::Output(_) => Err(Error::Failed(STATUS_EINVAL)),
         }
     }
 
@@ -176,6 +180,92 @@ impl ConsoleStream {
     pub fn try_read<S: Syscalls>(self, sys: &mut S, out: &mut [u8]) -> Result<Input, Error> {
         self.request_read(sys, out.len(), true)?;
         self.receive(sys, out, Wait::FOREVER)
+    }
+}
+
+/// The console session's front end (#311): a connection that, once attached, reads the
+/// session's output and types its input. Attaching needs `CONSOLE_ATTACH` on the console port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConsoleFrontEnd {
+    connection: Connection,
+}
+
+impl ConsoleFrontEnd {
+    /// Connects with the caller's console port capability and sends `ATTACH`. A refusal (no
+    /// `CONSOLE_ATTACH`, or another front end attached) arrives as the service closing the
+    /// connection, which the next receive reports as [`Error::Gone`].
+    pub fn attach<S: Syscalls>(sys: &mut S) -> Result<Self, Error> {
+        let connection =
+            Connection::connect(sys, ResourceClass::Console, CONSOLE_PORT_RESOURCE_ID)?;
+        let front = Self::from_connection(connection);
+        front
+            .connection
+            .send(sys, &ConsoleRequest::Attach.encode(), None, Deadline::NEVER)?;
+        Ok(front)
+    }
+
+    pub const fn from_connection(connection: Connection) -> Self {
+        Self { connection }
+    }
+
+    pub const fn connection(self) -> Connection {
+        self.connection
+    }
+
+    /// Asks for up to `max` bytes of session output (at most [`CONSOLE_FRAME_PAYLOAD`]). The
+    /// answer arrives on the connection once there is output; take it with
+    /// [`Self::receive_output`].
+    pub fn request_output<S: Syscalls>(self, sys: &mut S, max: usize) -> Result<(), Error> {
+        let max = max.min(CONSOLE_FRAME_PAYLOAD);
+        if max == 0 {
+            return Err(Error::Failed(STATUS_EINVAL));
+        }
+        self.connection.send(
+            sys,
+            &ConsoleRequest::ReadOutput { max: max as u8 }.encode(),
+            None,
+            Deadline::NEVER,
+        )
+    }
+
+    /// The answer to the last [`Self::request_output`], copied into `out`; returns its length.
+    pub fn receive_output<S: Syscalls>(
+        self,
+        sys: &mut S,
+        out: &mut [u8],
+        wait: Wait,
+    ) -> Result<usize, Error> {
+        let frame = self.connection.recv_frame(sys, wait)?;
+        match ConsoleEvent::decode(&frame).map_err(|_| Error::Failed(STATUS_EINVAL))? {
+            ConsoleEvent::Output(bytes) => {
+                let bytes = bytes.as_slice();
+                let count = bytes.len().min(out.len());
+                out[..count].copy_from_slice(&bytes[..count]);
+                Ok(count)
+            }
+            _ => Err(Error::Failed(STATUS_EINVAL)),
+        }
+    }
+
+    /// Types `bytes` into the session, waiting for queue space until `deadline`.
+    pub fn feed<S: Syscalls>(
+        self,
+        sys: &mut S,
+        bytes: &[u8],
+        deadline: Deadline,
+    ) -> Result<(), Error> {
+        for chunk in bytes.chunks(CONSOLE_FRAME_PAYLOAD) {
+            let bytes = ConsoleBytes::new(chunk).ok_or(Error::Failed(STATUS_EINVAL))?;
+            self.connection
+                .send(sys, &ConsoleRequest::Feed(bytes).encode(), None, deadline)?;
+        }
+        Ok(())
+    }
+
+    /// Ends the session's input (Ctrl-D on an empty line).
+    pub fn feed_end<S: Syscalls>(self, sys: &mut S, deadline: Deadline) -> Result<(), Error> {
+        self.connection
+            .send(sys, &ConsoleRequest::FeedEnd.encode(), None, deadline)
     }
 }
 
@@ -243,6 +333,50 @@ mod tests {
         assert_eq!(stream.read(&mut sys, &mut out), Ok(Input::End));
         assert_eq!(
             stream.request_read(&mut sys, 0, false),
+            Err(Error::Failed(STATUS_EINVAL))
+        );
+    }
+
+    #[test]
+    fn a_front_end_attaches_reads_output_and_feeds() {
+        let mut sys = FakeKernel::new();
+        let id = sys.resource_id();
+        let front = ConsoleFrontEnd::from_connection(
+            Connection::connect(&mut sys, ResourceClass::Graphics, id).expect("connect"),
+        );
+        front.request_output(&mut sys, 100).expect("request");
+        assert_eq!(
+            ConsoleRequest::decode(&sys.server_recv_frame().unwrap()),
+            Ok(ConsoleRequest::ReadOutput {
+                max: CONSOLE_FRAME_PAYLOAD as u8
+            })
+        );
+        sys.server_post(&ConsoleEvent::Output(ConsoleBytes::new(b"~ # ").unwrap()).encode());
+        let mut out = [0u8; 8];
+        assert_eq!(
+            front.receive_output(&mut sys, &mut out, Wait::FOREVER),
+            Ok(4)
+        );
+        assert_eq!(&out[..4], b"~ # ");
+        sys.server_post(&ConsoleEvent::NoInput.encode());
+        assert_eq!(
+            front.receive_output(&mut sys, &mut out, Wait::FOREVER),
+            Err(Error::Failed(STATUS_EINVAL))
+        );
+        front
+            .feed(&mut sys, b"ls\n", Deadline::NEVER)
+            .expect("feed");
+        front.feed_end(&mut sys, Deadline::NEVER).expect("end");
+        assert_eq!(
+            ConsoleRequest::decode(&sys.server_recv_frame().unwrap()),
+            Ok(ConsoleRequest::Feed(ConsoleBytes::new(b"ls\n").unwrap()))
+        );
+        assert_eq!(
+            ConsoleRequest::decode(&sys.server_recv_frame().unwrap()),
+            Ok(ConsoleRequest::FeedEnd)
+        );
+        assert_eq!(
+            front.request_output(&mut sys, 0),
             Err(Error::Failed(STATUS_EINVAL))
         );
     }

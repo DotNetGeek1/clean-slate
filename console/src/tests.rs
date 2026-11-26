@@ -1,4 +1,5 @@
 use super::*;
+use clean_slate_capability::Rights;
 use clean_slate_native_abi::console::CONSOLE_READ_NONBLOCK;
 use clean_slate_native_abi::TrustedEnvelope;
 
@@ -456,4 +457,197 @@ fn serial_input_taken_for_a_full_queue_is_kept_for_that_reader() {
     h.port.full = false;
     h.core.pump_input(&mut h.port, &mut serial);
     assert_eq!(events(&h.port), [(1, input(b"ls\n"))]);
+}
+
+// ---- the session and its front end (#311) ------------------------------------------------------
+
+const SESSION: u32 = Rights::CONSOLE_CONNECT.bits() | Rights::CONSOLE_SESSION.bits();
+const FRONT: u32 = Rights::CONSOLE_CONNECT.bits() | Rights::CONSOLE_ATTACH.bits();
+const FRONT_SLOT: u16 = 9;
+
+fn with_rights(mut record: PortRecvRecord, rights: u32) -> PortRecvRecord {
+    record.envelope.rights = rights;
+    record
+}
+
+fn front(request: ConsoleRequest) -> PortRecvRecord {
+    with_rights(
+        record(RecvKind::Request, FRONT_SLOT, 30, request.encode()),
+        FRONT,
+    )
+}
+
+fn session_write(slot: u16, pid: u64, bytes: &[u8]) -> PortRecvRecord {
+    with_rights(write(slot, pid, bytes), SESSION)
+}
+
+fn session_read(slot: u16, pid: u64) -> PortRecvRecord {
+    with_rights(read(slot, pid, 62, false), SESSION)
+}
+
+fn feed(bytes: &[u8]) -> PortRecvRecord {
+    front(ConsoleRequest::Feed(ConsoleBytes::new(bytes).unwrap()))
+}
+
+fn output(bytes: &[u8]) -> ConsoleEvent {
+    ConsoleEvent::Output(ConsoleBytes::new(bytes).unwrap())
+}
+
+fn read_output() -> PortRecvRecord {
+    front(ConsoleRequest::ReadOutput { max: 62 })
+}
+
+fn attached() -> Harness {
+    let mut h = Harness::new();
+    h.handle(front(ConsoleRequest::Attach));
+    assert_eq!(h.core.front_end(), Some(connection(FRONT_SLOT)));
+    h
+}
+
+#[test]
+fn session_output_reaches_the_front_end_raw_and_serial_framed() {
+    let mut h = attached();
+    h.handle(session_write(1, 40, b"\x1b[1m~ # "));
+    h.handle(read_output());
+    assert_eq!(events(&h.port), [(FRONT_SLOT, output(b"\x1b[1m~ # "))]);
+    h.core.idle(&mut h.device);
+    assert_eq!(h.device.text(), ["pid=40: ^[[1m~ # "]);
+    // A waiting read is answered as soon as output arrives.
+    h.handle(read_output());
+    h.handle(session_write(1, 40, b"hello\n"));
+    assert_eq!(events(&h.port)[1], (FRONT_SLOT, output(b"hello\n")));
+    assert_eq!(h.core.stats().session_output_bytes, 14);
+}
+
+#[test]
+fn output_before_the_front_end_attaches_is_replayed_to_it() {
+    let mut h = Harness::new();
+    h.handle(session_write(1, 40, b"~ # "));
+    h.handle(write(2, 41, b"not the session\n"));
+    assert_eq!(h.core.kept_output(), 4);
+    h.handle(front(ConsoleRequest::Attach));
+    h.handle(read_output());
+    assert_eq!(events(&h.port), [(FRONT_SLOT, output(b"~ # "))]);
+}
+
+#[test]
+fn kept_output_is_bounded_and_drops_the_oldest() {
+    let mut h = Harness::new();
+    for _ in 0..(SESSION_OUTPUT_BYTES / 50) + 1 {
+        h.handle(session_write(1, 40, &[b'a'; 50]));
+    }
+    h.handle(session_write(1, 40, b"end"));
+    assert_eq!(h.core.kept_output(), SESSION_OUTPUT_BYTES);
+    assert!(h.core.stats().session_output_dropped > 0);
+}
+
+#[test]
+fn typed_input_goes_to_the_sessions_oldest_reader_only() {
+    let mut h = attached();
+    let mut serial = Serial::typed(&[b"from serial\n"]);
+    h.handle_serial(session_read(1, 40), &mut serial);
+    h.handle_serial(read(2, 41, 62, false), &mut serial);
+    // The serial reader got serial input; the session reader is still waiting.
+    assert_eq!(events(&h.port), [(2, input(b"from serial\n"))]);
+    h.handle_serial(session_read(3, 42), &mut serial);
+    h.handle(feed(b"ls\n"));
+    assert_eq!(events(&h.port)[1], (1, input(b"ls\n")));
+    h.handle(feed(b"pwd\n"));
+    assert_eq!(events(&h.port)[2], (3, input(b"pwd\n")));
+    assert_eq!(h.core.stats().session_input_bytes, 7);
+}
+
+#[test]
+fn input_typed_before_a_read_waits_for_it() {
+    let mut h = attached();
+    h.handle(feed(b"echo hello\n"));
+    h.handle(front(ConsoleRequest::FeedEnd));
+    assert!(h.port.posted.is_empty());
+    h.handle(session_read(1, 40));
+    h.handle(session_read(1, 40));
+    assert_eq!(
+        events(&h.port),
+        [(1, input(b"echo hello\n")), (1, ConsoleEvent::EndOfInput)]
+    );
+}
+
+#[test]
+fn serial_input_never_reaches_the_session() {
+    let mut h = Harness::new();
+    let mut serial = Serial::typed(&[b"ls\n"]);
+    h.handle_serial(session_read(1, 40), &mut serial);
+    h.core.pump_input(&mut h.port, &mut serial);
+    assert!(h.port.posted.is_empty());
+    assert_eq!(serial.lines.len(), 1, "the serial line was not read");
+}
+
+#[test]
+fn closing_the_front_end_hangs_up_the_session() {
+    let mut h = attached();
+    h.handle(session_write(1, 40, b"~ # "));
+    h.handle(session_read(1, 40));
+    h.handle(session_write(2, 41, b"x"));
+    h.handle(record(RecvKind::ClientClosed, FRONT_SLOT, 30, [0; 64]));
+    assert_eq!(h.core.front_end(), None);
+    assert_eq!(h.core.kept_output(), 0, "the old shell's output is dropped");
+    assert_eq!(events(&h.port), [(1, ConsoleEvent::EndOfInput)]);
+    // The other open stream reads its end of input next.
+    h.handle(session_read(2, 41));
+    assert_eq!(events(&h.port)[1], (2, ConsoleEvent::EndOfInput));
+    // A new shell's stream waits for the next front end.
+    h.handle(session_read(3, 50));
+    assert_eq!(events(&h.port).len(), 2);
+    h.handle(front(ConsoleRequest::Attach));
+    h.handle(feed(b"id\n"));
+    assert_eq!(events(&h.port)[2], (3, input(b"id\n")));
+    assert_eq!(h.core.stats().front_ends_detached, 1);
+    assert_eq!(h.core.stats().front_ends_attached, 2);
+}
+
+#[test]
+fn attaching_needs_the_right_and_a_free_session() {
+    let mut h = Harness::new();
+    let plain = record(RecvKind::Request, 5, 30, ConsoleRequest::Attach.encode());
+    h.handle(with_rights(plain, Rights::CONSOLE_CONNECT.bits()));
+    assert_eq!(
+        h.port.disconnected,
+        [(connection(5), DISCONNECT_NOT_FRONT_END)]
+    );
+    assert_eq!(h.core.front_end(), None);
+
+    h.handle(front(ConsoleRequest::Attach));
+    let second = record(RecvKind::Request, 6, 31, ConsoleRequest::Attach.encode());
+    h.handle(with_rights(second, FRONT));
+    assert_eq!(
+        h.port.disconnected[1],
+        (connection(6), DISCONNECT_FRONT_END_BUSY)
+    );
+    assert_eq!(h.core.front_end(), Some(connection(FRONT_SLOT)));
+}
+
+#[test]
+fn front_end_requests_before_attach_and_stream_requests_after_are_refused() {
+    let mut h = Harness::new();
+    h.handle(read_output());
+    assert_eq!(
+        h.port.disconnected,
+        [(connection(FRONT_SLOT), DISCONNECT_NOT_FRONT_END)]
+    );
+    let mut h = attached();
+    h.handle(with_rights(write(FRONT_SLOT, 30, b"hi\n"), FRONT));
+    assert_eq!(
+        h.port.disconnected,
+        [(connection(FRONT_SLOT), DISCONNECT_PROTOCOL)]
+    );
+    assert_eq!(h.core.open_streams(), 0);
+}
+
+#[test]
+fn a_stream_cannot_become_the_front_end() {
+    let mut h = Harness::new();
+    h.handle(with_rights(write(FRONT_SLOT, 30, b"hi"), FRONT));
+    h.handle(front(ConsoleRequest::Attach));
+    assert_eq!(h.core.front_end(), None);
+    assert_eq!(h.core.open_streams(), 0);
+    assert_eq!(h.device.text(), ["pid=30: hi\n"]);
 }
