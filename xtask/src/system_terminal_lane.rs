@@ -111,7 +111,7 @@ fn check_boot(segment: &str) -> Result<Terminal, String> {
             ));
         }
     }
-    for line in ["[TERM] attached", "[TERM] ready"] {
+    for line in ["[TERM] attached", "[TERM] ready text=on"] {
         let want = format!("[IPC ] console pid={terminal_pid}: {line}");
         if !lines(segment).any(|l| l.starts_with(&want)) {
             return Err(format!("no {want:?}"));
@@ -402,7 +402,7 @@ mod tests {
          [SVC ] authority service=21251 pid=10 counts matches-manifest=1\n\
          [SVC ] launch service=21251 pid=10 gen=1\n\
          [IPC ] console pid=10: [TERM] attached as the console session front end\n\
-         [IPC ] console pid=10: [TERM] ready\n\
+         [IPC ] console pid=10: [TERM] ready text=on\n\
          [IPC ] console pid=1: [INIT] boot settled running=10 down=0; waiting, no deadline\n"
             .to_owned()
     }
@@ -425,6 +425,8 @@ mod tests {
         assert!(error.contains("pid=9"), "{error}");
         let text = boot().replace("[TERM] ready", "[TERM] waiting");
         assert!(check_boot(&text).unwrap_err().contains("[TERM] ready"));
+        let text = boot().replace("ready text=on", "ready text=off");
+        assert!(check_boot(&text).unwrap_err().contains("text=on"));
     }
 
     #[test]

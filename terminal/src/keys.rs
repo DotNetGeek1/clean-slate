@@ -1,10 +1,11 @@
 //! What a key press means to the terminal.
 //!
 //! Control keys (Enter, Backspace, the arrows, Ctrl and a letter) always come from raw `Key`
-//! events. Printable text comes from the compositor's text events once it sends them (#309);
-//! until then [`us_text`] maps a US layout here, the same table the playground uses.
+//! and `KeyRepeat` events. Printable text comes from the compositor's `Text` events (#309).
+//! A compositor without `TEXT_INPUT` sends none, so then the US layout maps printable keys here.
 
 use clean_slate_graphics::input::{KeyUsage, Modifiers};
+use clean_slate_graphics::keymap;
 
 use crate::line::Key;
 
@@ -51,65 +52,7 @@ pub fn action(usage: KeyUsage, modifiers: Modifiers, text_events: bool) -> Optio
         USAGE_PAGE_DOWN if shift => return Some(Action::ScrollForward),
         0x04..=0x1D if ctrl => Key::Ctrl(char::from(b'a' + (usage.0 - 0x04) as u8)),
         _ if text_events => return None,
-        _ => Key::Char(char::from(us_text(usage, modifiers)?)),
+        _ => Key::Char(keymap::US.text(usage, modifiers)?),
     };
     Some(Action::Edit(key))
-}
-
-/// US layout for usages `0x2D..=0x38`: (unshifted, shifted); `0x32` (non-US `#`) is unused.
-const PUNCTUATION: [(u8, u8); 12] = [
-    (b'-', b'_'),
-    (b'=', b'+'),
-    (b'[', b'{'),
-    (b']', b'}'),
-    (b'\\', b'|'),
-    (0, 0),
-    (b';', b':'),
-    (b'\'', b'"'),
-    (b'`', b'~'),
-    (b',', b'<'),
-    (b'.', b'>'),
-    (b'/', b'?'),
-];
-
-const DIGIT_SHIFTED: [u8; 10] = *b"!@#$%^&*()";
-
-/// Printable ASCII typed by `usage` with `modifiers` on a US layout, if any. The stopgap until
-/// the compositor's text events (#309) arrive.
-pub fn us_text(usage: KeyUsage, modifiers: Modifiers) -> Option<u8> {
-    if modifiers.contains(Modifiers::CTRL)
-        || modifiers.contains(Modifiers::ALT)
-        || modifiers.contains(Modifiers::SUPER)
-    {
-        return None;
-    }
-    let shift = modifiers.contains(Modifiers::SHIFT);
-    let u = usage.0;
-    match u {
-        0x04..=0x1D => {
-            let upper = shift != modifiers.contains(Modifiers::CAPS_LOCK);
-            let base = if upper { b'A' } else { b'a' };
-            Some(base + (u - 0x04) as u8)
-        }
-        0x1E..=0x27 => {
-            let index = usize::from(u - 0x1E);
-            if shift {
-                Some(DIGIT_SHIFTED[index])
-            } else if u == 0x27 {
-                Some(b'0')
-            } else {
-                Some(b'1' + index as u8)
-            }
-        }
-        0x2C => Some(b' '),
-        0x2D..=0x38 => {
-            let (plain, shifted) = PUNCTUATION[usize::from(u - 0x2D)];
-            match (plain, shift) {
-                (0, _) => None,
-                (_, true) => Some(shifted),
-                (_, false) => Some(plain),
-            }
-        }
-        _ => None,
-    }
 }
