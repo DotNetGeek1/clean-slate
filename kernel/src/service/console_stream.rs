@@ -18,9 +18,9 @@ use clean_slate_capability::{
 };
 use clean_slate_linux_abi::{LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EAGAIN};
 use clean_slate_native_abi::console::{
-    ConsoleBytes, ConsoleRequest, CONSOLE_FRAME_PAYLOAD, CONSOLE_PORT_RESOURCE_ID,
+    ConsoleBytes, ConsoleEvent, ConsoleRequest, CONSOLE_FRAME_PAYLOAD, CONSOLE_PORT_RESOURCE_ID,
 };
-use clean_slate_native_abi::ConnectionId;
+use clean_slate_native_abi::{ConnectionId, EventKind};
 use clean_slate_port::PortError;
 
 use crate::capability::with_capability_space;
@@ -36,6 +36,26 @@ const STREAM_SLOTS: usize = clean_slate_native_abi::port::PORT_MAX_CONNECTIONS;
 struct Stream {
     pid: u64,
     connection: ConnectionId,
+    /// A `READ` was sent and its answer has not been taken.
+    read_pending: bool,
+    /// Input an answer brought that the read it answered had no room for.
+    held: [u8; CONSOLE_FRAME_PAYLOAD],
+    held_len: usize,
+    /// An end of input was answered and not yet returned.
+    held_end: bool,
+}
+
+impl Stream {
+    const fn new(pid: u64, connection: ConnectionId) -> Self {
+        Self {
+            pid,
+            connection,
+            read_pending: false,
+            held: [0; CONSOLE_FRAME_PAYLOAD],
+            held_len: 0,
+            held_end: false,
+        }
+    }
 }
 
 struct Streams {
@@ -112,7 +132,7 @@ fn stream_for(pid: u64) -> Option<ConnectionId> {
     });
     match free {
         Some(index) => {
-            state.slots[index] = Some(Stream { pid, connection });
+            state.slots[index] = Some(Stream::new(pid, connection));
             Some(connection)
         }
         None => {
@@ -199,6 +219,156 @@ pub(crate) fn block_if_full(
     match full_key(ctx.pid) {
         Some(key) => block_linux_syscall(request, ctx, key, None, LinuxTimeoutResult::Zero),
         None => result,
+    }
+}
+
+/// What `pid`'s stream had for a read of fd 0.
+enum Taken {
+    Bytes(usize),
+    End,
+    /// Nothing yet; a `READ` is waiting at the service.
+    Waiting(WaitKey),
+    /// The stream ended: read the line discipline instead.
+    Gone,
+}
+
+fn stream_mut(pid: u64) -> Option<&'static mut Stream> {
+    streams()
+        .slots
+        .iter_mut()
+        .flatten()
+        .find(|stream| stream.pid == pid)
+}
+
+/// Copies held input into `out`.
+fn take_held(stream: &mut Stream, out: &mut [u8]) -> Option<Taken> {
+    if stream.held_len > 0 {
+        let count = stream.held_len.min(out.len());
+        out[..count].copy_from_slice(&stream.held[..count]);
+        stream.held.copy_within(count..stream.held_len, 0);
+        stream.held_len -= count;
+        return Some(Taken::Bytes(count));
+    }
+    if core::mem::take(&mut stream.held_end) {
+        return Some(Taken::End);
+    }
+    None
+}
+
+/// Takes the answers that arrived, then asks for input if no `READ` is waiting. `out` empty
+/// only prefetches (for `poll`).
+fn take_input(pid: u64, out: &mut [u8]) -> Taken {
+    let Some(connection) = stream_for(pid) else {
+        return Taken::Gone;
+    };
+    let stream = stream_mut(pid).expect("stream_for opened it");
+    if let Some(taken) = take_held(stream, out) {
+        return taken;
+    }
+    loop {
+        match crate::service::port::kernel_client_try_recv_event(HolderId(pid), connection) {
+            Ok(record) if record.kind == EventKind::Frame => {
+                match ConsoleEvent::decode(&record.frame) {
+                    Ok(ConsoleEvent::Input(bytes)) => {
+                        stream.read_pending = false;
+                        let bytes = bytes.as_slice();
+                        stream.held[..bytes.len()].copy_from_slice(bytes);
+                        stream.held_len = bytes.len();
+                    }
+                    Ok(ConsoleEvent::EndOfInput) => {
+                        stream.read_pending = false;
+                        stream.held_end = true;
+                    }
+                    Ok(ConsoleEvent::NoInput) => stream.read_pending = false,
+                    Err(_) => return Taken::Gone,
+                }
+                if let Some(taken) = take_held(stream, out) {
+                    return taken;
+                }
+            }
+            Ok(_) => return Taken::Gone,
+            Err(PortError::WouldBlock) => break,
+            Err(_) => return Taken::Gone,
+        }
+    }
+    let Ok(key) = crate::service::port::connection_port_key(connection) else {
+        return Taken::Gone;
+    };
+    if !stream.read_pending {
+        let max = out.len().clamp(1, CONSOLE_FRAME_PAYLOAD) as u8;
+        let frame = ConsoleRequest::Read {
+            max,
+            nonblock: false,
+        }
+        .encode();
+        match crate::service::port::kernel_client_send(HolderId(pid), connection, &frame, None) {
+            Ok(()) => stream.read_pending = true,
+            // The stream's queue is full of writes: wait for room, then ask.
+            Err(PortError::WouldBlock) => {
+                return Taken::Waiting(crate::service::port::send_space_wait_key(key))
+            }
+            Err(_) => return Taken::Gone,
+        }
+    }
+    Taken::Waiting(crate::service::port::connection_wait_key(connection))
+}
+
+/// `read(2)` on console input (fd 0) for a process whose console fds go through the service:
+/// the input the service answered its `READ` with. `None` when the service cannot be reached;
+/// the caller then reads the kernel's line discipline, as before the service existed.
+pub(crate) fn read_input(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+    nonblock: bool,
+    out: &mut [u8],
+) -> Option<LinuxSyscallResult> {
+    let pid = ctx.pid;
+    if !routes(pid) {
+        return None;
+    }
+    match take_input(pid, out) {
+        Taken::Bytes(count) => Some(Ok(count as u64)),
+        Taken::End => Some(Ok(0)),
+        Taken::Waiting(_) if nonblock => Some(Err(EAGAIN)),
+        Taken::Waiting(key) => {
+            crate::service::system_shell::on_console_input_wait(pid);
+            Some(block_linux_syscall(
+                request,
+                ctx,
+                key,
+                None,
+                LinuxTimeoutResult::Zero,
+            ))
+        }
+        Taken::Gone => {
+            forget(pid);
+            None
+        }
+    }
+}
+
+/// `poll(2)` readability of fd 0 for a routed process: whether a read would not block. Asks
+/// the service for input if no `READ` is waiting, so that typed input can make it readable.
+/// `None` when the service cannot be reached.
+pub(crate) fn input_readable(pid: u64) -> Option<bool> {
+    if !routes(pid) {
+        return None;
+    }
+    if let Some(stream) = stream_mut(pid) {
+        if stream.held_len > 0 || stream.held_end {
+            return Some(true);
+        }
+        if stream.read_pending {
+            return Some(crate::service::port::event_ready(stream.connection));
+        }
+    }
+    match take_input(pid, &mut []) {
+        Taken::Waiting(_) => Some(false),
+        Taken::Bytes(_) | Taken::End => Some(true),
+        Taken::Gone => {
+            forget(pid);
+            None
+        }
     }
 }
 

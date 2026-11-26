@@ -753,7 +753,7 @@ pub(crate) fn check_audit_service(
 }
 
 /// The console service's launch audit (#310): its IPC console for its own failures, `CONSOLE_SERVE`
-/// on the port it registered and `WRITE` on the serial console device, nothing else.
+/// on the port it registered and `READ` and `WRITE` on the serial console device, nothing else.
 pub(crate) fn expected_console_authority(pid: u64) -> String {
     format!(
         "[SVC ] authority service={CONSOLE_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=1 con-device=1 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1"
@@ -774,7 +774,7 @@ pub(crate) fn check_console_service(
     }
     let granted_prefix = format!("[CONS] authority granted pid={pid} port={CONSOLE_SERVICE}:");
     let granted = only_line(output, &granted_prefix)?;
-    if !granted.ends_with(" rights=serve registered=1 device=write") {
+    if !granted.ends_with(" rights=serve registered=1 device=read|write") {
         return Err(format!("console service port grant {granted:?}"));
     }
     if !ready.contains(" kernel-observed ports=1 port-connections=")
@@ -884,7 +884,7 @@ mod tests {
              [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20736 pid=4 gen=1\n\
              [IPC ] console pid=3: [INIT] starting service=22016\n\
-             [CONS] authority granted pid=8 port=22016:8 rights=serve registered=1 device=write\n\
+             [CONS] authority granted pid=8 port=22016:8 rights=serve registered=1 device=read|write\n\
              {console_authority}\n\
              [SVC ] launch service=22016 pid=8 gen=1\n\
              [SVC ] ready service=22016 pid=8 gen=1 source=live-instance kernel-observed ports=1 port-connections=0 work-sets=1 service-reported detail=0x0\n\
@@ -1058,8 +1058,8 @@ mod tests {
                 "pid=8 lifecycle-control=0 console=1 block-device=1",
             ),
             (
-                "rights=serve registered=1 device=write",
-                "rights=serve registered=0 device=write",
+                "rights=serve registered=1 device=read|write",
+                "rights=serve registered=0 device=read|write",
             ),
             ("pid=8 port=22016:8", "pid=7 port=22016:8"),
             (
@@ -1075,7 +1075,7 @@ mod tests {
             assert!(validate_boot(&text, Formatted::Yes).is_err(), "{to}");
         }
         let granted =
-            "[CONS] authority granted pid=8 port=22016:8 rights=serve registered=1 device=write\n";
+            "[CONS] authority granted pid=8 port=22016:8 rights=serve registered=1 device=read|write\n";
         let late = transcript(1, 9).replace(granted, "").replace(
             "[SVC ] launch service=22016 pid=8 gen=1\n",
             &format!("{granted}[SVC ] launch service=22016 pid=8 gen=1\n"),

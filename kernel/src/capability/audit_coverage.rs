@@ -317,6 +317,11 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
         "undelivered_requests",
         NoDecision("counts a connection's queued requests"),
     ),
+    (
+        "service/port.rs",
+        "event_ready",
+        NoDecision("asks whether a connection has an event waiting"),
+    ),
     ("service/port.rs", "find_handle", Records),
     ("service/port.rs", "serve_port_key", Records),
     ("service/port.rs", "server_recv", Records),

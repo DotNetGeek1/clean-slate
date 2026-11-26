@@ -24,9 +24,9 @@ const _: () = assert!(CONSOLE_PORT_PARAMS.validate().is_ok());
 
 /// The console service's port authority.
 pub(crate) const CONSOLE_SERVICE_PORT_RIGHTS: Rights = Rights::CONSOLE_SERVE;
-/// The console service's authority over the serial device: it writes; input stays with the
-/// Linux shell's fd 0 until the serial front end moves into the service.
-pub(crate) const CONSOLE_SERVICE_DEVICE_RIGHTS: Rights = Rights::WRITE;
+/// The console service's authority over the serial device: it writes the console's lines and
+/// reads the input the kernel's line discipline committed.
+pub(crate) const CONSOLE_SERVICE_DEVICE_RIGHTS: Rights = Rights::READ.union(Rights::WRITE);
 pub(crate) const CONSOLE_CLIENT_RIGHTS: Rights = Rights::CONSOLE_CONNECT;
 
 /// Root `rights` on the console port `port` (one console service generation).
@@ -38,7 +38,7 @@ pub(crate) fn grant_console_port(
     grant_root(holder, port, rights).map(|_| ())
 }
 
-/// Root `WRITE` on the serial console device.
+/// Root `READ` and `WRITE` on the serial console device.
 pub(crate) fn grant_serial_console_device(holder: HolderId) -> Result<(), CapabilityError> {
     grant_root(
         holder,
@@ -82,7 +82,7 @@ mod tests {
         assert!(holder_has_resource_rights(
             service,
             ResourceRef::serial_console_device(),
-            Rights::WRITE
+            Rights::READ.union(Rights::WRITE)
         ));
         assert_eq!(revoke_for_holder(service), 2);
         assert!(!holder_has_resource_rights(

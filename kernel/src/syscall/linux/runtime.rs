@@ -427,7 +427,7 @@ fn fd_readiness(
             }
             #[cfg(clean_slate_serial_console)]
             Ok(crate::process::linux_fd::open_description::DescriptorKind::ConsoleInput) => {
-                super::console_input::readiness()
+                super::console_input::readiness(ctx.pid)
             }
             _ => Readiness::default(),
         };

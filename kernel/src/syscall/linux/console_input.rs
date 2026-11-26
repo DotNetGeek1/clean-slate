@@ -50,6 +50,12 @@ pub(crate) fn read(
     nonblock: bool,
     out: &mut [u8],
 ) -> LinuxSyscallResult {
+    // A process whose console goes through the service reads what the service answers (#310);
+    // the line discipline is read here only while the service cannot be reached.
+    #[cfg(clean_slate_system_init)]
+    if let Some(result) = crate::service::console_stream::read_input(request, ctx, nonblock, out) {
+        return result;
+    }
     let copied = serial_console::read(out);
     // `take_eof` only when nothing was copied: an EOF behind committed bytes stays pending.
     let eof = copied == 0 && serial_console::take_eof();
@@ -71,11 +77,18 @@ pub(crate) fn read(
     }
 }
 
-/// `poll(2)` readiness of console input: readable while a read would not block. Never
-/// writable.
-pub(crate) fn readiness() -> Readiness {
+/// `poll(2)` readiness of console input for `pid`: readable while a read would not block.
+/// Never writable.
+pub(crate) fn readiness(pid: u64) -> Readiness {
+    #[cfg(clean_slate_system_init)]
+    let routed = crate::service::console_stream::input_readable(pid);
+    #[cfg(not(clean_slate_system_init))]
+    let routed: Option<bool> = {
+        let _ = pid;
+        None
+    };
     Readiness {
-        readable: !serial_console::would_block(),
+        readable: routed.unwrap_or_else(|| !serial_console::would_block()),
         writable: false,
         hangup: false,
         error: false,
