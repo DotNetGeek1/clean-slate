@@ -1338,6 +1338,8 @@ impl InstanceGrantAuthority for KernelInstanceGrants {
             "[CONS] authority granted pid={pid} port={}:{} rights=serve registered=1 device=read|write\n",
             self.service_id.0, generation.0
         ));
+        // A restart: the Linux processes whose console the kernel connects move to this port.
+        crate::capability::console::reissue_kernel_console_clients(resource);
         Ok(())
     }
 

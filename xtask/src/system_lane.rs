@@ -27,6 +27,9 @@
 //!    the shell must still prompt; init restarts the service once; generation 2 passes its
 //!    launch audit, the shell's client capability is re-issued for it, and init settles again.
 //! 5. `nslookup` and `wget` from the same shell work again, through generation 2.
+//! 6. Ctrl-X faults the console service (#310); init restarts it, and the shell's console
+//!    client capability is re-issued for generation 2's port ([`check_console_fault`]).
+//! 7. A typed `echo` reaches the same shell through console generation 2, which says so.
 //!
 //! Each `wget` step proves a full exchange both ways: the fixture answers port 4001 only after
 //! receiving the complete request, and the step requires it to have answered exactly one
@@ -63,6 +66,9 @@ use crate::{
 /// The kernel feature this lane builds; nothing else enables it.
 const HOOKS_FEATURE: &str = "system-test-hooks";
 const NETWORK_SERVICE: u32 = 0x5200;
+const CONSOLE_SERVICE: u32 = 0x5600;
+/// The console service's line, once per instance, when typed input first answers a read.
+const SERIAL_INPUT_SERVED: &str = "[CONS] serial input answered a read";
 /// Boot to the first prompt plus every step, the restart's backoff included; the kernel build
 /// before it is not counted.
 const LANE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -108,6 +114,12 @@ enum Expect {
     Fault,
     /// The flood and the audit service's report of it (see [`check_audit_flood`]).
     AuditFlood,
+    /// The console service's fault, its restart, and the shell's client capability moved to
+    /// the new instance (see [`check_console_fault`]).
+    ConsoleFault,
+    /// These whole lines and a prompt, the typed line having reached the shell through the
+    /// restarted console service, which says so.
+    ConsoleInput(&'static [&'static str]),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -136,7 +148,7 @@ const WGET: Step = Step {
     },
 };
 
-const STEPS: [Step; 7] = [
+const STEPS: [Step; 9] = [
     Step {
         name: "audit flood",
         send: &AUDIT_FLOOD_SEND,
@@ -162,6 +174,16 @@ const STEPS: [Step; 7] = [
         name: "wget after restart",
         ..WGET
     },
+    Step {
+        name: "console fault",
+        send: b"\x18",
+        expect: Expect::ConsoleFault,
+    },
+    Step {
+        name: "echo after console restart",
+        send: b"echo hel''lo-again\r",
+        expect: Expect::ConsoleInput(&["hello-again"]),
+    },
 ];
 
 /// The live network service instance.
@@ -178,6 +200,8 @@ struct State {
     shell: Shell,
     network: Network,
     audit_pid: u64,
+    /// The console service instance the console fault step restarted, once it has.
+    console: Option<Network>,
 }
 
 /// The kernel's launch audit for a network instance must be exactly the row's grants.
@@ -247,6 +271,7 @@ fn check_boot_segment(segment: &str) -> Result<State, String> {
         shell,
         network,
         audit_pid: number(audit, "pid")?,
+        console: None,
     })
 }
 
@@ -453,6 +478,120 @@ fn check_fault(segment: &str, state: State) -> Result<State, String> {
     })
 }
 
+/// Everything Ctrl-X must cause, in `segment` (the output since it was typed): the console
+/// service faults and is reaped, init restarts it once, generation 2 is granted its port and
+/// the serial device, the shell's console client capability is re-issued for that port, the
+/// new instance reports ready and init settles, all under the same shell.
+fn check_console_fault(segment: &str, state: State) -> Result<State, String> {
+    let State {
+        init_pid, shell, ..
+    } = state;
+    let armed = only_kernel_line(segment, "[HOOK] console fault armed ")?;
+    let old = number(armed, "pid")?;
+    if number(armed, "gen")? != 1 || field(armed, "user_rip") != Some("0x0") {
+        return Err(format!("unexpected {armed:?}"));
+    }
+    let fault_prefix = format!("[PROC] fault pid={old} vector=14 ");
+    let faulted_at = line_at(segment, &fault_prefix)
+        .map_err(|_| format!("the console service did not fault: no {fault_prefix:?}"))?;
+    let after_fault = &segment[faulted_at..];
+    let restart = format!(
+        "[IPC ] console pid={init_pid}: [SUP ] restart service={CONSOLE_SERVICE} attempt=1"
+    );
+    if !lines(after_fault).any(|line| line.contains(&restart)) {
+        return Err(format!(
+            "init has not restarted the console service ({restart:?})"
+        ));
+    }
+    let reaped = format!("[SVC ] reaped service={CONSOLE_SERVICE} pid={old} ");
+    match crate::system_desktop::whole_line(after_fault, &reaped) {
+        Some((_, "residue=0")) => {}
+        Some((_, residue)) => return Err(format!("console pid={old} reaped with {residue}")),
+        None => {
+            return Err(format!(
+                "the faulted console service was not reaped: no {reaped:?}"
+            ))
+        }
+    }
+    let launch = only_kernel_line(
+        after_fault,
+        &format!("[SVC ] launch service={CONSOLE_SERVICE} "),
+    )
+    .map_err(|reason| format!("console generation 2: {reason}"))?;
+    let pid = number(launch, "pid")?;
+    if number(launch, "gen")? != 2 || pid == old {
+        return Err(format!("expected a new console pid at gen=2: {launch:?}"));
+    }
+    // The port is named by the new process's instance generation, which the grant line gives.
+    let granted_prefix = format!("[CONS] authority granted pid={pid} port={CONSOLE_SERVICE}:");
+    let granted = only_kernel_line(after_fault, &granted_prefix)?;
+    let port_generation = granted[granted_prefix.len()..]
+        .split(' ')
+        .next()
+        .unwrap_or_default();
+    if granted[granted_prefix.len() + port_generation.len()..]
+        != *" rights=serve registered=1 device=read|write"
+    {
+        return Err(format!("unexpected {granted:?}"));
+    }
+    let granted_at = line_at(after_fault, granted)?;
+    let reissued = format!(
+        "[CONS] client reissued holder={} port={CONSOLE_SERVICE}:{port_generation}",
+        shell.pid
+    );
+    let reissued_at = line_at(after_fault, &reissued).map_err(|_| format!("no {reissued:?}"))?;
+    if reissued_at < granted_at {
+        return Err("the shell's console client was reissued before the new port".to_owned());
+    }
+    let ready = only_kernel_line(
+        after_fault,
+        &format!("[SVC ] ready service={CONSOLE_SERVICE} "),
+    )
+    .map_err(|reason| format!("console generation 2: {reason}"))?;
+    if number(ready, "pid")? != pid
+        || number(ready, "gen")? != 2
+        || field(ready, "source") != Some("live-instance")
+    {
+        return Err(format!(
+            "console launched as pid={pid} gen=2 but ready says {ready:?}"
+        ));
+    }
+    let announced =
+        format!("[IPC ] console pid={init_pid}: [INIT] service={CONSOLE_SERVICE} ready gen=2");
+    let announced_at = after_fault
+        .find(&announced)
+        .ok_or_else(|| format!("init did not announce {announced:?}"))?;
+    if !lines(&after_fault[announced_at..]).any(|line| line.contains(SETTLED)) {
+        return Err(format!(
+            "init has not printed {SETTLED:?} since console generation 2 became ready"
+        ));
+    }
+    if lines(segment).any(|line| line.contains(&format!("[LNX ] exit pid={} ", shell.pid))) {
+        return Err(format!("the shell pid={} exited", shell.pid));
+    }
+    if kernel_lines(segment, &format!("[SVC ] launch service={SHELL_SERVICE} ")).count() != 0 {
+        return Err("a new shell was launched".to_owned());
+    }
+    Ok(State {
+        console: Some(Network { pid, generation: 2 }),
+        ..state
+    })
+}
+
+/// The typed line's output and a prompt, and the restarted console service's report that typed
+/// input answered a read: input reached the shell through the new instance.
+fn check_console_input(segment: &str, want: &[&str], state: State) -> Result<State, String> {
+    let console = state
+        .console
+        .ok_or_else(|| "no restarted console service".to_owned())?;
+    check_lines(segment, want)?;
+    let served = format!("[IPC ] console pid={}: {SERIAL_INPUT_SERVED}", console.pid);
+    if !lines(segment).any(|line| line.contains(&served)) {
+        return Err(format!("no {served:?}"));
+    }
+    Ok(state)
+}
+
 /// Whether `step` has completed within `segment` (the output since it was typed), the fixture
 /// peer having gone from `before` to `now` meanwhile.
 fn check_step(
@@ -498,6 +637,8 @@ fn check_step(
         }
         Expect::Fault => check_fault(segment, state),
         Expect::AuditFlood => check_audit_flood(segment, state),
+        Expect::ConsoleFault => check_console_fault(segment, state),
+        Expect::ConsoleInput(want) => check_console_input(segment, want, state),
     }
 }
 
@@ -515,9 +656,12 @@ fn check_whole(transcript: &str) -> Result<(), String> {
         (format!("[SVC ] launch service={SHELL_SERVICE} "), 1),
         (format!("[SVC ] launch service={NETWORK_SERVICE} "), 2),
         (format!("[SVC ] launch service={AUDIT_SERVICE} "), 1),
-        ("[SUP ] restart service=".to_owned(), 1),
-        ("[PROC] fault pid=".to_owned(), 1),
+        (format!("[SVC ] launch service={CONSOLE_SERVICE} "), 2),
+        ("[SUP ] restart service=".to_owned(), 2),
+        ("[PROC] fault pid=".to_owned(), 2),
         ("[HOOK] network fault armed ".to_owned(), 1),
+        ("[HOOK] console fault armed ".to_owned(), 1),
+        (SERIAL_INPUT_SERVED.to_owned(), 2),
         ("[HOOK] audit flood ".to_owned(), 1),
         ("[NET ] linux sockets lost ".to_owned(), 1),
     ] {
@@ -542,7 +686,7 @@ fn save_transcript(transcript: &[u8]) -> Result<(), XtaskError> {
 /// on a fresh lane-owned disk; the host types [`STEPS`] into the shell over a loopback COM1.
 pub(crate) fn run() -> Result<(), XtaskError> {
     println!(
-        "[STM ] test-system boots the {HOOKS_FEATURE} build: the default image plus test hooks (COM1 fault bytes for the network service, compositor, desktop shell and app; desktop resource, quiet and stale-generation evidence; per-input trace lines)"
+        "[STM ] test-system boots the {HOOKS_FEATURE} build: the default image plus test hooks (COM1 fault bytes for the network service, compositor, desktop shell, app and console service; desktop resource, quiet and stale-generation evidence; per-input trace lines)"
     );
     let disk = workspace_root()
         .join("target")
@@ -572,8 +716,8 @@ pub(crate) fn run() -> Result<(), XtaskError> {
     let before = states[0];
     let after = states[states.len() - 1];
     println!(
-        "\n[STM ] PASS ({HOOKS_FEATURE} build) after {AUDIT_FLOOD_DENIALS} audit denials of the shell, the audit service pid={} printed the witness, the {AUDIT_HOLDER_BUDGET} denials the budget kept and exactly {} lost; shell pid={} resolved through the fixture and fetched from it through network pid={} gen={}, the fixture answering the request it received; the next wget's request reached the fixture's hold port, which held it unanswered; Ctrl-\\ faulted the network service, the blocked wget read failed with ECONNRESET and the shell prompted again, init restarted the service as pid={} gen={}, its launch audit matched, the shell's client capability was re-issued for it, init settled, and from the same shell nslookup resolved through the fixture again and wget's request reached the fixture and was answered again",
-        before.audit_pid, AUDIT_FLOOD_DENIALS - AUDIT_HOLDER_BUDGET, before.shell.pid, before.network.pid, before.network.generation, after.network.pid, after.network.generation
+        "\n[STM ] PASS ({HOOKS_FEATURE} build) after {AUDIT_FLOOD_DENIALS} audit denials of the shell, the audit service pid={} printed the witness, the {AUDIT_HOLDER_BUDGET} denials the budget kept and exactly {} lost; shell pid={} resolved through the fixture and fetched from it through network pid={} gen={}, the fixture answering the request it received; the next wget's request reached the fixture's hold port, which held it unanswered; Ctrl-\\ faulted the network service, the blocked wget read failed with ECONNRESET and the shell prompted again, init restarted the service as pid={} gen={}, its launch audit matched, the shell's client capability was re-issued for it, init settled, and from the same shell nslookup resolved through the fixture again and wget's request reached the fixture and was answered again; Ctrl-X faulted the console service, init restarted it as pid={}, the shell's console client was re-issued for it, and a typed echo reached the same shell through it",
+        before.audit_pid, AUDIT_FLOOD_DENIALS - AUDIT_HOLDER_BUDGET, before.shell.pid, before.network.pid, before.network.generation, after.network.pid, after.network.generation, after.console.map_or(0, |console| console.pid)
     );
     Ok(())
 }
@@ -753,6 +897,84 @@ mod tests {
     const NET1: u64 = 3;
     const NET2: u64 = 8;
     const AUDIT: u64 = 2;
+    const CONS1: u64 = 5;
+    const CONS2: u64 = 10;
+
+    fn console_fault() -> String {
+        format!(
+            "[HOOK] console fault armed pid={CONS1} gen=1 user_rip=0x0 parked-in=native at-ms=9\n\
+             [PROC] fault pid={CONS1} vector=14 err=0x14\n\
+             [SVC ] reaped service=22016 pid={CONS1} residue=0\n\
+             [IPC ] console pid={INIT}: [SUP ] restart service=22016 attempt=1\n\
+             [SVC ] launch service=22016 pid={CONS2} gen=2\n\
+             [CONS] authority granted pid={CONS2} port=22016:13 rights=serve registered=1 device=read|write\n\
+             [CONS] client reissued holder={SHELL} port=22016:13\n\
+             [SVC ] ready service=22016 pid={CONS2} gen=2 source=live-instance kernel-observed ports=1\n\
+             [IPC ] console pid={INIT}: [INIT] service=22016 ready gen=2\n\
+             [IPC ] console pid={INIT}: {SETTLED}\n"
+        )
+    }
+
+    fn echo_again() -> String {
+        format!(
+            "echo hel''lo-again\r\n\
+             [IPC ] console pid={CONS2}: {SERIAL_INPUT_SERVED}\n\
+             [CON ] pid={SHELL}: hello-again\n\
+             [CON ] pid={SHELL}: # "
+        )
+    }
+
+    #[test]
+    fn a_console_fault_moves_the_shell_to_generation_2_and_input_follows() {
+        let state = check_console_fault(&console_fault(), booted()).expect("console fault");
+        assert_eq!(
+            state.console,
+            Some(Network {
+                pid: CONS2,
+                generation: 2
+            })
+        );
+        check_console_input(&echo_again(), &["hello-again"], state).expect("echo");
+        let error = check_console_input(
+            &echo_again().replace(SERIAL_INPUT_SERVED, "nothing"),
+            &["hello-again"],
+            state,
+        )
+        .unwrap_err();
+        assert!(error.contains(SERIAL_INPUT_SERVED), "{error}");
+        let stale = echo_again().replace(&format!("pid={CONS2}:"), &format!("pid={CONS1}:"));
+        assert!(check_console_input(&stale, &["hello-again"], state).is_err());
+    }
+
+    #[test]
+    fn a_console_fault_needs_the_reissue_the_restart_and_the_same_shell() {
+        let booted = booted();
+        for (from, to) in [
+            (
+                format!("[CONS] client reissued holder={SHELL} port=22016:13\n"),
+                String::new(),
+            ),
+            (
+                format!("holder={SHELL} port=22016:13"),
+                format!("holder={SHELL} port=22016:12"),
+            ),
+            ("attempt=1".to_owned(), "attempt=2".to_owned()),
+            ("residue=0".to_owned(), "residue=1".to_owned()),
+            (
+                format!("pid={CONS2} gen=2\n"),
+                format!("pid={CONS1} gen=2\n"),
+            ),
+            (
+                format!("[IPC ] console pid={INIT}: {SETTLED}\n"),
+                String::new(),
+            ),
+        ] {
+            let segment = console_fault().replace(&from, &to);
+            assert!(check_console_fault(&segment, booted).is_err(), "{from:?}");
+        }
+        let exited = format!("{}[LNX ] exit pid={SHELL} status=0\n", console_fault());
+        assert!(check_console_fault(&exited, booted).is_err());
+    }
 
     fn network_instance(pid: u64, generation: u64) -> String {
         format!(
@@ -772,6 +994,7 @@ mod tests {
              [KERN] init launched pid={INIT} slot=0 declared-services=5\n\
              [IPC ] console pid={INIT}: [INIT] boot profile=base\n\
              [SVC ] launch service=21760 pid={AUDIT} gen=1\n\
+             [SVC ] launch service=22016 pid={CONS1} gen=1\n\
              {}\
              {}\n\
              [SVC ] shell process pid={SHELL} gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
@@ -848,6 +1071,7 @@ mod tests {
                     generation: 1
                 },
                 audit_pid: AUDIT,
+                console: None,
             }
         );
         let after = check_fault(&fault(), state).expect("fault");
@@ -1130,7 +1354,14 @@ mod tests {
 
     #[test]
     fn the_whole_run_allows_one_fault_one_restart_and_no_failure() {
-        let whole = format!("{}{}{}", boot(), flood(), fault());
+        let whole = format!(
+            "{}[IPC ] console pid={CONS1}: {SERIAL_INPUT_SERVED}\n{}{}{}{}",
+            boot(),
+            flood(),
+            fault(),
+            console_fault(),
+            echo_again()
+        );
         assert_eq!(check_whole(&whole), Ok(()));
         for extra in [
             "[FAIL] something\n",
@@ -1140,6 +1371,8 @@ mod tests {
             "[IPC ] console pid=1: [SUP ] restart service=20992 attempt=2\n",
             "[SVC ] launch service=21504 pid=9 gen=2\n",
             "[NET ] linux sockets lost count=1 reason=instance-gone\n",
+            "[SVC ] launch service=22016 pid=11 gen=3\n",
+            "[IPC ] console pid=10: [CONS] serial input answered a read\n",
         ] {
             assert!(check_whole(&format!("{whole}{extra}")).is_err(), "{extra}");
         }
