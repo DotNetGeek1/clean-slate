@@ -27,7 +27,9 @@ const _: () = assert!(LAUNCHER_PORT_PARAMS.validate().is_ok());
 pub(crate) const LAUNCHER_SERVE_RIGHTS: Rights = Rights::LAUNCH_SERVE;
 pub(crate) const LAUNCHER_CLIENT_RIGHTS: Rights = Rights::LAUNCH_CONNECT;
 
-/// Root `rights` on the launcher port; returns the handle.
+/// Root `rights` on the launcher port; returns the handle. Host tests build this module for
+/// every feature set, but only the system-init boot calls it.
+#[cfg_attr(not(clean_slate_system_init), allow(dead_code))]
 pub(crate) fn grant_launcher_port(
     holder: HolderId,
     rights: Rights,
