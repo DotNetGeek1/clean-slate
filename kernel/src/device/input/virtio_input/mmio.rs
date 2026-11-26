@@ -3,8 +3,8 @@
 use core::ptr::addr_of_mut;
 
 use super::{
-    classify, DeviceClass, InputConfig, InputDevice, CONFIG_UNION_BYTES, EVENT_BUFFERS,
-    EVENT_BYTES, EVENT_QUEUE,
+    classify, ClassifyError, DeviceClass, InputConfig, InputDevice, CONFIG_UNION_BYTES,
+    EVENT_BUFFERS, EVENT_BYTES, EVENT_QUEUE,
 };
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::device::input::i8042::InputSink;
@@ -137,9 +137,11 @@ impl InputConfig for MmioConfig<'_> {
         subsel: u8,
         out: &mut [u8; CONFIG_UNION_BYTES],
     ) -> Result<usize, TransportError> {
+        // QEMU bumps the config generation whenever `select` or `subsel` changes, so they are
+        // written first and only the reads run inside the generation loop.
+        self.0.write_device_config_u8(CONFIG_SELECT, select)?;
+        self.0.write_device_config_u8(CONFIG_SUBSEL, subsel)?;
         let (size, _) = self.0.read_device_config(|config| {
-            config.write_u8(CONFIG_SELECT, select)?;
-            config.write_u8(CONFIG_SUBSEL, subsel)?;
             let size = usize::from(config.read_u8(CONFIG_SIZE)?).min(CONFIG_UNION_BYTES);
             for (offset, byte) in (CONFIG_UNION..).zip(out.iter_mut().take(size)) {
                 *byte = config.read_u8(offset)?;
@@ -206,6 +208,11 @@ fn bring_up(function: PciFunction, position: usize) -> Result<DeviceClass, &'sta
     let class = match classify(&mut MmioConfig(&mut transport)) {
         Ok(class) => class,
         Err(error) => {
+            if let ClassifyError::Transport(cause) = error {
+                kernel_log_fmt(format_args!(
+                    "[INPT] virtio-input config query failed: {cause:?}\n"
+                ));
+            }
             transport.release();
             return Err(error.name());
         }

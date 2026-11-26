@@ -555,6 +555,22 @@ impl<A: DeviceAccess> ModernTransport<A> {
         Err(TransportError::ConfigUnstable)
     }
 
+    /// Write one driver-writable config byte (virtio-input `select`/`subsel`, #313), outside
+    /// the generation loop: a device may bump the generation on the write itself (QEMU's
+    /// virtio-input does), so only the reads that follow go through [`Self::read_device_config`].
+    #[cfg(any(test, clean_slate_boot_tail))]
+    pub(crate) fn write_device_config_u8(
+        &mut self,
+        offset: u32,
+        value: u8,
+    ) -> Result<(), TransportError> {
+        self.ensure_ready()?;
+        check_window(self.device_config_length()?, offset, Width::U8).map_err(access_error)?;
+        self.access
+            .write(Window::Device, offset, Width::U8, u32::from(value))
+            .map_err(access_error)
+    }
+
     #[cfg(test)]
     pub(crate) fn write_device_config_u32(
         &mut self,
@@ -979,16 +995,6 @@ impl<A: DeviceAccess> DeviceConfigReader<'_, A> {
     #[cfg(any(test, clean_slate_boot_tail))]
     pub(crate) fn read_u8(&mut self, offset: u32) -> Result<u8, TransportError> {
         Ok(self.read(offset, Width::U8)? as u8)
-    }
-
-    /// A driver-writable config byte (virtio-input `select`/`subsel`). The generation loop
-    /// around the closure still guards the reads that follow it.
-    #[cfg(any(test, clean_slate_boot_tail))]
-    pub(crate) fn write_u8(&mut self, offset: u32, value: u8) -> Result<(), TransportError> {
-        check_window(self.length, offset, Width::U8).map_err(access_error)?;
-        self.access
-            .write(Window::Device, offset, Width::U8, u32::from(value))
-            .map_err(access_error)
     }
 
     #[cfg(test)]
