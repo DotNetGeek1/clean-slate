@@ -59,8 +59,13 @@ pub(crate) fn rail(tier: QualityTier) -> Rect {
 
 /// Content origin of the `step`th toplevel the compositor placed since it started.
 pub(crate) fn window_origin(tier: QualityTier, step: u32) -> Point {
+    sized_window_origin(tier, PANEL_SIZE, step)
+}
+
+/// [`window_origin`] for a toplevel whose content is `size` (the terminal's, #311).
+pub(crate) fn sized_window_origin(tier: QualityTier, size: Size, step: u32) -> Point {
     let area = shell(tier).zones().window_area();
-    cascade(&chrome(tier), area, PANEL_SIZE, step)
+    cascade(&chrome(tier), area, size, step)
 }
 
 pub(crate) fn content_rect(origin: Point) -> Rect {

@@ -23,8 +23,8 @@ mod tests;
 
 pub use effects::{Effect, Effects, EFFECTS_CAPACITY, REVOKED_TRANSFERS_CAPACITY};
 pub use engine::{
-    HolderPortCounts, LimitRejections, PortCore, PortCounts, PortReleaseCounts, RegistrationError,
-    WakeBinding,
+    ClientWake, HolderPortCounts, LimitRejections, PortCore, PortCounts, PortReleaseCounts,
+    RegistrationError, WakeBinding,
 };
 pub use transfer::Transfer;
 

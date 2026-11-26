@@ -5,11 +5,14 @@
 //! reads row order, `restart` and `depends_on`. A self-test that needs different rows installs its
 //! own scenario manifest in place of [`SYSTEM_MANIFEST`]; it never adds launch code of its own.
 
-use crate::init_bootstrap::{DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_VIRTIO_GPU};
+use crate::init_bootstrap::{
+    desktop_terminal, desktop_tier, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_VIRTIO_GPU,
+};
 use crate::{
     AUDIT_SERVICE_ID, COMPOSITOR_SERVICE_ID, CONSOLE_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID,
     NETWORK_SERVICE_ID, NETWORK_SERVICE_MODE_ACCEPTANCE, PLAYGROUND_SERVICE_ID, STORAGE_SERVICE_ID,
-    STORAGE_SERVICE_MODE_OBJECT_SERVICE, SYSTEM_SHELL_SERVICE_ID,
+    STORAGE_SERVICE_MODE_OBJECT_SERVICE, SYSTEM_SHELL_SERVICE_ID, TERMINAL_SERVICE_ID,
+    TERMINAL_SHELL_SERVICE_ID,
 };
 use clean_slate_capability::{
     HOLDER_SLOT_QUOTA, MAX_SLOTS, MAX_SLOT_ALLOWANCE, MAX_SLOT_ALLOWANCES,
@@ -48,6 +51,8 @@ pub enum ServiceImage {
     Audit,
     /// `clean-slate-console-userspace`, the console service (#310).
     Console,
+    /// `clean-slate-terminal-userspace`, the terminal window (#311).
+    Terminal,
 }
 
 impl ServiceImage {
@@ -65,15 +70,16 @@ impl ServiceImage {
             | Self::DesktopShell
             | Self::Playground
             | Self::Audit
-            | Self::Console => false,
+            | Self::Console
+            | Self::Terminal => false,
         }
     }
 
-    /// The three #118 desktop images, which read a `DesktopLaunchPage`.
+    /// The #118 desktop images and the #311 terminal, which read a `DesktopLaunchPage`.
     pub const fn is_desktop(self) -> bool {
         matches!(
             self,
-            Self::Compositor | Self::DesktopShell | Self::Playground
+            Self::Compositor | Self::DesktopShell | Self::Playground | Self::Terminal
         )
     }
 }
@@ -143,6 +149,15 @@ pub enum Grant {
     /// console stream per connection. With no live instance the grant fails, and so does the
     /// start. Desktop images only, which must depend on the `ConsoleService` row.
     ConsoleClient,
+    /// Root `CONSOLE_CONNECT | CONSOLE_SESSION` on the live console port, in place of
+    /// `ConsoleClient`: the row's console streams, and those of every process it forks, belong
+    /// to the console session (#311), so they go to the session's front end. Linux shell rows
+    /// only, which must depend on the `ConsoleService` row.
+    ConsoleSession,
+    /// Root `CONSOLE_CONNECT | CONSOLE_ATTACH` on the live console port: the instance may
+    /// attach as the console session's front end (#311). Terminal rows only, which must depend
+    /// on the `ConsoleService` row.
+    ConsoleFrontEnd,
 }
 
 /// What init does when a started service exits or faults. Init counts ticks in monotonic
@@ -371,6 +386,50 @@ pub const PLAYGROUND_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: 0,
 };
 
+/// The terminal's shell (#311): the serial shell's image and authority, but its console
+/// streams belong to the console session, so its output goes to the terminal window and its
+/// input comes only from there. The terminal going away ends its input, so it exits and is
+/// started again for the next terminal.
+pub const TERMINAL_SHELL_SPEC: ServiceSpec = ServiceSpec {
+    id: TERMINAL_SHELL_SERVICE_ID,
+    image: ServiceImage::LinuxShell,
+    mode: 0,
+    grants: &[
+        Grant::Console,
+        Grant::ConsoleInput,
+        Grant::TmpObjects,
+        Grant::NetworkClient,
+        Grant::ConsoleSession,
+    ],
+    restart: SHELL_RESTART,
+    depends_on: &[STORAGE_SERVICE_ID, CONSOLE_SERVICE_ID],
+    slot_allowance: None,
+    memory_pages: 0,
+};
+
+/// The terminal window (#311), the console session's front end. It starts after the
+/// playground's window is mapped, so the cascade puts it second and the playground keeps the
+/// first window's focus. Closing it exits it, and the restart opens a new one on a new shell.
+pub const TERMINAL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
+    id: TERMINAL_SERVICE_ID,
+    image: ServiceImage::Terminal,
+    mode: 0,
+    grants: &[
+        Grant::Console,
+        Grant::GraphicsAppRole,
+        Grant::ConsoleFrontEnd,
+    ],
+    restart: DESKTOP_RESTART,
+    depends_on: &[
+        COMPOSITOR_SERVICE_ID,
+        DESKTOP_SHELL_SERVICE_ID,
+        CONSOLE_SERVICE_ID,
+        PLAYGROUND_SERVICE_ID,
+    ],
+    slot_allowance: None,
+    memory_pages: 0,
+};
+
 /// The desktop profile: the five system rows followed by the three desktop rows.
 pub const SYSTEM_DESKTOP_MANIFEST: &[ServiceSpec] = &[
     STORAGE_SERVICE_SPEC,
@@ -385,14 +444,35 @@ pub const SYSTEM_DESKTOP_MANIFEST: &[ServiceSpec] = &[
 
 const _: () = assert!(validate_manifest(SYSTEM_DESKTOP_MANIFEST).is_ok());
 
+/// The desktop profile with the terminal (`q0-terminal`, `q1-terminal`): the desktop rows, then
+/// the terminal's shell and the terminal (#311).
+pub const SYSTEM_TERMINAL_DESKTOP_MANIFEST: &[ServiceSpec] = &[
+    SYSTEM_MANIFEST[0],
+    SYSTEM_MANIFEST[1],
+    SYSTEM_MANIFEST[2],
+    SYSTEM_MANIFEST[3],
+    SYSTEM_MANIFEST[4],
+    COMPOSITOR_SERVICE_SPEC,
+    DESKTOP_SHELL_SERVICE_SPEC,
+    PLAYGROUND_SERVICE_SPEC,
+    TERMINAL_SHELL_SPEC,
+    TERMINAL_SERVICE_SPEC,
+];
+
+const _: () = assert!(validate_manifest(SYSTEM_TERMINAL_DESKTOP_MANIFEST).is_ok());
+
 /// The manifest for an `InitBootstrap.desktop_mode` word: [`SYSTEM_DESKTOP_MANIFEST`] for `q0`
-/// or `q1`, else [`SYSTEM_MANIFEST`] (off, or a word init does not understand). The kernel and
-/// init both select with this, so they cannot disagree about the rows.
+/// or `q1`, [`SYSTEM_TERMINAL_DESKTOP_MANIFEST`] for those with the terminal, else
+/// [`SYSTEM_MANIFEST`] (off, or a word init does not understand). The kernel and init both
+/// select with this, so they cannot disagree about the rows.
 pub const fn manifest_for(desktop_mode: u64) -> &'static [ServiceSpec] {
-    if desktop_mode == DESKTOP_MODE_FRAMEBUFFER || desktop_mode == DESKTOP_MODE_VIRTIO_GPU {
-        SYSTEM_DESKTOP_MANIFEST
-    } else {
+    let tier = desktop_tier(desktop_mode);
+    if tier != DESKTOP_MODE_FRAMEBUFFER && tier != DESKTOP_MODE_VIRTIO_GPU {
         SYSTEM_MANIFEST
+    } else if desktop_terminal(desktop_mode) {
+        SYSTEM_TERMINAL_DESKTOP_MANIFEST
+    } else {
+        SYSTEM_DESKTOP_MANIFEST
     }
 }
 
@@ -453,9 +533,15 @@ pub enum ManifestError {
     GraphicsRoleWithoutPortDependency {
         row: usize,
     },
-    /// A `Grant::ConsoleClient` holder does not list the `Grant::ConsoleService` row in
-    /// `depends_on` (or no earlier row holds `ConsoleService`).
+    /// A `Grant::ConsoleClient`, `Grant::ConsoleSession` or `Grant::ConsoleFrontEnd` holder
+    /// does not list the `Grant::ConsoleService` row in `depends_on` (or no earlier row holds
+    /// `ConsoleService`).
     ConsoleClientWithoutServiceDependency {
+        row: usize,
+    },
+    /// A row holds both `Grant::ConsoleClient` and `Grant::ConsoleSession`: one console port
+    /// record per holder.
+    ConsoleClientAndSession {
         row: usize,
     },
     /// `memory_pages` is above `NATIVE_MEMORY_MAX_BUDGET_PAGES`, or set on a Linux row.
@@ -538,12 +624,17 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
             {
                 return Err(ManifestError::GraphicsRoleWithoutPortDependency { row });
             }
-            if matches!(spec.grants[grant], Grant::ConsoleClient)
-                && !depends_on_row_granting(manifest, row, Grant::ConsoleService)
+            if matches!(
+                spec.grants[grant],
+                Grant::ConsoleClient | Grant::ConsoleSession | Grant::ConsoleFrontEnd
+            ) && !depends_on_row_granting(manifest, row, Grant::ConsoleService)
             {
                 return Err(ManifestError::ConsoleClientWithoutServiceDependency { row });
             }
             grant += 1;
+        }
+        if spec.grants(Grant::ConsoleClient) && spec.grants(Grant::ConsoleSession) {
+            return Err(ManifestError::ConsoleClientAndSession { row });
         }
         if matches!(spec.image, ServiceImage::Storage)
             && spec.grants(Grant::ObjectServiceRole)
@@ -592,6 +683,8 @@ const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
         }
         Grant::ConsoleService => matches!(image, ServiceImage::Console),
         Grant::ConsoleClient => image.is_desktop() || matches!(image, ServiceImage::LinuxShell),
+        Grant::ConsoleSession => matches!(image, ServiceImage::LinuxShell),
+        Grant::ConsoleFrontEnd => matches!(image, ServiceImage::Terminal),
         Grant::AuditReader => matches!(image, ServiceImage::Audit),
         Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
             matches!(image, ServiceImage::LinuxShell)
@@ -600,7 +693,9 @@ const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
             matches!(image, ServiceImage::Compositor)
         }
         Grant::GraphicsShellRole => matches!(image, ServiceImage::DesktopShell),
-        Grant::GraphicsAppRole => matches!(image, ServiceImage::Playground),
+        Grant::GraphicsAppRole => {
+            matches!(image, ServiceImage::Playground | ServiceImage::Terminal)
+        }
     }
 }
 
@@ -694,7 +789,7 @@ mod tests {
 
     #[test]
     fn only_the_compositor_row_carries_a_slot_allowance() {
-        for spec in SYSTEM_DESKTOP_MANIFEST {
+        for spec in SYSTEM_TERMINAL_DESKTOP_MANIFEST {
             let expected = (spec.id == COMPOSITOR_SERVICE_ID).then_some(24);
             assert_eq!(spec.slot_allowance, expected, "{:?}", spec.id);
         }
@@ -1068,6 +1163,98 @@ mod tests {
         );
         assert_eq!(SYSTEM_DESKTOP_MANIFEST[..5], *SYSTEM_MANIFEST);
         assert_eq!(validate_manifest(SYSTEM_DESKTOP_MANIFEST), Ok(()));
+    }
+
+    #[test]
+    fn the_terminal_desktop_is_the_desktop_then_the_terminal_shell_and_terminal() {
+        assert_eq!(
+            SYSTEM_TERMINAL_DESKTOP_MANIFEST[..SYSTEM_DESKTOP_MANIFEST.len()],
+            *SYSTEM_DESKTOP_MANIFEST
+        );
+        let ids: Vec<u32> = SYSTEM_TERMINAL_DESKTOP_MANIFEST[SYSTEM_DESKTOP_MANIFEST.len()..]
+            .iter()
+            .map(|spec| spec.id.0)
+            .collect();
+        assert_eq!(ids, [0x5401, 0x5303]);
+        assert!(find_service(SYSTEM_DESKTOP_MANIFEST, TERMINAL_SERVICE_ID).is_none());
+        use crate::init_bootstrap::{DESKTOP_MODE_OFF, DESKTOP_MODE_TERMINAL};
+        for tier in [DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_VIRTIO_GPU] {
+            assert_eq!(manifest_for(tier), SYSTEM_DESKTOP_MANIFEST);
+            assert_eq!(
+                manifest_for(tier | DESKTOP_MODE_TERMINAL),
+                SYSTEM_TERMINAL_DESKTOP_MANIFEST
+            );
+        }
+        assert_eq!(
+            manifest_for(DESKTOP_MODE_OFF | DESKTOP_MODE_TERMINAL),
+            SYSTEM_MANIFEST
+        );
+    }
+
+    #[test]
+    fn terminal_rows_hold_the_session_grants() {
+        let shell =
+            find_service(SYSTEM_TERMINAL_DESKTOP_MANIFEST, TERMINAL_SHELL_SERVICE_ID).unwrap();
+        assert_eq!(shell.image, ServiceImage::LinuxShell);
+        assert!(shell.grants(Grant::ConsoleSession));
+        assert!(!shell.grants(Grant::ConsoleClient));
+        assert_eq!(shell.depends_on, [STORAGE_SERVICE_ID, CONSOLE_SERVICE_ID]);
+        let terminal = find_service(SYSTEM_TERMINAL_DESKTOP_MANIFEST, TERMINAL_SERVICE_ID).unwrap();
+        assert_eq!(terminal.image, ServiceImage::Terminal);
+        assert!(terminal.image.is_desktop());
+        assert_eq!(
+            terminal.grants,
+            [
+                Grant::Console,
+                Grant::GraphicsAppRole,
+                Grant::ConsoleFrontEnd
+            ]
+        );
+        assert_eq!(*terminal.depends_on.last().unwrap(), PLAYGROUND_SERVICE_ID);
+    }
+
+    #[test]
+    fn console_session_and_front_end_are_image_bound_and_need_the_service() {
+        assert!(grant_supported_by_image(
+            Grant::ConsoleSession,
+            ServiceImage::LinuxShell
+        ));
+        assert!(!grant_supported_by_image(
+            Grant::ConsoleSession,
+            ServiceImage::Playground
+        ));
+        assert!(grant_supported_by_image(
+            Grant::ConsoleFrontEnd,
+            ServiceImage::Terminal
+        ));
+        assert!(!grant_supported_by_image(
+            Grant::ConsoleFrontEnd,
+            ServiceImage::LinuxShell
+        ));
+        let mut shell = TERMINAL_SHELL_SPEC;
+        shell.depends_on = &[STORAGE_SERVICE_ID];
+        let rows = [
+            SYSTEM_MANIFEST[0],
+            SYSTEM_MANIFEST[1],
+            SYSTEM_MANIFEST[2],
+            shell,
+        ];
+        assert_eq!(
+            validate_manifest(&rows),
+            Err(ManifestError::ConsoleClientWithoutServiceDependency { row: 3 })
+        );
+        let mut both = TERMINAL_SHELL_SPEC;
+        both.grants = &[Grant::ConsoleClient, Grant::ConsoleSession];
+        let rows = [
+            SYSTEM_MANIFEST[0],
+            SYSTEM_MANIFEST[1],
+            SYSTEM_MANIFEST[2],
+            both,
+        ];
+        assert_eq!(
+            validate_manifest(&rows),
+            Err(ManifestError::ConsoleClientAndSession { row: 3 })
+        );
     }
 
     #[test]

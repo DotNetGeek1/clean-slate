@@ -12,14 +12,14 @@ pub enum Effect<B> {
     WakeSendSpace(PortKey),
     /// Client waiters on this connection (`RECV_EVENT`).
     WakeConnection(ConnectionId),
-    /// Set this bit on the server's bound work set.
+    /// Set this bit on a bound work set: the server's, or a client's for its connection.
     Signal(B, u32),
 }
 
-/// Distinct effects of one operation are at most `4 * PORTS + CONNS` (a server wake, a
-/// send-space wake and two signal bits per port, one wake per connection); `PortCore::new`
-/// asserts that bound fits.
-pub const EFFECTS_CAPACITY: usize = 32;
+/// Distinct effects of one operation are at most `4 * PORTS + 2 * CONNS` (a server wake, a
+/// send-space wake and two signal bits per port, a wake and a client signal bit per
+/// connection); `PortCore::new` asserts that bound fits.
+pub const EFFECTS_CAPACITY: usize = 48;
 
 /// One operation revokes at most every undelivered transfer child, which is at most
 /// `PORTS * PORT_MAX_TRANSFERS_IN_FLIGHT`; `PortCore::new` asserts that bound fits.

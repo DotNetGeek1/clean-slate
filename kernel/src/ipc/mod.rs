@@ -9,8 +9,10 @@ use clean_slate_capability::{HolderId, ResourceRef, Rights};
 pub(super) const IPC_MAX_MESSAGE_BYTES: usize = 64;
 /// Fixed endpoint-slot bound (host-testable; Linux console grants reuse one slot).
 pub(crate) const IPC_ENDPOINT_CAPACITY: usize = 4;
-/// Fixed send-capability-slot bound (one grant per holder; released on holder teardown).
-pub(crate) const IPC_CAPABILITY_CAPACITY: usize = 8;
+/// Fixed send-capability-slot bound (one grant per holder; released on holder teardown). The
+/// terminal desktop's init and nine console-holding rows need ten; sixteen leaves room for
+/// restarts that overlap a teardown.
+pub(crate) const IPC_CAPABILITY_CAPACITY: usize = 16;
 #[cfg(any(feature = "m3-ipc-self-test", test))]
 pub(super) const USERSPACE_IPC_TEST_PID: u64 = 1;
 #[cfg(any(feature = "m3-ipc-self-test", test))]

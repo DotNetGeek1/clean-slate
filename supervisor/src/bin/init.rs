@@ -17,10 +17,13 @@ use clean_slate_native_abi::status::STATUS_EBADF;
 use clean_slate_runtime::console::Console;
 use clean_slate_runtime::{port, process, Error, Kernel, Syscalls};
 use clean_slate_service_fixtures::init_bootstrap::{
-    InitBootstrap, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_VIRTIO_GPU,
-    INIT_BOOTSTRAP_ADDRESS,
+    InitBootstrap, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_TERMINAL,
+    DESKTOP_MODE_VIRTIO_GPU, INIT_BOOTSTRAP_ADDRESS,
 };
-use clean_slate_service_fixtures::manifest::{manifest_for, SYSTEM_DESKTOP_MANIFEST};
+
+const TERMINAL_FRAMEBUFFER: u64 = DESKTOP_MODE_FRAMEBUFFER | DESKTOP_MODE_TERMINAL;
+const TERMINAL_VIRTIO_GPU: u64 = DESKTOP_MODE_VIRTIO_GPU | DESKTOP_MODE_TERMINAL;
+use clean_slate_service_fixtures::manifest::{manifest_for, SYSTEM_TERMINAL_DESKTOP_MANIFEST};
 use clean_slate_service_lifecycle::ServiceId;
 use clean_slate_supervisor::{
     DiagnosticSink, SupervisorError, SyscallLifecycleControl, SystemInit, INIT_READY_TIMEOUT_NS,
@@ -28,10 +31,10 @@ use clean_slate_supervisor::{
 
 /// Must never appear on serial: the boot lane fails if it does.
 const CONSOLE_PROBE: &[u8] = b"[INIT] console probe on a non-console handle\n";
-/// Supervisor slots; the desktop manifest has seven rows, the base one four.
-const SERVICE_SLOTS: usize = 8;
+/// Supervisor slots: the terminal desktop has ten rows, the desktop eight, the base five.
+const SERVICE_SLOTS: usize = 12;
 
-const _: () = assert!(SYSTEM_DESKTOP_MANIFEST.len() <= SERVICE_SLOTS);
+const _: () = assert!(SYSTEM_TERMINAL_DESKTOP_MANIFEST.len() <= SERVICE_SLOTS);
 
 struct ConsoleSink {
     console: Console,
@@ -128,6 +131,18 @@ fn log_boot_profile(console: Console, mode: u64) {
         }
         DESKTOP_MODE_VIRTIO_GPU => {
             let _ = console.send(&mut Kernel, b"[INIT] boot profile=desktop tier=Q1\n");
+        }
+        TERMINAL_FRAMEBUFFER => {
+            let _ = console.send(
+                &mut Kernel,
+                b"[INIT] boot profile=desktop tier=Q0 terminal=on\n",
+            );
+        }
+        TERMINAL_VIRTIO_GPU => {
+            let _ = console.send(
+                &mut Kernel,
+                b"[INIT] boot profile=desktop tier=Q1 terminal=on\n",
+            );
         }
         other => {
             let mut buffer = [0u8; 80];

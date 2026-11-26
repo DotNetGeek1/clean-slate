@@ -307,6 +307,7 @@ name = "clean-slate-terminal"
 version = "0.0.1"
 dependencies = [
  "clean-slate-graphics",
+ "clean-slate-native-abi",
  "clean-slate-raster",
  "clean-slate-runtime",
  "clean-slate-ui",
@@ -1251,6 +1252,7 @@ dependencies = [
  "clean-slate-raster",
  "clean-slate-rootfs",
  "clean-slate-store",
+ "clean-slate-terminal",
  "clean-slate-ui",
  "rcgen",
  "rustls",

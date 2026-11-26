@@ -618,7 +618,7 @@ mod tests {
     }
 
     /// Init's `SERVICE_SLOTS`.
-    const SLOTS: usize = 8;
+    const SLOTS: usize = 12;
 
     struct Harness {
         init: SystemInit<SharedKernel, SharedLog, SLOTS>,

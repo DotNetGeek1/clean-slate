@@ -11,11 +11,13 @@
 //! - [`app`]: the terminal's state tying those together, and the input waiting for the stream.
 //! - [`render`]: paints the view's rows.
 //! - [`session`]: the compositor protocol client, sans IO.
+//! - [`host`]: the runtime compositor client as the session's host.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod host;
 pub mod keys;
 pub mod line;
 pub mod render;

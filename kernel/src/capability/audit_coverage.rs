@@ -335,6 +335,11 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
     ("service/port.rs", "server_bind_wake", Records),
     (
         "service/port.rs",
+        "client_bind_events",
+        NoDecision("binds the caller's own connection to its own work set; no capability is used"),
+    ),
+    (
+        "service/port.rs",
         "on_holder_exit",
         Via("service/port.rs", "with_ports"),
     ),

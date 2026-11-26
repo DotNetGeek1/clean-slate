@@ -122,10 +122,19 @@ impl Terminal {
         self.text_events = on;
     }
 
-    /// Output from the console stream.
+    /// Output from the console stream. A bare `\n` also returns the cursor (a tty's `onlcr`):
+    /// the Linux personality has no termios, so programs write plain newlines.
     pub fn output(&mut self, bytes: &[u8]) {
         self.stats.output_bytes += bytes.len() as u64;
-        self.parser.feed(&mut self.screen, bytes);
+        for line in bytes.split_inclusive(|&byte| byte == b'\n') {
+            match line.split_last() {
+                Some((b'\n', text)) => {
+                    self.parser.feed(&mut self.screen, text);
+                    self.parser.feed(&mut self.screen, b"\r\n");
+                }
+                _ => self.parser.feed(&mut self.screen, line),
+            }
+        }
     }
 
     fn edit(&mut self, key: Key) {

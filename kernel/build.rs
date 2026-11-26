@@ -443,6 +443,7 @@ fn main() {
                 "playground_userspace.bin",
                 "clean-slate-playground-userspace",
             ),
+            ("terminal_userspace.bin", "clean-slate-terminal-userspace"),
         ] {
             embed_userspace_image(raw_name, bin_name, true);
         }
@@ -677,6 +678,7 @@ fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
             ("clean-slate-desktop-shell", "core,compiler_builtins")
         }
         "clean-slate-playground-userspace" => ("clean-slate-playground", "core,compiler_builtins"),
+        "clean-slate-terminal-userspace" => ("clean-slate-terminal", "core,compiler_builtins"),
         _ => panic!("unexpected userspace bin {bin_name}"),
     }
 }
@@ -743,6 +745,7 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
                 "DESKTOP_SHELL_USERSPACE",
             ),
             "playground_userspace.bin" => ("playground_userspace_entry.rs", "PLAYGROUND_USERSPACE"),
+            "terminal_userspace.bin" => ("terminal_userspace_entry.rs", "TERMINAL_USERSPACE"),
             _ => panic!("unexpected userspace image {raw_name}"),
         };
         let generated = out_dir.join(generated_file);
@@ -772,7 +775,10 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
 fn emits_image_base(prefix: &str) -> bool {
     matches!(
         prefix,
-        "COMPOSITOR_USERSPACE" | "DESKTOP_SHELL_USERSPACE" | "PLAYGROUND_USERSPACE"
+        "COMPOSITOR_USERSPACE"
+            | "DESKTOP_SHELL_USERSPACE"
+            | "PLAYGROUND_USERSPACE"
+            | "TERMINAL_USERSPACE"
     )
 }
 
@@ -841,9 +847,10 @@ fn perm_bits(perms: SegmentPermissions) -> u8 {
 /// image, so a name missing from this list fails that build.
 fn userspace_map_base(raw_name: &str) -> u64 {
     match raw_name {
-        "compositor_userspace.bin" | "desktop_shell_userspace.bin" | "playground_userspace.bin" => {
-            clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE
-        }
+        "compositor_userspace.bin"
+        | "desktop_shell_userspace.bin"
+        | "playground_userspace.bin"
+        | "terminal_userspace.bin" => clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE,
         _ => USERSPACE_IMAGE_LOAD_BASE,
     }
 }

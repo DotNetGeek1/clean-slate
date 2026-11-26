@@ -270,7 +270,9 @@ impl HeldAuthority {
             audit_read: held(Grant::AuditReader),
             console_serve: held(Grant::ConsoleService),
             console_device: held(Grant::ConsoleService),
-            console_client: held(Grant::ConsoleClient),
+            console_client: held(Grant::ConsoleClient)
+                + held(Grant::ConsoleSession)
+                + held(Grant::ConsoleFrontEnd),
             outside: OutsideCapabilitySpace {
                 ports_served: held(Grant::GraphicsPort) + held(Grant::ConsoleService),
                 raw_network_link: held(Grant::NetworkService),
@@ -460,20 +462,22 @@ impl InstalledDisplay {
 #[cfg(clean_slate_system_init)]
 fn effective_desktop_mode(requested: u64, display: InstalledDisplay) -> u64 {
     use clean_slate_service_fixtures::init_bootstrap::{
-        DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_VIRTIO_GPU,
+        desktop_tier, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_TERMINAL,
+        DESKTOP_MODE_VIRTIO_GPU,
     };
 
-    if requested == DESKTOP_MODE_OFF {
-        return requested;
+    if desktop_tier(requested) == DESKTOP_MODE_OFF {
+        return DESKTOP_MODE_OFF;
     }
+    let terminal = requested & DESKTOP_MODE_TERMINAL;
     match display {
         InstalledDisplay::None => {
             kernel_log_fmt(format_args!("{NO_DISPLAY_LINE}\n"));
             DESKTOP_MODE_OFF
         }
-        InstalledDisplay::Framebuffer if requested == DESKTOP_MODE_VIRTIO_GPU => {
+        InstalledDisplay::Framebuffer if desktop_tier(requested) == DESKTOP_MODE_VIRTIO_GPU => {
             kernel_log_fmt(format_args!("{FRAMEBUFFER_TIER_LINE}\n"));
-            DESKTOP_MODE_FRAMEBUFFER
+            DESKTOP_MODE_FRAMEBUFFER | terminal
         }
         InstalledDisplay::Framebuffer | InstalledDisplay::VirtioGpu => requested,
     }
@@ -505,7 +509,7 @@ pub(crate) fn launch_init(
 
     let option = crate::boot::boot_options::read_boot_option();
     crate::boot::boot_options::log_boot_option(&option);
-    let desktop_mode = effective_desktop_mode(option.mode.word(), InstalledDisplay::active());
+    let desktop_mode = effective_desktop_mode(option.word(), InstalledDisplay::active());
     let manifest = manifest_for(desktop_mode);
     if let Err(error) = validate_manifest(manifest) {
         kernel_log_fmt(format_args!("[FAIL] init manifest refused: {error:?}\n"));
@@ -975,6 +979,26 @@ mod tests {
         });
     }
 
+    /// The terminal holds what the playground does, its console record being the front end's;
+    /// the terminal's shell holds what the serial shell does, its record being a session one.
+    #[cfg(clean_slate_system_init)]
+    #[test]
+    fn terminal_rows_hold_what_the_app_and_the_serial_shell_hold() {
+        use clean_slate_service_fixtures::manifest::{
+            find_service, SYSTEM_TERMINAL_DESKTOP_MANIFEST,
+        };
+        use clean_slate_service_fixtures::{
+            PLAYGROUND_SERVICE_ID, SYSTEM_SHELL_SERVICE_ID, TERMINAL_SERVICE_ID,
+            TERMINAL_SHELL_SERVICE_ID,
+        };
+
+        let row =
+            |id| HeldAuthority::for_row(find_service(SYSTEM_TERMINAL_DESKTOP_MANIFEST, id), true);
+        assert_eq!(row(TERMINAL_SERVICE_ID), row(PLAYGROUND_SERVICE_ID));
+        assert_eq!(row(TERMINAL_SHELL_SERVICE_ID), row(SYSTEM_SHELL_SERVICE_ID));
+        assert_eq!(row(TERMINAL_SHELL_SERVICE_ID).console_client, 1);
+    }
+
     #[cfg(clean_slate_system_init)]
     #[test]
     fn a_desktop_request_without_a_display_boots_base() {
@@ -1021,6 +1045,29 @@ mod tests {
                 "q0 is honoured on either backend"
             );
         }
+    }
+
+    #[cfg(clean_slate_system_init)]
+    #[test]
+    fn the_terminal_flag_survives_the_tier_fallback_but_not_the_desktop_going_off() {
+        use clean_slate_service_fixtures::init_bootstrap::{
+            DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_TERMINAL,
+            DESKTOP_MODE_VIRTIO_GPU,
+        };
+        let q1 = DESKTOP_MODE_VIRTIO_GPU | DESKTOP_MODE_TERMINAL;
+        assert_eq!(effective_desktop_mode(q1, InstalledDisplay::VirtioGpu), q1);
+        assert_eq!(
+            effective_desktop_mode(q1, InstalledDisplay::Framebuffer),
+            DESKTOP_MODE_FRAMEBUFFER | DESKTOP_MODE_TERMINAL
+        );
+        assert_eq!(
+            effective_desktop_mode(q1, InstalledDisplay::None),
+            DESKTOP_MODE_OFF
+        );
+        assert_eq!(
+            effective_desktop_mode(DESKTOP_MODE_TERMINAL, InstalledDisplay::VirtioGpu),
+            DESKTOP_MODE_OFF
+        );
     }
 
     #[cfg(clean_slate_system_init)]

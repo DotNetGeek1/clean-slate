@@ -14,6 +14,7 @@ use crate::sync::global_cell::GlobalCell;
 use clean_slate_service_fixtures::manifest::graphics_port_row;
 use clean_slate_service_fixtures::manifest::{
     find_service, Grant, ServiceSpec, SYSTEM_DESKTOP_MANIFEST, SYSTEM_MANIFEST,
+    SYSTEM_TERMINAL_DESKTOP_MANIFEST,
 };
 use clean_slate_service_fixtures::{
     NETWORK_DEVICE_ID, NETWORK_SERVICE_ID, STORAGE_BLOCK_DEVICE_ID,
@@ -42,6 +43,7 @@ const SERVICE_TERMINATE_STATUS: u64 = 0;
 // Init declares every system service, so the registry must hold the whole manifest.
 const _: () = assert!(SYSTEM_MANIFEST.len() <= SERVICE_REGISTRY_CAPACITY);
 const _: () = assert!(SYSTEM_DESKTOP_MANIFEST.len() <= SERVICE_REGISTRY_CAPACITY);
+const _: () = assert!(SYSTEM_TERMINAL_DESKTOP_MANIFEST.len() <= SERVICE_REGISTRY_CAPACITY);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LiveServiceInstance {
@@ -1344,19 +1346,33 @@ impl InstanceGrantAuthority for KernelInstanceGrants {
     }
 
     #[cfg(clean_slate_desktop)]
-    fn grant_console_client(&mut self, pid: u64) -> Result<(), &'static str> {
-        use crate::capability::console::{grant_console_port, CONSOLE_CLIENT_RIGHTS};
+    fn grant_console_client(
+        &mut self,
+        pid: u64,
+        role: super::grants::ConsoleClientRole,
+    ) -> Result<(), &'static str> {
+        use super::grants::ConsoleClientRole;
+        use crate::capability::console::{
+            grant_console_port, CONSOLE_CLIENT_RIGHTS, CONSOLE_FRONT_END_RIGHTS,
+            CONSOLE_SESSION_CLIENT_RIGHTS,
+        };
         use clean_slate_capability::{HolderId, ResourceRef};
+
+        let (rights, label) = match role {
+            ConsoleClientRole::Plain => (CONSOLE_CLIENT_RIGHTS, "connect"),
+            ConsoleClientRole::Session => (CONSOLE_SESSION_CLIENT_RIGHTS, "connect|session"),
+            ConsoleClientRole::FrontEnd => (CONSOLE_FRONT_END_RIGHTS, "connect|attach"),
+        };
 
         let Some(port) = self.live_console_port else {
             return Err(self.grant_failed(pid, "console client", "no live console port"));
         };
         let resource =
             ResourceRef::console_port(u64::from(port.service.0), u64::from(port.generation.0));
-        grant_console_port(HolderId(pid), resource, CONSOLE_CLIENT_RIGHTS)
+        grant_console_port(HolderId(pid), resource, rights)
             .map_err(|_| self.grant_failed(pid, "console client", "capability refused"))?;
         kernel_log_fmt(format_args!(
-            "[CONS] authority granted pid={pid} port={}:{} rights=connect\n",
+            "[CONS] authority granted pid={pid} port={}:{} rights={label}\n",
             port.service.0, port.generation.0
         ));
         Ok(())
@@ -1368,7 +1384,11 @@ impl InstanceGrantAuthority for KernelInstanceGrants {
     }
 
     #[cfg(not(clean_slate_desktop))]
-    fn grant_console_client(&mut self, pid: u64) -> Result<(), &'static str> {
+    fn grant_console_client(
+        &mut self,
+        pid: u64,
+        _role: super::grants::ConsoleClientRole,
+    ) -> Result<(), &'static str> {
         Err(self.grant_failed(pid, "console client", DESKTOP_NOT_COMPILED))
     }
 
@@ -1410,7 +1430,10 @@ const fn rollback_failure_message(grant: Grant) -> &'static str {
         | Grant::InputSeat
         | Grant::GraphicsShellRole
         | Grant::GraphicsAppRole => "desktop grant rollback teardown failed",
-        Grant::ConsoleService | Grant::ConsoleClient => "console grant rollback teardown failed",
+        Grant::ConsoleService
+        | Grant::ConsoleClient
+        | Grant::ConsoleSession
+        | Grant::ConsoleFrontEnd => "console grant rollback teardown failed",
     }
 }
 
@@ -2089,20 +2112,20 @@ mod tests {
     }
 
     #[test]
-    fn registry_holds_eight_services_and_refuses_the_ninth() {
-        assert_eq!(SERVICE_REGISTRY_CAPACITY, 8);
+    fn registry_holds_twelve_services_and_refuses_the_thirteenth() {
+        assert_eq!(SERVICE_REGISTRY_CAPACITY, 12);
         let mut controller = ServiceLifecycleController::new();
-        for id in 1..=8 {
+        for id in 1..=12 {
             controller
                 .declare_service(ServiceId(id))
                 .expect("declare within capacity");
         }
         assert_eq!(
-            controller.declare_service(ServiceId(9)),
+            controller.declare_service(ServiceId(13)),
             Err("service registry capacity exceeded")
         );
-        assert!(controller.find_service(ServiceId(9)).is_none());
-        for id in 1..=8 {
+        assert!(controller.find_service(ServiceId(13)).is_none());
+        for id in 1..=12 {
             assert!(controller.find_service(ServiceId(id)).is_some());
         }
         assert_eq!(

@@ -18,6 +18,7 @@ use clean_slate_service_fixtures::init_bootstrap::DESKTOP_MODE_FRAMEBUFFER;
 use clean_slate_service_fixtures::manifest::{Grant, ServiceSpec};
 pub(crate) use clean_slate_service_fixtures::{
     COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID as SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
+    TERMINAL_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::ServiceId;
 
@@ -37,6 +38,8 @@ pub(crate) enum DesktopRole {
     Compositor,
     Shell,
     App,
+    /// The #311 terminal window: a desktop app too.
+    Terminal,
 }
 
 impl DesktopRole {
@@ -45,6 +48,7 @@ impl DesktopRole {
             Self::Compositor => COMPOSITOR_SERVICE_ID,
             Self::Shell => SHELL_SERVICE_ID,
             Self::App => PLAYGROUND_SERVICE_ID,
+            Self::Terminal => TERMINAL_SERVICE_ID,
         }
     }
 
@@ -53,6 +57,7 @@ impl DesktopRole {
             id if id == COMPOSITOR_SERVICE_ID.0 => Some(Self::Compositor),
             id if id == SHELL_SERVICE_ID.0 => Some(Self::Shell),
             id if id == PLAYGROUND_SERVICE_ID.0 => Some(Self::App),
+            id if id == TERMINAL_SERVICE_ID.0 => Some(Self::Terminal),
             _ => None,
         }
     }
@@ -61,7 +66,7 @@ impl DesktopRole {
     pub(crate) const fn stack_pages(self) -> u64 {
         match self {
             Self::Compositor => 64,
-            Self::Shell | Self::App => 32,
+            Self::Shell | Self::App | Self::Terminal => 32,
         }
     }
 }
@@ -76,7 +81,9 @@ pub(crate) fn set_row_desktop_mode(desktop_mode: u64) {
 }
 
 const fn tier_for_mode(desktop_mode: u64) -> u64 {
-    if desktop_mode == DESKTOP_MODE_FRAMEBUFFER {
+    if clean_slate_service_fixtures::init_bootstrap::desktop_tier(desktop_mode)
+        == DESKTOP_MODE_FRAMEBUFFER
+    {
         LAUNCH_TIER_Q0
     } else {
         LAUNCH_TIER_Q1
@@ -135,6 +142,7 @@ mod tests {
             DesktopRole::Compositor,
             DesktopRole::Shell,
             DesktopRole::App,
+            DesktopRole::Terminal,
         ] {
             assert_eq!(DesktopRole::for_service(role.service()), Some(role));
         }

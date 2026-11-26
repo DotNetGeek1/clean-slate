@@ -519,6 +519,19 @@ pub(crate) fn server_bind_wake(
     record_port_decision(serve_event(holder, serve), false, result)
 }
 
+pub(crate) fn client_bind_events(
+    holder: HolderId,
+    connection: ConnectionId,
+    target: WorkSetBinding,
+    bit: u32,
+) -> Result<(), PortError> {
+    caller_for(holder).and_then(|caller| {
+        with_ports(|core, _, effects| {
+            core.bind_events(caller, connection.encode(), target, bit, effects)
+        })
+    })
+}
+
 // ---- P4 teardown and accounting ----
 
 /// The W5 `Port` teardown slot: ports `holder` serves go away (`ServerGone`), then its client
