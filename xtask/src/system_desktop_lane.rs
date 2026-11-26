@@ -554,38 +554,34 @@ fn hold_key(lane: &mut Lane) -> Result<(), XtaskError> {
             down: false,
         }],
     )?;
-    let repeated = lane.session.wait(
-        "held key",
-        STEP_TIMEOUT,
-        &mut |segment| match held(segment) {
-            count if count > HELD_KEY_MIN_REPEATS => Ok(count),
-            count => Err(format!(
-                "holding `s` logged {count} lines, expected the press and at least \
-                 {HELD_KEY_MIN_REPEATS} repeats"
-            )),
-        },
-    )?;
-    // A repeat already in flight at the release may still print; then nothing may.
-    std::thread::sleep(Duration::from_millis(300));
-    let _ = lane
+    // The release is proven by quiet: the hooks build prints `[IDLE ] quiet` only after half a
+    // second in which nothing ran, which a key repeating at 30 per second never allows. Serial
+    // keeps order, so a quiet line after the last held-key line means the repeats stopped (a
+    // quiet line from the 500 ms repeat delay comes before the first repeat).
+    let count = lane
         .session
-        .poll("held key settles", Duration::from_millis(1), &mut |_| {
-            Err::<(), _>(String::new())
+        .wait("held key", STEP_TIMEOUT, &mut |segment| {
+            let all: Vec<&str> = lines(segment).collect();
+            let last_held = all.iter().rposition(|line| {
+                line.strip_prefix(prefix.as_str())
+                    .is_some_and(is_held_key_line)
+            });
+            let count = held(segment);
+            let quiet_after =
+                last_held.is_some_and(|at| all[at + 1..].iter().any(|line| line.contains(QUIET)));
+            if count > HELD_KEY_MIN_REPEATS && quiet_after {
+                Ok(count)
+            } else {
+                Err(format!(
+                    "holding `s` logged {count} lines (the press and at least \
+                 {HELD_KEY_MIN_REPEATS} repeats are expected), quiet after them: {quiet_after}"
+                ))
+            }
         })?;
-    lane.session.mark();
-    let after = lane.session.poll(
-        "no repeat after release",
-        Duration::from_secs(1),
-        &mut |segment| match held(segment) {
-            0 => Err(String::new()),
-            count => Ok(count),
-        },
-    )?;
-    if let Ok(count) = after {
-        return lane.fail(format!(
-            "`s` kept repeating after its release ({repeated} lines, then {count} more)"
-        ));
-    }
+    println!(
+        "[STD ] held key: the press and {} repeat lines, then quiet",
+        count - 1
+    );
     Ok(())
 }
 
