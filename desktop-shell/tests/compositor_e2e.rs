@@ -29,6 +29,7 @@ use clean_slate_graphics::mode::DisplayMode;
 use clean_slate_graphics::pixel::PixelFormat;
 use clean_slate_graphics::protocol::{Event, ProtocolError, Request};
 use clean_slate_graphics::raw_input::{RawInputKind, RawInputRecord};
+use clean_slate_native_abi::launcher::{AppEntry, AppName, AppState, LauncherEvent};
 use clean_slate_native_abi::{EventKind, PortParams, SharedBufferId};
 use clean_slate_playground::layout::PANEL_SIZE;
 use clean_slate_playground::session::{buffer_layout, BUFFER_COUNT as APP_BUFFERS};
@@ -586,8 +587,31 @@ fn shell_roles_need_gfx_shell() {
     });
 }
 
+fn app_entry(name: &str, state: AppState, pid: u64) -> AppEntry {
+    AppEntry {
+        service: 1,
+        state,
+        generation: 1,
+        pid,
+        name: AppName::new(name.as_bytes()).expect("name"),
+    }
+}
+
+impl World {
+    /// Hands one launcher event to the shell, as the binary does, and lets it settle.
+    fn launcher(&mut self, shell: &mut ShellProc, event: LauncherEvent) {
+        let outcome = shell
+            .session
+            .handle_launcher(&event, &mut self.link(&mut shell.proc_));
+        shell.note(outcome);
+        self.settle(Some(shell), &mut []);
+    }
+}
+
+/// #237: the rail lists init's rows, a click on an idle app asks for a start, the rail
+/// follows the window list, and a click on a running app focuses its window.
 #[test]
-fn rail_input_commits_only_rail_damage_and_idle_commits_nothing() {
+fn the_rail_starts_idle_apps_and_switches_between_running_ones() {
     big_stack(|| {
         let mut world = World::new(QualityTier::Q1);
         let mut shell = world.launch_shell(QualityTier::Q1);
@@ -600,24 +624,72 @@ fn rail_input_commits_only_rail_damage_and_idle_commits_nothing() {
         assert_eq!(world.deliver_shell(&mut shell), 0);
         assert_eq!(world.presents(), presents);
 
-        // Hover then click the third destination.
-        let item = layout.item(2).expect("item");
-        world.click_at(&mut shell, &mut [], center(item));
-        let after = shell.session.stats();
-        assert!(after.commits > before.commits, "{after:?}");
-        assert_eq!(after.activations, 1);
-        assert_eq!(shell.session.take_activation(), Some(2));
-        assert_eq!(shell.session.shell().unwrap().rail_state().selected, 2);
-        assert_eq!(after.protocol_errors, 0);
-        assert_eq!(
-            diag::activation_line(2).as_str(),
-            "[SHELL] rail selected=2 Spaces"
+        world.launcher(
+            &mut shell,
+            LauncherEvent::Entry(app_entry("playground", AppState::Idle, 0)),
         );
+        world.launcher(
+            &mut shell,
+            LauncherEvent::Entry(app_entry("terminal", AppState::Idle, 0)),
+        );
+        world.launcher(&mut shell, LauncherEvent::ListEnd { count: 2 });
+        let listed = shell.session.stats();
+        assert!(listed.commits > before.commits, "the rail shows the rows");
+        let rail = shell.session.shell().unwrap().apps();
+        assert_eq!(rail.len(), 2);
+        assert_eq!(rail.get(1).unwrap().label(), "Terminal");
         assert!(world.presents() > presents);
         // Rail damage stays inside the rail: one or two item rects per commit.
-        let rail_area = u64::from(layout.bounds.width) * u64::from(layout.bounds.height);
-        assert!(after.damage_rects - before.damage_rects <= 3 * (after.commits - before.commits));
-        assert!(rail_area > 0);
+        assert!(listed.damage_rects - before.damage_rects <= 3 * (listed.commits - before.commits));
+
+        // A click on the idle terminal asks init to start it.
+        world.click_at(&mut shell, &mut [], center(layout.item(1).expect("item")));
+        assert_eq!(shell.session.stats().activations, 1);
+        let action = shell.session.take_action().expect("action");
+        assert_eq!(
+            diag::action_line(action).as_str(),
+            "[SHELL] rail start=terminal"
+        );
+        assert_eq!(
+            shell
+                .session
+                .take_launch()
+                .map(|n| n.as_str() == "terminal"),
+            Some(true)
+        );
+
+        // Init starts both rows (pids 7 and 9); each opens a window.
+        world.launcher(
+            &mut shell,
+            LauncherEvent::Changed(app_entry("playground", AppState::Running, 7)),
+        );
+        let mut playground = world.launch_app(&mut shell, 7, QualityTier::Q1);
+        world.launcher(
+            &mut shell,
+            LauncherEvent::Changed(app_entry("terminal", AppState::Running, 9)),
+        );
+        let mut terminal = world.launch_app(&mut shell, 9, QualityTier::Q1);
+        world.settle(Some(&mut shell), &mut [&mut playground, &mut terminal]);
+        assert_eq!(world.comp.wm().focus, Some(World::app_key(&playground)));
+        let rail = shell.session.shell().unwrap().apps();
+        assert!(rail.get(0).unwrap().running && rail.get(1).unwrap().running);
+        assert_eq!(rail.selected, Some(0), "the playground's window has focus");
+
+        // A click on the running terminal focuses its window.
+        world.click_at(
+            &mut shell,
+            &mut [&mut playground, &mut terminal],
+            center(layout.item(1).expect("item")),
+        );
+        assert_eq!(world.comp.wm().focus, Some(World::app_key(&terminal)));
+        let action = shell.session.take_action().expect("action");
+        assert_eq!(
+            diag::action_line(action).as_str(),
+            "[SHELL] rail switch=terminal window=2"
+        );
+        assert_eq!(shell.session.take_launch(), None);
+        assert_eq!(shell.session.shell().unwrap().apps().selected, Some(1));
+        assert_eq!(shell.session.stats().protocol_errors, 0);
         assert!(shell.session.rail_busy().iter().any(|b| *b));
         let _ = RAIL_SLOTS;
     });

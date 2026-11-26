@@ -1,4 +1,4 @@
-//! First desktop shell: zones, surface plan, wallpaper, left rail and rail interaction.
+//! First desktop shell: zones, surface plan, wallpaper, the app rail and rail interaction.
 //!
 //! The shell is an ordinary compositor client (`desktop-shell/`, integration with #112/#115).
 //! This module is everything that does not need the compositor: it decides zone geometry,
@@ -14,12 +14,12 @@ use clean_slate_graphics::{Point, Rect, Size, SurfaceRole};
 use clean_slate_raster::Canvas;
 
 use crate::icon::{paint_icon, Icon};
-use crate::layout::{offset, Flow, Insets, RectExt};
+use crate::layout::{offset, Flow, RectExt};
 use crate::paint::{fill, fill_rounded, stroke_rounded, Corners};
 use crate::quality::{QualityTier, Style};
 use crate::surface::Damage;
-use crate::tokens::{Rgba, TextTone, Theme};
-use crate::widgets::{Card, RailItem, SearchField, Text, WidgetState};
+use crate::tokens::{Rgba, Theme};
+use crate::widgets::{RailItem, Text, WidgetState};
 
 /// Optional zones. The left rail and workspace are always present; there is no dock zone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,10 +31,11 @@ pub struct ShellConfig {
 }
 
 impl ShellConfig {
-    /// M10 shell: both placeholders shown.
+    /// M10 shell: rail and workspace. The search and context placeholders are gone until
+    /// there is live data for them (#237).
     pub const M10: Self = Self {
-        search_placeholder: true,
-        context_placeholder: true,
+        search_placeholder: false,
+        context_placeholder: false,
     };
     /// Rail and workspace only.
     pub const MINIMAL: Self = Self {
@@ -126,7 +127,7 @@ impl ShellZones {
 /// What a shell surface is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellSurfaceKind {
-    /// Wallpaper, workspace panel and static placeholders (`Background` layer).
+    /// Wallpaper and the workspace heading (`Background` layer).
     Background,
     /// Persistent left rail (`ShellFurniture` layer, above windows).
     Rail,
@@ -147,54 +148,69 @@ pub struct ShellSurface {
     pub buffers: u32,
 }
 
-/// Rail destinations, top group.
-pub const RAIL_PRIMARY: [RailEntry; 5] = [
-    RailEntry {
-        icon: Icon::Home,
-        label: "Home",
-    },
-    RailEntry {
-        icon: Icon::Apps,
-        label: "Apps",
-    },
-    RailEntry {
-        icon: Icon::Spaces,
-        label: "Spaces",
-    },
-    RailEntry {
-        icon: Icon::Files,
-        label: "Files",
-    },
-    RailEntry {
-        icon: Icon::System,
-        label: "System",
-    },
-];
+/// App slots on the rail: one per launchable manifest row the shell is told about (#237).
+pub const RAIL_APPS: usize = 8;
+/// Longest rail caption, in bytes (a launcher name is at most 32).
+pub const RAIL_LABEL_BYTES: usize = 32;
 
-/// Rail destinations anchored to the bottom.
-pub const RAIL_SECONDARY: [RailEntry; 1] = [RailEntry {
-    icon: Icon::Settings,
-    label: "Settings",
-}];
-
-/// Total rail items (indices `0..RAIL_ITEMS`: primary first, then secondary).
-pub const RAIL_ITEMS: usize = RAIL_PRIMARY.len() + RAIL_SECONDARY.len();
-
-/// A rail destination.
+/// One app on the rail: what the shell learned from init's launcher and the compositor's
+/// window list. The rail paints it; the shell decides what a click on it does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RailEntry {
+pub struct RailApp {
+    label: [u8; RAIL_LABEL_BYTES],
+    len: u8,
     /// Icon.
     pub icon: Icon,
-    /// Caption.
-    pub label: &'static str,
+    /// The app has a running instance (a dot marks it).
+    pub running: bool,
 }
 
-/// Rail entry `index` (primary first).
-pub fn rail_entry(index: usize) -> Option<RailEntry> {
-    if index < RAIL_PRIMARY.len() {
-        Some(RAIL_PRIMARY[index])
-    } else {
-        RAIL_SECONDARY.get(index - RAIL_PRIMARY.len()).copied()
+impl RailApp {
+    /// `label` is truncated on a character boundary at [`RAIL_LABEL_BYTES`].
+    pub fn new(label: &str, icon: Icon, running: bool) -> Self {
+        let mut end = label.len().min(RAIL_LABEL_BYTES);
+        while end > 0 && !label.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut bytes = [0u8; RAIL_LABEL_BYTES];
+        bytes[..end].copy_from_slice(&label.as_bytes()[..end]);
+        Self {
+            label: bytes,
+            len: end as u8,
+            icon,
+            running,
+        }
+    }
+
+    /// Caption.
+    pub fn label(&self) -> &str {
+        core::str::from_utf8(&self.label[..usize::from(self.len)]).unwrap_or("")
+    }
+}
+
+/// What the rail shows: the apps in slot order and which one owns the focused window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RailApps {
+    /// Apps, packed from slot 0.
+    pub apps: [Option<RailApp>; RAIL_APPS],
+    /// Slot whose app owns the focused window.
+    pub selected: Option<usize>,
+}
+
+impl RailApps {
+    /// Apps on the rail.
+    pub fn len(&self) -> usize {
+        self.apps.iter().flatten().count()
+    }
+
+    /// No apps.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// App in `slot`.
+    pub fn get(&self, slot: usize) -> Option<&RailApp> {
+        self.apps.get(slot).and_then(Option::as_ref)
     }
 }
 
@@ -205,8 +221,8 @@ pub struct RailLayout {
     pub bounds: Rect,
     /// Brand mark block.
     pub brand: Rect,
-    /// Item slots.
-    pub items: [Rect; RAIL_ITEMS],
+    /// App slots, top to bottom.
+    pub items: [Rect; RAIL_APPS],
 }
 
 impl RailLayout {
@@ -219,25 +235,10 @@ impl RailLayout {
             y: 0,
             width: 0,
             height: 0,
-        }; RAIL_ITEMS];
-        let mut top = Flow::column(rest, m.rail_item_gap);
-        for slot in items.iter_mut().take(RAIL_PRIMARY.len()) {
-            *slot = top.next(m.rail_item_height);
-        }
-        let secondary_h = RAIL_SECONDARY.len() as u32 * (m.rail_item_height + m.rail_item_gap);
-        let bottom_pad = theme.spacing.lg;
-        let remaining = top.remaining();
-        let anchored = remaining.inset(Insets {
-            top: remaining
-                .height
-                .saturating_sub(secondary_h + bottom_pad)
-                .max(m.rail_item_gap),
-            bottom: bottom_pad,
-            ..Insets::default()
-        });
-        let mut bottom = Flow::column(anchored, m.rail_item_gap);
-        for slot in items.iter_mut().skip(RAIL_PRIMARY.len()) {
-            *slot = bottom.next(m.rail_item_height);
+        }; RAIL_APPS];
+        let mut column = Flow::column(rest, m.rail_item_gap);
+        for slot in &mut items {
+            *slot = column.next(m.rail_item_height);
         }
         Self {
             bounds,
@@ -246,14 +247,15 @@ impl RailLayout {
         }
     }
 
-    /// Item under `p`.
-    pub fn hit(&self, p: Point) -> Option<usize> {
+    /// Slot under `p`, among the first `count`.
+    pub fn hit(&self, p: Point, count: usize) -> Option<usize> {
         self.items
             .iter()
+            .take(count)
             .position(|r| !r.is_empty() && r.contains(p))
     }
 
-    /// Slot of item `index`.
+    /// Rect of slot `index`.
     pub fn item(&self, index: usize) -> Option<Rect> {
         self.items.get(index).copied()
     }
@@ -279,11 +281,10 @@ pub enum RailInput {
     Activate,
 }
 
-/// Rail interaction state. The selected destination persists; hover/press/focus are transient.
+/// Transient rail interaction state. Which app is selected is not here: it follows the
+/// focused window ([`RailApps::selected`]), not the last click.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RailState {
-    /// Current destination.
-    pub selected: usize,
     /// Item under the pointer.
     pub hovered: Option<usize>,
     /// Item held by the pointer.
@@ -292,12 +293,12 @@ pub struct RailState {
     pub focused: Option<usize>,
 }
 
-/// Result of one [`RailState::apply`].
+/// Result of one [`RailState::apply`] or [`Shell::set_apps`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RailUpdate {
     /// Rail-local damage to repaint and commit; empty when nothing visible changed.
     pub damage: Damage,
-    /// Destination activated by this input.
+    /// Slot activated by this input.
     pub activated: Option<usize>,
 }
 
@@ -313,12 +314,13 @@ impl RailState {
         }
     }
 
-    /// Applies `input`; damage covers exactly the items whose appearance changed.
-    pub fn apply(&mut self, layout: &RailLayout, input: RailInput) -> RailUpdate {
+    /// Applies `input` over the first `count` slots; damage covers exactly the items whose
+    /// appearance changed.
+    pub fn apply(&mut self, layout: &RailLayout, input: RailInput, count: usize) -> RailUpdate {
         let before = *self;
         let mut activated = None;
         match input {
-            RailInput::PointerMotion(p) => self.hovered = layout.hit(p),
+            RailInput::PointerMotion(p) => self.hovered = layout.hit(p, count),
             RailInput::PointerLeave => {
                 self.hovered = None;
                 self.pressed = None;
@@ -332,31 +334,33 @@ impl RailState {
                 }
                 self.pressed = None;
             }
-            RailInput::FocusNext => {
-                self.focused = Some(self.focused.map_or(0, |i| (i + 1) % RAIL_ITEMS));
+            RailInput::FocusNext if count > 0 => {
+                self.focused = Some(self.focused.map_or(0, |i| (i + 1) % count));
             }
-            RailInput::FocusPrevious => {
-                self.focused = Some(
-                    self.focused
-                        .map_or(RAIL_ITEMS - 1, |i| (i + RAIL_ITEMS - 1) % RAIL_ITEMS),
-                );
+            RailInput::FocusPrevious if count > 0 => {
+                self.focused = Some(self.focused.map_or(count - 1, |i| (i + count - 1) % count));
             }
-            RailInput::Activate => activated = self.focused,
-        }
-        if let Some(index) = activated {
-            self.selected = index;
+            RailInput::FocusNext | RailInput::FocusPrevious => {}
+            RailInput::Activate => activated = self.focused.filter(|&i| i < count),
         }
         let mut damage = Damage::new();
-        for index in 0..RAIL_ITEMS {
-            let changed = before.widget_state(index) != self.widget_state(index)
-                || (before.selected == index) != (self.selected == index);
-            if changed {
+        for index in 0..RAIL_APPS {
+            if before.widget_state(index) != self.widget_state(index) {
                 if let Some(r) = layout.item(index) {
                     damage.add(r);
                 }
             }
         }
         RailUpdate { damage, activated }
+    }
+
+    /// Drops references to slots at or past `count` (apps went away).
+    fn clamp(&mut self, count: usize) {
+        for slot in [&mut self.hovered, &mut self.pressed, &mut self.focused] {
+            if slot.is_some_and(|i| i >= count) {
+                *slot = None;
+            }
+        }
     }
 }
 
@@ -401,6 +405,7 @@ pub struct Shell<'t> {
     zones: ShellZones,
     rail: RailLayout,
     state: RailState,
+    apps: RailApps,
 }
 
 impl<'t> Shell<'t> {
@@ -423,6 +428,7 @@ impl<'t> Shell<'t> {
             zones,
             rail,
             state: RailState::default(),
+            apps: RailApps::default(),
         }
     }
 
@@ -476,85 +482,52 @@ impl<'t> Shell<'t> {
         ]
     }
 
-    /// Feeds rail input; repaint [`RailUpdate::damage`] with [`Self::paint_rail`].
-    pub fn handle_rail_input(&mut self, input: RailInput) -> RailUpdate {
-        self.state.apply(&self.rail, input)
+    /// Apps on the rail.
+    pub fn apps(&self) -> &RailApps {
+        &self.apps
     }
 
-    /// Paints the background surface (output coordinates) within the canvas clip.
+    /// Feeds rail input; repaint [`RailUpdate::damage`] with [`Self::paint_rail`].
+    pub fn handle_rail_input(&mut self, input: RailInput) -> RailUpdate {
+        let count = self.apps.len();
+        self.state.apply(&self.rail, input, count)
+    }
+
+    /// Replaces what the rail shows; the damage covers exactly the slots that changed.
+    pub fn set_apps(&mut self, apps: RailApps) -> RailUpdate {
+        let before = (self.apps, self.state);
+        self.apps = apps;
+        self.state.clamp(apps.len());
+        let mut damage = Damage::new();
+        for index in 0..RAIL_APPS {
+            let changed = before.0.get(index) != apps.get(index)
+                || (before.0.selected == Some(index)) != (apps.selected == Some(index))
+                || before.1.widget_state(index) != self.state.widget_state(index);
+            if changed {
+                if let Some(r) = self.rail.item(index) {
+                    damage.add(r);
+                }
+            }
+        }
+        RailUpdate {
+            damage,
+            activated: None,
+        }
+    }
+
+    /// Paints the background surface (output coordinates) within the canvas clip: the
+    /// wallpaper and the workspace heading. The search band and context column, when a
+    /// configuration reserves them, stay wallpaper until there is live data to show (#237).
     pub fn paint_background(&self, canvas: &mut Canvas<'_>) {
         let style = self.style;
         let t = style.theme;
         paint_wallpaper(canvas, t, self.zones.output.height);
-        if let Some(field) = self.zones.search_field(t) {
-            SearchField {
-                placeholder: "Search",
-            }
-            .paint(canvas, style, field, WidgetState::REST);
-        }
-        self.paint_workspace(canvas);
-        if let Some(context) = self.zones.context {
-            self.paint_context(canvas, context);
-        }
-    }
-
-    fn paint_workspace(&self, canvas: &mut Canvas<'_>) {
-        let style = self.style;
-        let t = style.theme;
         let area = self.zones.workspace.shrink(t.shell.zone_padding);
         let mut col = Flow::column(area, t.spacing.sm);
         let display = Text::display("Clean-Slate");
         display.paint(canvas, style, col.next(display.measure(style).height));
         let tagline = Text::body("A calm, focused desktop, built from a clean slate.");
         tagline.paint(canvas, style, col.next(tagline.measure(style).height));
-        col.skip(t.spacing.lg);
-        let panel = col.next(176);
-        let panel = Rect {
-            width: panel.width.min(560),
-            ..panel
-        };
-        let card = Card::titled("Workspace");
-        let content = card.paint(canvas, style, panel, WidgetState::REST);
-        let mut inner = Flow::column(content, t.spacing.xs);
-        for line in [
-            Text::body("Windows open and float here."),
-            Text::body("The rail on the left stays put; there is no dock."),
-            Text::caption("M10 preview - software composition"),
-        ] {
-            line.paint(canvas, style, inner.next(line.measure(style).height));
-        }
-    }
-
-    fn paint_context(&self, canvas: &mut Canvas<'_>, context: Rect) {
-        let style = self.style;
-        let t = style.theme;
-        let area = context.inset(Insets {
-            top: t.spacing.xl,
-            right: t.spacing.xl,
-            bottom: t.spacing.xl,
-            left: 0,
-        });
-        let mut col = Flow::column(area, t.spacing.md);
-        let today = Card::titled("Today");
-        let content = today.paint(canvas, style, col.next(104), WidgetState::REST);
-        let mut inner = Flow::column(content, t.spacing.xs);
-        let note = Text::caption("Context modules arrive");
-        note.paint(canvas, style, inner.next(note.measure(style).height));
-        let later = Text::caption("in later milestones.");
-        later.paint(canvas, style, inner.next(later.measure(style).height));
-
-        let system = Card::titled("System");
-        let content = system.paint(canvas, style, col.next(104), WidgetState::REST);
-        let mut inner = Flow::column(content, t.spacing.xs);
-        let composition = Text::body("Software composition");
-        composition.paint(canvas, style, inner.next(composition.measure(style).height));
-        let quality = if style.effects.translucency {
-            "Quality Q1 - translucent"
-        } else {
-            "Quality Q0 - opaque"
-        };
-        let q = Text::caption(quality).with_tone(TextTone::Accent);
-        q.paint(canvas, style, inner.next(q.measure(style).height));
     }
 
     /// Paints the rail surface (rail-local coordinates) within the canvas clip.
@@ -597,14 +570,15 @@ impl<'t> Shell<'t> {
             2,
             p.text_primary,
         );
-        for index in 0..RAIL_ITEMS {
-            let (Some(entry), Some(slot)) = (rail_entry(index), self.rail.item(index)) else {
+        for index in 0..RAIL_APPS {
+            let (Some(app), Some(slot)) = (self.apps.get(index), self.rail.item(index)) else {
                 continue;
             };
             RailItem {
-                icon: entry.icon,
-                label: entry.label,
-                selected: self.state.selected == index,
+                icon: app.icon,
+                label: app.label(),
+                selected: self.apps.selected == Some(index),
+                running: app.running,
             }
             .paint(canvas, style, slot, self.state.widget_state(index));
         }

@@ -10,6 +10,7 @@ clean-slate-compositor = { path = "../compositor" }
 clean-slate-graphics = { path = "../graphics" }
 clean-slate-playground = { path = "../playground" }
 clean-slate-terminal = { path = "../terminal" }
+clean-slate-desktop-shell = { path = "../desktop-shell" }
 clean-slate-raster = { path = "../raster" }
 clean-slate-ui = { path = "../ui" }
 clean-slate-rootfs = { path = "../rootfs", features = ["std"] }

@@ -630,24 +630,30 @@ impl<'a> Toggle<'a> {
     }
 }
 
-/// One entry of the persistent left rail.
+/// Side of the running dot on a rail item.
+pub const RUNNING_DOT: u32 = 6;
+
+/// One app slot on the persistent left rail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RailItem<'a> {
     /// Icon (shell affordances use the built-in masks).
     pub icon: Icon,
     /// Caption under the icon.
     pub label: &'a str,
-    /// Current destination.
+    /// The item's app owns the focused window.
     pub selected: bool,
+    /// The item's app is running: a dot at the pill's top right.
+    pub running: bool,
 }
 
 impl<'a> RailItem<'a> {
-    /// Unselected item.
+    /// Unselected, not running.
     pub const fn new(icon: Icon, label: &'a str) -> Self {
         Self {
             icon,
             label,
             selected: false,
+            running: false,
         }
     }
 
@@ -698,6 +704,21 @@ impl<'a> RailItem<'a> {
         if state.shows_focus() {
             focus_ring(canvas, style, pill, t.radius.md);
         }
+        if self.running {
+            let dot = RUNNING_DOT;
+            fill_rounded(
+                canvas,
+                Rect {
+                    x: offset(pill.x, pill.width.saturating_sub(dot + t.spacing.xs)),
+                    y: offset(pill.y, t.spacing.xs),
+                    width: dot,
+                    height: dot,
+                },
+                dot / 2,
+                Corners::ALL,
+                p.accent_cyan,
+            );
+        }
         let (icon_color, label_tone) = match (self.selected, state.interaction()) {
             (_, Interaction::Disabled) => (p.text_disabled, TextTone::Disabled),
             (true, _) => (p.accent_cyan, TextTone::Primary),
@@ -739,7 +760,7 @@ impl<'a> RailItem<'a> {
     }
 }
 
-/// Static global-search field (the M10 search zone is a placeholder).
+/// Global-search field (not on the M10 desktop: there is no search yet, #237).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchField<'a> {
     /// Placeholder text.

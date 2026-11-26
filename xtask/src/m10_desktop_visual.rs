@@ -1,19 +1,24 @@
 //! Structural screenshot checks for the #119 desktop lane.
 //!
 //! The host renders what the compositor must show for a known scene (shell wallpaper and
-//! workspace, the focused window's server-side chrome, the rail over it and the cursor) with the
+//! workspace, the focused window's server-side chrome, the rail of apps over it and the cursor) with the
 //! same `ui`/`compositor` code the guest runs, then compares named regions of a QMP screendump
 //! against it. Client content is never rendered here: it is excluded from every comparison, and
 //! the lane proves it changed by diffing two captures. Each region has its own mismatch budget,
 //! so a failure names what is wrong (rail, dock band, chrome, focus) instead of a frame hash.
 
 use clean_slate_compositor::wm::cascade;
+use clean_slate_desktop_shell::apps::Apps;
 use clean_slate_graphics::pixel::{BufferLayout, PixelFormat};
+use clean_slate_graphics::protocol::Event;
+use clean_slate_graphics::window::WindowHandle;
 use clean_slate_graphics::{Point, Rect, Size};
+use clean_slate_native_abi::launcher::{AppEntry, AppName, AppState, LauncherEvent};
 use clean_slate_playground::{PanelLayout, PANEL_SIZE, WINDOW_TITLE};
 use clean_slate_raster::{BlitMode, Canvas};
 use clean_slate_ui::cursor::{cursor_rect, paint_cursor, ARROW};
 use clean_slate_ui::layout::RectExt;
+use clean_slate_ui::shell::RailApps;
 use clean_slate_ui::{
     ChromeState, ChromeStyle, CleanSlateChrome, QualityTier, Shell, ShellConfig, Style,
     CLEAN_SLATE_DARK,
@@ -46,6 +51,29 @@ fn style(tier: QualityTier) -> Style<'static> {
 
 fn shell(tier: QualityTier) -> Shell<'static> {
     Shell::new(&CLEAN_SLATE_DARK, tier, OUTPUT, ShellConfig::M10)
+}
+
+/// The desktop lanes' manifest names one launchable row, the playground, running at boot
+/// (#237). The rail shows it running, and selected while its window has focus. Built with the
+/// shell's own model from what init and the compositor tell it.
+fn desktop_rail(window_focused: bool) -> RailApps {
+    const PID: u64 = 1;
+    let mut apps = Apps::new();
+    apps.on_launcher(&LauncherEvent::Entry(AppEntry {
+        service: 1,
+        state: AppState::Running,
+        generation: 1,
+        pid: PID,
+        name: AppName::new(b"playground").expect("name"),
+    }));
+    if window_focused {
+        let window = WindowHandle(1);
+        apps.on_window(&Event::WindowAdded { window, pid: PID });
+        apps.on_window(&Event::WindowFocused {
+            window: Some(window),
+        });
+    }
+    apps.rail()
 }
 
 pub(crate) fn chrome(tier: QualityTier) -> CleanSlateChrome<'static> {
@@ -138,7 +166,13 @@ pub(crate) enum Layers {
 /// Paints `scene` in compositor order: background surface, window frame, (client content left
 /// as background), rail surface over it, cursor.
 pub(crate) fn render(scene: &Scene, layers: Layers) -> Render {
-    let shell = shell(scene.tier);
+    let mut shell = shell(scene.tier);
+    // The lanes capture only while the one window has focus, so the rail shows the playground
+    // selected whenever there is a window; `focused` varies only the chrome, which is what the
+    // focus check compares.
+    if matches!(layers, Layers::Desktop { .. }) {
+        shell.set_apps(desktop_rail(scene.window.is_some()));
+    }
     let layout = output_layout();
     let mut bytes = vec![0u8; layout.byte_len()];
     {

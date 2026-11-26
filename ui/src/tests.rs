@@ -11,7 +11,9 @@ use crate::icon::{paint_icon, Icon};
 use crate::layout::RectExt;
 use crate::quality::{Effects, QualityTier, Style};
 use crate::reference;
-use crate::shell::{wallpaper_color, RailInput, Shell, ShellConfig, ShellZones, RAIL_ITEMS};
+use crate::shell::{
+    wallpaper_color, RailApp, RailApps, RailInput, Shell, ShellConfig, ShellZones, RAIL_APPS,
+};
 use crate::surface::{repaint, Damage};
 use crate::tokens::{Rgba, CLEAN_SLATE_DARK};
 use crate::widgets::{Button, Card, CardKind, RailItem, SearchField, Text, Toggle, WidgetState};
@@ -33,6 +35,28 @@ fn q0() -> Style<'static> {
 
 fn q1() -> Style<'static> {
     Style::new(THEME, QualityTier::Q1)
+}
+
+/// `count` apps (`App0`, `App1`, ...), the even ones running, `selected` owning focus.
+fn apps(count: usize, selected: Option<usize>) -> RailApps {
+    const LABELS: [&str; RAIL_APPS] = [
+        "App0", "App1", "App2", "App3", "App4", "App5", "App6", "App7",
+    ];
+    let mut out = RailApps {
+        selected,
+        ..RailApps::default()
+    };
+    for (i, slot) in out.apps.iter_mut().take(count).enumerate() {
+        *slot = Some(RailApp::new(LABELS[i], Icon::Apps, i % 2 == 0));
+    }
+    out
+}
+
+/// The M10 shell with `count` apps on its rail.
+fn shell_with(tier: QualityTier, count: usize) -> Shell<'static> {
+    let mut shell = Shell::new(THEME, tier, reference::SIZE, ShellConfig::M10);
+    shell.set_apps(apps(count, Some(0)));
+    shell
 }
 
 struct Buffer {
@@ -307,8 +331,14 @@ fn zones_have_a_full_height_left_rail_and_no_bottom_zone() {
         assert!(area.x >= z.rail.right());
         assert_eq!(area.bottom(), 800);
     }
+    for config in [ShellConfig::M10, ShellConfig::MINIMAL] {
+        let z = ShellZones::compute(THEME, reference::SIZE, config);
+        assert!(
+            z.search.is_none() && z.context.is_none(),
+            "no placeholders (#237)"
+        );
+    }
     let z = ShellZones::compute(THEME, reference::SIZE, ShellConfig::MINIMAL);
-    assert!(z.search.is_none() && z.context.is_none());
     assert_eq!(z.workspace, rect(88, 0, 1280 - 88, 800));
 }
 
@@ -341,7 +371,7 @@ fn shell_surfaces_fit_the_buffer_budget_and_need_the_shell_grant() {
 }
 
 fn paint_shell_surfaces(tier: QualityTier, prefill: [u8; 4]) -> (Buffer, Buffer) {
-    let shell = Shell::new(THEME, tier, reference::SIZE, ShellConfig::M10);
+    let shell = shell_with(tier, 3);
     let [bg, rail] = shell.surfaces();
     let mut background = Buffer::new(bg.rect.width, bg.rect.height, bg.format, prefill);
     background.paint(|c| shell.paint_background(c));
@@ -415,8 +445,7 @@ fn no_dock_bottom_band_is_pure_wallpaper_outside_windows() {
     let rail_right = zones.rail.right();
     for y in 720..800 {
         let expected = wallpaper_color(THEME, 800, y as u32);
-        let context = zones.context.unwrap();
-        for x in rail_right..context.x {
+        for x in rail_right..zones.output.right() {
             assert_eq!(frame.rgb(Point { x, y }), expected, "({x},{y})");
         }
     }
@@ -426,7 +455,7 @@ fn no_dock_bottom_band_is_pure_wallpaper_outside_windows() {
 
 #[test]
 fn rail_input_damages_only_changed_items_within_budget() {
-    let mut shell = Shell::new(THEME, QualityTier::Q0, reference::SIZE, ShellConfig::M10);
+    let mut shell = shell_with(QualityTier::Q0, 4);
     let layout = *shell.rail_layout();
     let centre = |i: usize| {
         let r = layout.item(i).unwrap();
@@ -457,7 +486,11 @@ fn rail_input_damages_only_changed_items_within_budget() {
     shell.handle_rail_input(RailInput::PointerButton { pressed: true });
     let u = shell.handle_rail_input(RailInput::PointerButton { pressed: false });
     assert_eq!(u.activated, Some(2));
-    assert_eq!(shell.rail_state().selected, 2);
+    assert_eq!(
+        shell.apps().selected,
+        Some(0),
+        "selection follows window focus, not the click"
+    );
     check_budget(&u.damage);
 
     shell.handle_rail_input(RailInput::PointerButton { pressed: true });
@@ -469,27 +502,75 @@ fn rail_input_damages_only_changed_items_within_budget() {
     assert_eq!(shell.rail_state().hovered, None);
     check_budget(&u.damage);
 
-    let u = shell.handle_rail_input(RailInput::PointerMotion(Point { x: 4, y: 600 }));
-    assert!(u.damage.is_empty(), "gap between groups is not an item");
+    let u = shell.handle_rail_input(RailInput::PointerMotion(centre(5)));
+    assert!(u.damage.is_empty(), "an empty slot is not an item");
+    assert_eq!(shell.rail_state().hovered, None);
 }
 
 #[test]
-fn rail_keyboard_focus_wraps_and_activates() {
-    let mut shell = Shell::new(THEME, QualityTier::Q0, reference::SIZE, ShellConfig::M10);
+fn rail_keyboard_focus_wraps_over_the_apps_and_activates() {
+    let mut shell = shell_with(QualityTier::Q0, 3);
     shell.handle_rail_input(RailInput::FocusPrevious);
-    assert_eq!(shell.rail_state().focused, Some(RAIL_ITEMS - 1));
+    assert_eq!(shell.rail_state().focused, Some(2));
     shell.handle_rail_input(RailInput::FocusNext);
     assert_eq!(shell.rail_state().focused, Some(0));
     shell.handle_rail_input(RailInput::FocusNext);
     let u = shell.handle_rail_input(RailInput::Activate);
     assert_eq!(u.activated, Some(1));
-    assert_eq!(shell.rail_state().selected, 1);
+
+    let mut empty = Shell::new(THEME, QualityTier::Q0, reference::SIZE, ShellConfig::M10);
+    empty.handle_rail_input(RailInput::FocusNext);
+    assert_eq!(empty.rail_state().focused, None);
+    assert_eq!(empty.handle_rail_input(RailInput::Activate).activated, None);
+}
+
+#[test]
+fn set_apps_damages_only_the_slots_that_changed() {
+    let mut shell = shell_with(QualityTier::Q0, 3);
+    let layout = *shell.rail_layout();
+    assert!(shell.set_apps(apps(3, Some(0))).damage.is_empty());
+
+    let u = shell.set_apps(apps(3, Some(2)));
+    assert_eq!(
+        u.damage.rects(),
+        &[layout.item(0).unwrap(), layout.item(2).unwrap()],
+        "selection moved"
+    );
+
+    let mut changed = apps(3, Some(2));
+    changed.apps[1] = Some(RailApp::new("App1", Icon::Apps, true));
+    assert_eq!(
+        shell.set_apps(changed).damage.rects(),
+        &[layout.item(1).unwrap()],
+        "App1 started"
+    );
+
+    shell.handle_rail_input(RailInput::FocusPrevious);
+    assert_eq!(shell.rail_state().focused, Some(2));
+    let u = shell.set_apps(apps(2, None));
+    assert_eq!(
+        shell.rail_state().focused,
+        None,
+        "focus on a removed slot is dropped"
+    );
+    assert_eq!(
+        u.damage.rects(),
+        &[layout.item(1).unwrap(), layout.item(2).unwrap(),]
+    );
+}
+
+#[test]
+fn rail_labels_truncate_on_a_char_boundary() {
+    let long = "é".repeat(20);
+    let app = RailApp::new(&long, Icon::Apps, false);
+    assert_eq!(app.label().len(), 32);
+    assert!(long.starts_with(app.label()));
 }
 
 #[test]
 fn damage_repaint_matches_a_full_repaint_and_touches_nothing_else() {
     for tier in [QualityTier::Q0, QualityTier::Q1] {
-        let mut shell = Shell::new(THEME, tier, reference::SIZE, ShellConfig::M10);
+        let mut shell = shell_with(tier, 4);
         let [_, rail] = shell.surfaces();
         let mut incremental = Buffer::new(rail.rect.width, rail.rect.height, rail.format, [0; 4]);
         incremental.paint(|c| shell.paint_rail(c));
@@ -571,6 +652,7 @@ fn widgets_paint_only_inside_their_bounds() {
                     icon: Icon::Settings,
                     label: "Settings and more",
                     selected: true,
+                    running: true,
                 }
                 .paint(c, style, b, state)
             });
@@ -828,11 +910,12 @@ fn golden_cases() -> Vec<Case> {
             Text::caption("Caption").paint(c, q0(), rect(120, 94, 120, 22));
         }),
     ));
-    for (name, state, selected) in [
-        ("rail.item.rest", WidgetState::REST, false),
-        ("rail.item.hover", WidgetState::HOVERED, false),
-        ("rail.item.selected", WidgetState::REST, true),
-        ("rail.item.focused", WidgetState::FOCUSED, false),
+    for (name, state, selected, running) in [
+        ("rail.item.rest", WidgetState::REST, false, false),
+        ("rail.item.hover", WidgetState::HOVERED, false, false),
+        ("rail.item.selected", WidgetState::REST, true, false),
+        ("rail.item.focused", WidgetState::FOCUSED, false, false),
+        ("rail.item.running", WidgetState::REST, false, true),
     ] {
         cases.push((
             name,
@@ -844,6 +927,7 @@ fn golden_cases() -> Vec<Case> {
                     icon: Icon::Home,
                     label: "Home",
                     selected,
+                    running,
                 }
                 .paint(c, q0(), b(88, 60), state)
             }),
@@ -935,9 +1019,7 @@ fn golden_cases() -> Vec<Case> {
             88,
             800,
             format,
-            Box::new(move |c| {
-                Shell::new(THEME, tier, reference::SIZE, ShellConfig::M10).paint_rail(c)
-            }),
+            Box::new(move |c| shell_with(tier, 3).paint_rail(c)),
         ));
     }
     cases
@@ -963,14 +1045,15 @@ const GOLDENS: &[(&str, u32)] = &[
     ("rail.item.hover", 0xE84CB888),
     ("rail.item.selected", 0x4DD636C3),
     ("rail.item.focused", 0x2F4A8B31),
+    ("rail.item.running", 0x82B8EB47),
     ("chrome.focused.q0", 0x31856294),
     ("chrome.inactive.q0", 0x8EF80909),
     ("chrome.focused.q1", 0x87695C3E),
     ("cursor.arrow", 0xE40C4E42),
     ("icons", 0x1B10B562),
     ("search.field", 0xAD241DA3),
-    ("rail.surface.q0", 0x47072FB6),
-    ("rail.surface.q1", 0xEC4E75A3),
+    ("rail.surface.q0", 0x1A936BA9),
+    ("rail.surface.q1", 0xF7CDBC14),
 ];
 
 #[test]
