@@ -157,10 +157,17 @@ impl Rights {
             ),
             ResourceClass::Display => Self(Self::DISPLAY_PRESENT.0 | Self::INSPECT.0),
             ResourceClass::Input => Self(Self::INPUT_CONSUME.0 | Self::INSPECT.0),
-            // `WRITE` is on the serial device only, and `READ` is reserved for its input.
-            ResourceClass::Console => {
-                Self(Self::CONSOLE_CONNECT.0 | Self::CONSOLE_SERVE.0 | Self::READ.0 | Self::WRITE.0)
-            }
+            // `WRITE` is on the serial device only, and `READ` is reserved for its input. As on
+            // the graphics port, a client's connect right may be delegated; serving and the
+            // device stay root-only.
+            ResourceClass::Console => Self(
+                Self::CONSOLE_CONNECT.0
+                    | Self::CONSOLE_SERVE.0
+                    | Self::READ.0
+                    | Self::WRITE.0
+                    | Self::DELEGATE.0
+                    | Self::REVOKE.0,
+            ),
         }
     }
 

@@ -458,8 +458,11 @@ fn console_rights_keep_serving_and_the_device_at_the_root() {
             .union(Rights::CONSOLE_SERVE)
             .union(Rights::READ)
             .union(Rights::WRITE)
+            .union(Rights::DELEGATE)
+            .union(Rights::REVOKE)
     );
     let root_only = Rights::root_only_for(ResourceClass::Console);
+    assert!(!root_only.contains(Rights::DELEGATE));
     assert!(!root_only.contains(Rights::CONSOLE_CONNECT));
     assert!(root_only.contains(Rights::CONSOLE_SERVE));
     assert!(root_only.contains(Rights::WRITE));
