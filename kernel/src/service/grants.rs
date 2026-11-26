@@ -64,6 +64,7 @@ pub(crate) enum ConsoleClientRole {
     FrontEnd,
 }
 
+#[cfg(test)]
 impl ConsoleClientRole {
     pub(crate) const fn grant(self) -> Grant {
         match self {
