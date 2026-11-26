@@ -115,7 +115,12 @@ fn attached(log: &Log, client: &mut Client<Kernel>, session: &mut Session) -> En
             }
             if !announced && session.is_running() {
                 announced = true;
-                log.line("[TERM] ready\n");
+                // Whether the compositor sends text events (#309) or the US map types keys.
+                log.line(if session.terminal().text_events() {
+                    "[TERM] ready text=on\n"
+                } else {
+                    "[TERM] ready text=off\n"
+                });
                 let _ = process::report_ready(&mut Kernel, 0);
             }
         }

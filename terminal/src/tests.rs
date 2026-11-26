@@ -7,7 +7,7 @@ use std::vec::Vec;
 
 use clean_slate_graphics::geometry::Size;
 use clean_slate_graphics::ids::{ClientBufferId, ObjectId, OutputId, Serial, SurfaceId, WindowId};
-use clean_slate_graphics::input::{KeyState, KeyUsage, Modifiers};
+use clean_slate_graphics::input::{KeyState, KeyUsage, Modifiers, TextRun};
 use clean_slate_graphics::mode::{OutputInfo, REFERENCE_MODE};
 use clean_slate_graphics::protocol::{Event, Features, ProtocolVersion, Request};
 use clean_slate_graphics::window::{DecorationMode, WindowStates};
@@ -628,10 +628,10 @@ fn window() -> WindowId {
     WindowId(object(WINDOW_SLOT))
 }
 
-fn welcome() -> Event {
+fn welcome(features: Features) -> Event {
     Event::Welcome {
         version: ProtocolVersion { major: 1, minor: 0 },
-        features: Features(0),
+        features,
         output: OutputInfo {
             id: OutputId::decode(1 << 8).expect("output id"),
             mode: REFERENCE_MODE,
@@ -657,11 +657,20 @@ fn configure(serial: u32, active: bool) -> Event {
 }
 
 fn running() -> (Box<Session>, FakeHost) {
+    running_with(Features(0))
+}
+
+/// A running session against a compositor that sends text events (#309).
+fn running_with_text() -> (Box<Session>, FakeHost) {
+    running_with(Features(Features::TEXT_INPUT))
+}
+
+fn running_with(features: Features) -> (Box<Session>, FakeHost) {
     let mut session = Box::new(Session::new());
     let mut host = FakeHost::new();
     assert_eq!(session.start(&mut host), Outcome::Continue);
     for event in [
-        welcome(),
+        welcome(features),
         Event::BufferRegistered { buffer: buffer(1) },
         Event::BufferRegistered { buffer: buffer(2) },
         Event::SurfaceCreated { surface: surface() },
@@ -752,6 +761,77 @@ fn keys_type_only_while_focused() {
     );
     session.handle(&press(0x28), &mut host);
     assert_eq!(session.terminal().pending_input(), b"a\n");
+}
+
+fn text(serial: u32, typed: &str) -> Event {
+    Event::Text {
+        serial: Serial(serial),
+        time_ns: 0,
+        text: TextRun::new(typed).expect("text run"),
+    }
+}
+
+fn repeat(usage: u16) -> Event {
+    Event::KeyRepeat {
+        serial: Serial(2),
+        time_ns: 0,
+        usage: KeyUsage(usage),
+        modifiers: mods(0),
+    }
+}
+
+#[test]
+fn hello_asks_for_text_input() {
+    let (_, mut host) = running();
+    assert!(matches!(
+        host.take()[0],
+        Request::Hello { features, .. } if features.contains(Features(Features::TEXT_INPUT))
+    ));
+}
+
+#[test]
+fn without_text_events_the_us_layout_types_printable_keys() {
+    let (mut session, mut host) = running();
+    assert!(!session.terminal().text_events());
+    session.handle(&press(0x04), &mut host);
+    session.handle(&press(0x2C), &mut host);
+    session.handle(&press(0x1F), &mut host);
+    assert_eq!(live(session.terminal().screen(), 0), "a 2");
+}
+
+#[test]
+fn with_text_events_the_text_types_and_the_key_does_not() {
+    let (mut session, mut host) = running_with_text();
+    assert!(session.terminal().text_events());
+    session.handle(&press(0x04), &mut host);
+    assert_eq!(live(session.terminal().screen(), 0), "");
+    session.handle(&text(1, "a"), &mut host);
+    session.handle(&text(1, "é"), &mut host);
+    assert_eq!(live(session.terminal().screen(), 0), "aé");
+    session.handle(&press(0x28), &mut host);
+    assert_eq!(session.terminal().pending_input(), "aé\n".as_bytes());
+}
+
+#[test]
+fn a_held_key_repeats_control_keys_and_text() {
+    let (mut session, mut host) = running_with_text();
+    for event in [press(0x16), text(1, "s"), repeat(0x16), text(2, "s")] {
+        session.handle(&event, &mut host);
+    }
+    assert_eq!(live(session.terminal().screen(), 0), "ss");
+    session.handle(&press(0x2A), &mut host);
+    session.handle(&repeat(0x2A), &mut host);
+    assert_eq!(live(session.terminal().screen(), 0), "");
+}
+
+#[test]
+fn text_and_repeats_are_ignored_while_unfocused() {
+    let (mut session, mut host) = running_with_text();
+    session.handle(&Event::KeyboardFocus { surface: None }, &mut host);
+    session.handle(&text(1, "x"), &mut host);
+    session.handle(&repeat(0x28), &mut host);
+    assert_eq!(live(session.terminal().screen(), 0), "");
+    assert!(session.terminal().pending_input().is_empty());
 }
 
 #[test]

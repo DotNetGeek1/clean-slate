@@ -8,7 +8,7 @@
 //! BufferRegistered -> CreateSurface
 //! SurfaceCreated   -> AssignRole(Toplevel), SetOpaqueRegion(whole), CreateWindow
 //! Configure        -> paint both buffers, Attach(0), Commit{ack}, SetTitle, SetSizeLimits, Show
-//! running          -> keys edit the line; stream output and edits repaint the rows they
+//! running          -> keys, repeats and text edit the line; stream output and edits repaint the rows they
 //!                     changed into a released buffer, committed with exactly those rows' damage
 //! CloseRequested   -> DestroyWindow, DestroySurface, UnregisterBuffer x2 -> exit
 //! ```
@@ -198,7 +198,7 @@ impl Session {
                 major: PROTOCOL_MAJOR,
                 minor: PROTOCOL_MINOR,
             },
-            features: Features(0),
+            features: Features(Features::TEXT_INPUT),
         };
         self.phase = Phase::Hello;
         self.send(host, &hello, None)
@@ -234,7 +234,11 @@ impl Session {
             return Outcome::Continue;
         }
         match (self.phase, *event) {
-            (Phase::Hello, Event::Welcome { .. }) => self.register(host, BufferSlot(0)),
+            (Phase::Hello, Event::Welcome { features, .. }) => {
+                self.terminal
+                    .set_text_events(features.contains(Features(Features::TEXT_INPUT)));
+                self.register(host, BufferSlot(0))
+            }
             (Phase::Registering(slot), Event::BufferRegistered { buffer }) => {
                 self.slots[slot.index()].id = Some(buffer);
                 match slot.0 {
@@ -380,6 +384,13 @@ impl Session {
                 modifiers,
                 ..
             } if self.terminal.focused() => self.terminal.key(usage, modifiers),
+            // A held key: control keys repeat here, printable ones through the `Text` after it.
+            Event::KeyRepeat {
+                usage, modifiers, ..
+            } if self.terminal.focused() => self.terminal.key(usage, modifiers),
+            Event::Text { text, .. } if self.terminal.focused() => {
+                self.terminal.text(text.as_str());
+            }
             Event::Error { .. } => self.stats.protocol_errors += 1,
             _ => {}
         }
