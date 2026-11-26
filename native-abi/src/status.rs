@@ -20,6 +20,7 @@ pub const STATUS_EBADF: u64 = u64::MAX - 8;
 pub const STATUS_EAGAIN: u64 = u64::MAX - 10;
 pub const STATUS_ENOMEM: u64 = u64::MAX - 11;
 pub const STATUS_EEXIST: u64 = u64::MAX - 16;
+pub const STATUS_ENODATA: u64 = u64::MAX - 60;
 pub const STATUS_EPIPE: u64 = u64::MAX - 31;
 pub const STATUS_ETIMEDOUT: u64 = u64::MAX - 109;
 pub const STATUS_ECONNREFUSED: u64 = u64::MAX - 110;
@@ -51,6 +52,7 @@ mod tests {
             (STATUS_EAGAIN, 11),
             (STATUS_ENOMEM, 12),
             (STATUS_EEXIST, 17),
+            (STATUS_ENODATA, 61),
             (STATUS_EPIPE, 32),
             (STATUS_ETIMEDOUT, 110),
             (STATUS_ECONNREFUSED, 111),
@@ -76,6 +78,7 @@ mod tests {
             STATUS_EAGAIN,
             STATUS_ENOMEM,
             STATUS_EEXIST,
+            STATUS_ENODATA,
             STATUS_EPIPE,
             STATUS_ETIMEDOUT,
             STATUS_ECONNREFUSED,

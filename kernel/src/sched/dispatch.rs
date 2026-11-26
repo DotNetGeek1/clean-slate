@@ -207,6 +207,7 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
     feature = "m5-crash-recovery-self-test",
     feature = "m6-fixture-smoke-self-test",
     feature = "m10-native-memory-self-test",
+    feature = "m10-clock-self-test",
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
