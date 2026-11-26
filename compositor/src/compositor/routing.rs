@@ -298,8 +298,8 @@ impl<P: WindowPolicy> Compositor<P> {
         }
     }
 
-    /// Click-to-focus: raise and focus the toplevel.
-    fn activate(&mut self, window: SurfaceKey) {
+    /// Click-to-focus (and the shell's `ActivateWindow`): raise and focus the toplevel.
+    pub(super) fn activate(&mut self, window: SurfaceKey) {
         self.raise_window(window);
         self.set_focus(Some(window));
     }

@@ -29,6 +29,9 @@ pub const PROTOCOL_MINOR: u16 = 0;
 
 /// Server feature set (§1.1): text input since #309.
 pub const M10_SERVER_FEATURES: Features = Features(Features::TEXT_INPUT);
+/// What the compositor offers a connection holding `GFX_SHELL`: the M10 set plus the window
+/// list (#237).
+pub const SHELL_SERVER_FEATURES: Features = Features(M10_SERVER_FEATURES.0 | Features::WINDOW_LIST);
 
 /// Wire header fields (§1.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +88,10 @@ impl Features {
     pub const CLIENT_DECORATIONS: u64 = 1 << 4;
     /// Subsurfaces and stacking: requests `0x0600..=0x06FF`, events `0x8600..=0x86FF`.
     pub const SUBSURFACES: u64 = 1 << 5;
+    /// Window list for the desktop shell (#237): requests `0x0700..=0x07FF`, events
+    /// `0x8700..=0x87FF`. Granted only to a connection whose `Graphics` capability carries
+    /// `GFX_SHELL`; the compositor drops the bit for anyone else.
+    pub const WINDOW_LIST: u64 = 1 << 6;
 
     /// Bits assigned in protocol 1.x (§5.2).
     pub const KNOWN: u64 = Self::TEXT_INPUT
@@ -92,7 +99,8 @@ impl Features {
         | Self::RELATIVE_POINTER
         | Self::FRACTIONAL_SCALE
         | Self::CLIENT_DECORATIONS
-        | Self::SUBSURFACES;
+        | Self::SUBSURFACES
+        | Self::WINDOW_LIST;
 
     pub const fn bits(self) -> u64 {
         self.0
@@ -134,6 +142,9 @@ pub const OP_HIDE: u16 = 0x0035;
 pub const OP_BEGIN_MOVE: u16 = 0x0036;
 pub const OP_BEGIN_RESIZE: u16 = 0x0037;
 pub const OP_ACK_CONFIGURE: u16 = 0x0038;
+// Window list feature requests (`Features::WINDOW_LIST`, #237).
+/// `ActivateWindow` (`0x0700`): raise and focus a listed window.
+pub const OP_ACTIVATE_WINDOW: u16 = 0x0700;
 
 // Event opcodes (§3.1)
 pub const OP_WELCOME: u16 = 0x8001;
@@ -163,6 +174,16 @@ pub const OP_TEXT: u16 = 0x8100;
 pub const OP_KEY_REPEAT: u16 = 0x8101;
 /// Reserved for preedit (dead keys, compose); not sent yet.
 pub const OP_TEXT_PREEDIT_RESERVED: u16 = 0x8102;
+// Window list feature events (`Features::WINDOW_LIST`, #237). Sent only on connections that
+// negotiated the feature.
+/// `WindowAdded` (`0x8700`): a toplevel is shown and listed.
+pub const OP_WINDOW_ADDED: u16 = 0x8700;
+/// `WindowTitle` (`0x8701`): a listed window's title.
+pub const OP_WINDOW_TITLE: u16 = 0x8701;
+/// `WindowRemoved` (`0x8702`): a listed window was hidden, destroyed or its client left.
+pub const OP_WINDOW_REMOVED: u16 = 0x8702;
+/// `WindowFocused` (`0x8703`): which listed window has keyboard focus, if any.
+pub const OP_WINDOW_FOCUSED: u16 = 0x8703;
 
 /// Version and feature negotiation (§4).
 pub fn negotiate(
@@ -343,3 +364,5 @@ mod tests_layout;
 mod tests_malformed;
 #[cfg(test)]
 mod tests_text;
+#[cfg(test)]
+mod tests_window_list;

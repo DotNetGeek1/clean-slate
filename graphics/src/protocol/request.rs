@@ -4,7 +4,7 @@ use crate::geometry::{BufferRect, Rect, Scale120, Size};
 use crate::ids::{ClientBufferId, ObjectId, Serial, SurfaceId, WindowId};
 use crate::pixel::{BufferLayout, ColorSpace, PixelFormat};
 use crate::role::SurfaceRole;
-use crate::window::{ResizeEdges, WindowTitle};
+use crate::window::{ResizeEdges, WindowHandle, WindowTitle};
 
 use super::*;
 
@@ -97,6 +97,9 @@ pub enum Request {
     },
     /// `AckConfigure` (0x0038): acknowledge configure serial.
     AckConfigure { window: WindowId, serial: Serial },
+    /// `ActivateWindow` (0x0700, `WINDOW_LIST`): raise and focus a listed window. Only the
+    /// shell negotiates the feature, so only the shell can send it.
+    ActivateWindow { window: WindowHandle },
 }
 
 impl Request {
@@ -122,6 +125,7 @@ impl Request {
             Self::BeginMove { .. } => OP_BEGIN_MOVE,
             Self::BeginResize { .. } => OP_BEGIN_RESIZE,
             Self::AckConfigure { .. } => OP_ACK_CONFIGURE,
+            Self::ActivateWindow { .. } => OP_ACTIVATE_WINDOW,
         }
     }
 
@@ -238,6 +242,12 @@ impl Request {
                 serial_required_request(serial.0)?;
                 write_u32_le(&mut out, 12, serial.0);
             }
+            Self::ActivateWindow { window } => {
+                if window.raw() == 0 {
+                    return Err(ProtocolError::InvalidObject);
+                }
+                write_u32_le(&mut out, 12, window.raw());
+            }
         }
         Ok(out)
     }
@@ -332,6 +342,11 @@ impl Request {
             OP_ACK_CONFIGURE => Self::AckConfigure {
                 window: WindowId(required_id(object).map_err(|c| decode_error(c, bytes))?),
                 serial: serial_required_request(read_u32_le(bytes, 12))
+                    .map_err(|c| decode_error(c, bytes))?,
+            },
+            OP_ACTIVATE_WINDOW => Self::ActivateWindow {
+                window: WindowHandle::new(read_u32_le(bytes, 12))
+                    .ok_or(ProtocolError::InvalidObject)
                     .map_err(|c| decode_error(c, bytes))?,
             },
             _ => return Err(decode_error(ProtocolError::UnknownOpcode, bytes)),

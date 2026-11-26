@@ -322,5 +322,27 @@ impl WindowTitle {
     }
 }
 
+/// Compositor-wide name of a listed window (`Features::WINDOW_LIST`, #237). Never 0; the
+/// compositor assigns it when the window is first listed and never reuses it while the
+/// compositor runs. It names a window only to the shell, and confers nothing: `ActivateWindow`
+/// is authorised by the shell's `GFX_SHELL` right, not by knowing a handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WindowHandle(pub u32);
+
+impl WindowHandle {
+    /// `None` for 0.
+    pub const fn new(raw: u32) -> Option<Self> {
+        if raw == 0 {
+            None
+        } else {
+            Some(Self(raw))
+        }
+    }
+
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
 #[cfg(test)]
 mod tests;

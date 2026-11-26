@@ -6,10 +6,11 @@
 //! [`ChromeStyle`] whose metrics define every decoration hit target, and the cursor image. The
 //! seat routing that drives the state here lives in `compositor::routing`.
 //!
-//! **Authority.** Nothing a client sends names a position, a focus target or another
+//! **Authority.** Nothing an app sends names a position, a focus target or another
 //! connection's object. Focus changes only on pointer presses (hit-tested here), on map of a
-//! window from the focused client (or with nothing focused), and when the focused window goes
-//! away. Interactive move/resize starts from a decoration press, or from `BeginMove` /
+//! window from the focused client (or with nothing focused), when the focused window goes
+//! away, and on the shell's `ActivateWindow` (#237), which only a `GFX_SHELL` connection can
+//! negotiate. Interactive move/resize starts from a decoration press, or from `BeginMove` /
 //! `BeginResize` carrying the serial of a still-held press on that same window.
 //!
 //! **Repaint.** Moving a window only changes its scene origin; the client is not asked to
