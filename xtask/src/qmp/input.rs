@@ -1,4 +1,4 @@
-//! `input-send-event` stimuli: keys, relative motion and buttons.
+//! `input-send-event` stimuli: keys, relative and absolute motion, and buttons.
 //!
 //! QEMU queues the resulting PS/2 bytes and returns before the guest reads
 //! them, and its device queues are small, so scripts pace each stimulus on a
@@ -78,10 +78,27 @@ pub(crate) enum Axis {
 /// sign flipped).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InputAction {
-    Key { qcode: QCode, down: bool },
-    Button { button: MouseButton, down: bool },
-    Rel { axis: Axis, value: i32 },
+    Key {
+        qcode: QCode,
+        down: bool,
+    },
+    Button {
+        button: MouseButton,
+        down: bool,
+    },
+    Rel {
+        axis: Axis,
+        value: i32,
+    },
+    /// An absolute position on QEMU's `0..=`[`QEMU_ABS_MAX`] scale, for a tablet (#313).
+    Abs {
+        axis: Axis,
+        value: i32,
+    },
 }
+
+/// QEMU's absolute input range (`INPUT_EVENT_ABS_MAX`); a virtio tablet reports it unchanged.
+pub(crate) const QEMU_ABS_MAX: i32 = 0x7fff;
 
 impl InputAction {
     /// Key down then up, in one command; the keyboard queues a scancode per
@@ -117,6 +134,20 @@ impl InputAction {
         ]
     }
 
+    /// Both axes of an absolute move in one command, so the tablet reports one frame.
+    pub(crate) const fn move_abs(x: i32, y: i32) -> [InputAction; 2] {
+        [
+            InputAction::Abs {
+                axis: Axis::X,
+                value: x,
+            },
+            InputAction::Abs {
+                axis: Axis::Y,
+                value: y,
+            },
+        ]
+    }
+
     fn to_json(self) -> JsonValue {
         let (kind, data) = match self {
             InputAction::Key { qcode, down } => (
@@ -139,8 +170,12 @@ impl InputAction {
                     ("button", JsonValue::str(button.name())),
                 ]),
             ),
-            InputAction::Rel { axis, value } => (
-                "rel",
+            InputAction::Rel { axis, value } | InputAction::Abs { axis, value } => (
+                if matches!(self, InputAction::Rel { .. }) {
+                    "rel"
+                } else {
+                    "abs"
+                },
                 JsonValue::object([
                     (
                         "axis",

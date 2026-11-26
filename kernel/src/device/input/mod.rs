@@ -1,5 +1,9 @@
-//! Kernel input path (#113): the i8042 driver, its PS/2 decoders, and the one raw-input queue
-//! that `READ_BATCH` drains (wire §6.2).
+//! Kernel input path (#113): the i8042 driver, its PS/2 decoders, the virtio-input driver
+//! (#313), and the one raw-input queue that `READ_BATCH` drains (wire §6.2).
+//!
+//! Device selection: the boot tail brings up virtio-input first. A slot (keyboard or pointer)
+//! that gets a virtio device is owned by it for the boot, and the PS/2 driver's input for that
+//! slot is ignored; PS/2 stays the fallback for a slot with no virtio device.
 //!
 //! Queue state is mutated in IRQ context (interrupts masked) or under `without_interrupts`.
 //! A device is published (`QUERY_DEVICES` reports its id) only once its init program finishes;
@@ -22,6 +26,8 @@ mod keyboard;
 #[cfg(any(test, clean_slate_isa_irq))]
 mod mouse;
 mod queue;
+#[cfg(any(test, clean_slate_boot_tail))]
+mod virtio_input;
 
 use clean_slate_capability::HolderId;
 use clean_slate_graphics::abi::input::InputDeviceInfo;
@@ -116,6 +122,9 @@ struct InputState {
     wake_edges: u32,
     #[cfg(any(test, clean_slate_isa_irq))]
     readiness_changes: u32,
+    /// Slots a virtio-input device owns; the PS/2 driver's input for them is dropped.
+    #[cfg(any(test, clean_slate_isa_irq))]
+    virtio_owned: [bool; DEVICE_SLOTS],
 }
 
 impl InputState {
@@ -132,6 +141,8 @@ impl InputState {
             wake_edges: 0,
             #[cfg(any(test, clean_slate_isa_irq))]
             readiness_changes: 0,
+            #[cfg(any(test, clean_slate_isa_irq))]
+            virtio_owned: [false; DEVICE_SLOTS],
         }
     }
 
@@ -223,6 +234,27 @@ impl InputState {
         }
     }
 
+    fn virtio_owns(&self, index: u8) -> bool {
+        self.virtio_owned
+            .get(usize::from(index))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Gives `index` to a virtio device for the rest of the boot. A PS/2 device already
+    /// published there is reported lost first, so the consumer drops its held state.
+    #[cfg(any(test, clean_slate_boot_tail))]
+    fn claim_virtio(&mut self, index: u8) {
+        let Some(owned) = self.virtio_owned.get_mut(usize::from(index)) else {
+            return;
+        };
+        if *owned {
+            return;
+        }
+        *owned = true;
+        self.device_lost(index);
+    }
+
     fn device_ready(&mut self, index: u8) {
         self.publish(index, true);
         self.readiness_changes = self.readiness_changes.saturating_add(1);
@@ -264,22 +296,37 @@ fn now_ns() -> u64 {
 #[cfg(clean_slate_isa_irq)]
 struct QueueSink;
 
+/// The PS/2 driver's view of the queue: slots a virtio device owns are closed to it.
+#[cfg(clean_slate_isa_irq)]
+fn ps2_slot(device_index: u8) -> Option<&'static mut InputState> {
+    let state = input_mut();
+    (!state.virtio_owns(device_index)).then_some(state)
+}
+
 #[cfg(clean_slate_isa_irq)]
 impl i8042::InputSink for QueueSink {
     fn record(&mut self, device_index: u8, kind: RawInputKind) {
-        input_mut().record(device_index, kind, now_ns());
+        if let Some(state) = ps2_slot(device_index) {
+            state.record(device_index, kind, now_ns());
+        }
     }
 
     fn loss(&mut self, device_index: u8) {
-        input_mut().loss(device_index);
+        if let Some(state) = ps2_slot(device_index) {
+            state.loss(device_index);
+        }
     }
 
     fn device_lost(&mut self, device_index: u8) {
-        input_mut().device_lost(device_index);
+        if let Some(state) = ps2_slot(device_index) {
+            state.device_lost(device_index);
+        }
     }
 
     fn device_ready(&mut self, device_index: u8) {
-        input_mut().device_ready(device_index);
+        if let Some(state) = ps2_slot(device_index) {
+            state.device_ready(device_index);
+        }
     }
 }
 
@@ -288,6 +335,16 @@ impl i8042::InputSink for QueueSink {
 /// input is never boot-fatal.
 #[cfg(clean_slate_boot_tail)]
 pub(crate) fn begin_init_and_log() {
+    #[cfg(not(test))]
+    {
+        let claimed = virtio_input::mmio::begin();
+        let name = |class: Option<virtio_input::DeviceClass>| class.map_or("none", |c| c.name());
+        kernel_log_fmt(format_args!(
+            "[INPT] virtio keyboard={} pointer={}\n",
+            name(claimed.keyboard),
+            name(claimed.pointer)
+        ));
+    }
     let port = |started: bool| if started { "init" } else { "absent" };
     match begin_init() {
         Ok(ports) => kernel_log_fmt(format_args!(
@@ -623,6 +680,34 @@ mod tests {
         assert_eq!(
             state.bind_wake(HolderId(7), binding(), 1),
             Err(ConsumerBusy)
+        );
+    }
+
+    #[test]
+    fn a_virtio_claim_retires_the_ps2_device_and_holds_the_slot() {
+        let mut state = state_with_devices();
+        assert!(!state.virtio_owns(MOUSE_INDEX));
+        state.claim_virtio(MOUSE_INDEX);
+        assert!(state.virtio_owns(MOUSE_INDEX));
+        assert!(!state.virtio_owns(KEYBOARD_INDEX));
+        assert!(!state.virtio_owns(9), "an unknown slot is never owned");
+        assert_eq!(
+            state.device_info().mouse,
+            None,
+            "the PS/2 mouse is unpublished"
+        );
+        let overflow = state.queue.pop(1).expect("the PS/2 mouse's loss");
+        assert_eq!(overflow.kind, RawInputKind::Overflow { dropped: 1 });
+        state.device_ready(MOUSE_INDEX);
+        assert_eq!(
+            state.device(MOUSE_INDEX).map(|d| d.generation()),
+            Some(2),
+            "the virtio device is a new generation"
+        );
+        state.claim_virtio(MOUSE_INDEX);
+        assert!(
+            state.device(MOUSE_INDEX).is_some(),
+            "claiming twice is a no-op"
         );
     }
 

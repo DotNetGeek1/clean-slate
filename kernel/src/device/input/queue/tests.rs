@@ -252,6 +252,34 @@ fn pending_loss_blocks_coalescing_into_the_pre_loss_tail() {
 }
 
 #[test]
+fn absolute_motion_coalesces_to_the_latest_position_above_high_water() {
+    let abs = |x, y| RawInputKind::AbsMotion { x, y };
+    let mut queue = Queue::new();
+    queue.push(mouse(), abs(1, 1), 10);
+    assert!(
+        !queue.push(mouse(), abs(2, 2), 10).coalesced,
+        "below high water"
+    );
+    fill_with_keys(&mut queue, RAW_INPUT_COALESCE_HIGH_WATER);
+    queue.push(mouse(), abs(3, 3), 11);
+    let outcome = queue.push(mouse(), abs(4, 5), 12);
+    assert!(outcome.coalesced);
+    assert!(
+        !queue.push(mouse(), motion(1, 1), 13).coalesced,
+        "relative motion never merges into a position"
+    );
+    assert!(!queue.push(mouse(), abs(6, 6), 14).coalesced);
+    assert_eq!(queue.len(), RAW_INPUT_COALESCE_HIGH_WATER + 5);
+    let count = queue.len();
+    let records = drain(&mut queue, count);
+    let tail = &records[records.len() - 3..];
+    assert_eq!(tail[0].kind, abs(4, 5));
+    assert_eq!(tail[0].time_ns, 12);
+    assert_eq!(tail[1].kind, motion(1, 1));
+    assert_eq!(tail[2].kind, abs(6, 6));
+}
+
+#[test]
 fn queued_into_empty_marks_exactly_the_empty_to_non_empty_edge() {
     let mut queue = Queue::new();
     assert!(queue.push(kbd(), key(), 10).queued_into_empty);

@@ -220,6 +220,22 @@ struct RunOptions {
 }
 
 /// `opt/clean-slate/desktop` plus, for `q1`, the VirtIO-GPU device `run --desktop` adds.
+/// #313: QEMU ids of the virtio keyboard and tablet that `run --desktop` and
+/// `test-system-tablet` add (`device_del` and `info qtree` name them).
+pub(crate) const VIRTIO_KEYBOARD_ID: &str = "cs-keyboard";
+pub(crate) const VIRTIO_TABLET_ID: &str = "cs-tablet";
+
+/// A virtio keyboard and tablet. The kernel prefers them to PS/2 for their slots, so the
+/// desktop's pointer follows the host cursor instead of capturing it.
+pub(crate) fn virtio_input_qemu_args() -> Vec<String> {
+    vec![
+        "-device".to_owned(),
+        format!("virtio-keyboard-pci,id={VIRTIO_KEYBOARD_ID}"),
+        "-device".to_owned(),
+        format!("virtio-tablet-pci,id={VIRTIO_TABLET_ID}"),
+    ]
+}
+
 pub(crate) fn desktop_qemu_args(framebuffer: bool) -> Vec<String> {
     desktop_qemu_args_with(framebuffer, false)
 }
@@ -289,6 +305,7 @@ fn launch_config(options: RunOptions, disk: PathBuf, fixture_port: Option<u16>) 
             config.vga = Some("std");
         }
         config.extra_args = desktop_qemu_args_with(options.framebuffer, options.terminal);
+        config.extra_args.extend(virtio_input_qemu_args());
     }
     config
 }
@@ -1235,7 +1252,13 @@ mod tests {
         );
         assert_eq!(virtio.machine_extra, Some("vmport=off"));
         assert_eq!(virtio.vga, None);
-        assert_eq!(virtio.extra_args, desktop_qemu_args(false));
+        let mut expected = desktop_qemu_args(false);
+        expected.extend(virtio_input_qemu_args());
+        assert_eq!(virtio.extra_args, expected);
+        assert!(virtio
+            .extra_args
+            .windows(2)
+            .any(|pair| pair == ["-device", "virtio-tablet-pci,id=cs-tablet"]));
         assert!(virtio
             .extra_args
             .windows(2)
@@ -1254,7 +1277,9 @@ mod tests {
             None,
         );
         assert_eq!(framebuffer.vga, Some("std"));
-        assert_eq!(framebuffer.extra_args, desktop_qemu_args(true));
+        let mut expected = desktop_qemu_args(true);
+        expected.extend(virtio_input_qemu_args());
+        assert_eq!(framebuffer.extra_args, expected);
         assert!(parse_run_options(&["--terminal".into()]).is_err());
         let terminal = launch_config(
             parse_run_options(&["--desktop".into(), "--terminal".into()]).unwrap(),

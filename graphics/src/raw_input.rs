@@ -24,8 +24,9 @@
 //!
 //! **`device`**
 //! - [`RawInputKind::Key`] records carry the keyboard device ([`crate::ids::KEYBOARD_INDEX`]).
-//! - `RelMotion`, [`RawInputKind::Button`], and [`RawInputKind::Wheel`] carry the mouse
-//!   ([`crate::ids::MOUSE_INDEX`]).
+//! - `RelMotion`, [`RawInputKind::AbsMotion`], [`RawInputKind::Button`], and
+//!   [`RawInputKind::Wheel`] carry the pointer device ([`crate::ids::MOUSE_INDEX`]), whether it is
+//!   a PS/2 mouse or a virtio tablet.
 //! - The generation bumps on controller reset.
 //! - `Overflow` carries the device of the **first** record dropped since the previous `Overflow`.
 //! - The codec does not enforce the index-to-kind mapping.
@@ -37,10 +38,20 @@
 //!   right. The M11 evdev shim negates `vertical` for `REL_WHEEL`.
 //! - 120 = one detent ([`crate::input::AxisValue120`]).
 //!
+//! **Absolute pointer (#313)**
+//! - `AbsMotion { x, y }` is a position, not a delta, normalised by the driver to
+//!   `0..=`[`ABS_POINTER_MAX`] on each axis from the device's own range. `0` is the left (top)
+//!   edge and `ABS_POINTER_MAX` the right (bottom) edge of the output.
+//! - The consumer maps it onto the output with [`scale_abs_to_output`]; the driver never knows the
+//!   output size.
+//! - Values above `ABS_POINTER_MAX` do not decode (`InvalidField`).
+//!
 //! **Coalescing**
 //! - When the queue length is ≥ [`crate::limits::RAW_INPUT_COALESCE_HIGH_WATER`] (96), a new
 //!   `RelMotion` whose unread tail record is a `RelMotion` from the same device is merged into
-//!   that tail with `i32::saturating_add` per axis. Nothing else is ever coalesced.
+//!   that tail with `i32::saturating_add` per axis. Likewise a new `AbsMotion` whose unread tail is
+//!   an `AbsMotion` from the same device replaces the tail's position (the latest one wins).
+//!   Nothing else is ever coalesced.
 //!
 //! **Drops and `Overflow` ordering (C5)**
 //! - When a record cannot be queued (full and not mergeable), it is dropped, `pending_dropped` is
@@ -61,6 +72,31 @@
 
 use crate::ids::InputDeviceId;
 use crate::input::{AxisValue120, KeyState, KeyUsage, PointerButton};
+
+/// Largest normalised [`RawInputKind::AbsMotion`] coordinate (the far edge of the output).
+pub const ABS_POINTER_MAX: u32 = 0xFFFF;
+
+/// Maps a normalised absolute coordinate onto an output axis of `extent` pixels: `0` lands on
+/// pixel 0 and [`ABS_POINTER_MAX`] on pixel `extent - 1`, rounding to the nearest pixel. Values
+/// above the maximum clamp to the far edge; an empty axis maps to 0.
+pub const fn scale_abs_to_output(value: u32, extent: u32) -> i32 {
+    if extent == 0 {
+        return 0;
+    }
+    let value = if value > ABS_POINTER_MAX {
+        ABS_POINTER_MAX
+    } else {
+        value
+    };
+    let last = (extent - 1) as u64;
+    let max = ABS_POINTER_MAX as u64;
+    let scaled = (value as u64 * last + max / 2) / max;
+    if scaled > i32::MAX as u64 {
+        i32::MAX
+    } else {
+        scaled as i32
+    }
+}
 
 /// Fixed size of one queued raw-input record (§6.1).
 pub const RAW_INPUT_RECORD_BYTES: usize = 32;
@@ -87,6 +123,11 @@ pub enum RawInputKind {
         dx: i32,
         dy: i32,
     },
+    /// Absolute pointer position, each axis in `0..=ABS_POINTER_MAX` (#313).
+    AbsMotion {
+        x: u32,
+        y: u32,
+    },
     Button {
         button: PointerButton,
         state: KeyState,
@@ -108,6 +149,7 @@ impl RawInputKind {
             Self::Button { .. } => 3,
             Self::Wheel { .. } => 4,
             Self::Overflow { .. } => 5,
+            Self::AbsMotion { .. } => 6,
         }
     }
 
@@ -118,6 +160,7 @@ impl RawInputKind {
             3 => decode_button_payload(bytes),
             4 => decode_wheel_payload(bytes),
             5 => decode_overflow_payload(bytes),
+            6 => decode_absmotion_payload(bytes),
             _ => Err(RawInputDecodeError::UnknownKind),
         }
     }
@@ -147,6 +190,10 @@ impl RawInputRecord {
             RawInputKind::RelMotion { dx, dy } => {
                 write_i32_le(&mut out, 24, dx);
                 write_i32_le(&mut out, 28, dy);
+            }
+            RawInputKind::AbsMotion { x, y } => {
+                write_u32_le(&mut out, 24, x);
+                write_u32_le(&mut out, 28, y);
             }
             RawInputKind::Button { button, state } => {
                 write_u16_le(&mut out, 24, button.as_u16());
@@ -178,7 +225,7 @@ impl RawInputRecord {
         let device = InputDeviceId::decode(read_u32_le(bytes, 16))
             .map_err(|_| RawInputDecodeError::InvalidField)?;
         let tag = bytes[20];
-        if !matches!(tag, 1..=5) {
+        if !matches!(tag, 1..=6) {
             return Err(RawInputDecodeError::UnknownKind);
         }
         if !check_range_zero(bytes, 21, 24) {
@@ -211,6 +258,15 @@ fn decode_relmotion_payload(bytes: &[u8]) -> Result<RawInputKind, RawInputDecode
         dx: read_i32_le(bytes, 24),
         dy: read_i32_le(bytes, 28),
     })
+}
+
+fn decode_absmotion_payload(bytes: &[u8]) -> Result<RawInputKind, RawInputDecodeError> {
+    let x = read_u32_le(bytes, 24);
+    let y = read_u32_le(bytes, 28);
+    if x > ABS_POINTER_MAX || y > ABS_POINTER_MAX {
+        return Err(RawInputDecodeError::InvalidField);
+    }
+    Ok(RawInputKind::AbsMotion { x, y })
 }
 
 fn decode_button_payload(bytes: &[u8]) -> Result<RawInputKind, RawInputDecodeError> {

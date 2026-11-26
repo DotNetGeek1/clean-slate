@@ -781,7 +781,9 @@ fn step_completion_past_the_deadline_is_reset_required() {
 #[test]
 fn slots_are_bounded_and_reusable() {
     let first = ready(IrqMode::Msix);
-    let _second = ready(IrqMode::Msix);
+    let _rest: std::vec::Vec<_> = (1..MAX_MODERN_DEVICES)
+        .map(|_| ready(IrqMode::Msix))
+        .collect();
     assert_eq!(
         attach(FakeDevice::new(0), IrqMode::Msix).err(),
         Some(TransportError::SlotsExhausted)
@@ -880,4 +882,20 @@ fn interrupt_driven_multi_step_init_under_timeouts() {
         0,
         "nothing armed once init is idle"
     );
+}
+
+#[test]
+fn unbounded_submits_arm_no_timeout() {
+    let mut transport = ready(IrqMode::Msix);
+    transport
+        .submit(0, &block_read(), NO_DEADLINE)
+        .expect("submit");
+    assert!(transport.timeout.is_none());
+    assert_eq!(transport.earliest_deadline(), None);
+    registry::expire_due(u64::MAX - 1);
+    assert_eq!(transport.state(), TransportState::Ready);
+    transport
+        .submit(0, &block_read(), at(5_000))
+        .expect("bounded submit");
+    assert_eq!(transport.earliest_deadline(), Some(at(5_000)));
 }

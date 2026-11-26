@@ -464,6 +464,26 @@ pub(crate) fn find_single_function(
     Ok(found)
 }
 
+/// Every function on bus 0 matching `vendor:device`, in slot then function order. Stores up to
+/// `out.len()` of them and returns how many it stored; any beyond that are ignored.
+#[cfg(any(test, clean_slate_boot_tail))]
+pub(crate) fn find_functions(vendor: u16, device: u16, out: &mut [PciFunction]) -> usize {
+    let mut found = 0;
+    for slot in 0u8..32 {
+        for function in 0u8..8 {
+            if found == out.len() {
+                return found;
+            }
+            let candidate = PciFunction::new(0, slot, function);
+            if candidate.vendor_device() == (vendor, device) {
+                out[found] = candidate;
+                found += 1;
+            }
+        }
+    }
+    found
+}
+
 /// q35 (ICH9) INTx routing: slots below 25 use the fixed default
 /// `PIRQ[E..H] = (slot + pin) % 4`, and in APIC mode PIRQ E..H drive GSI 20..23
 /// level-triggered, active-high. Other chipsets and slots fail closed.

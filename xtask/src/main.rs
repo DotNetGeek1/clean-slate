@@ -39,6 +39,7 @@ mod system_desktop_faults;
 mod system_desktop_lane;
 mod system_lane;
 mod system_shell;
+mod system_tablet_lane;
 mod system_terminal_lane;
 
 use marker_spec::{unexpected_guest_failure, MarkerSet, MarkerStep, MarkerTracker};
@@ -1422,6 +1423,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestSystem => system_lane::run(),
         ParsedCommand::TestSystemDesktop => system_desktop_lane::run(),
         ParsedCommand::TestSystemTerminal => system_terminal_lane::run(),
+        ParsedCommand::TestSystemTablet => system_tablet_lane::run(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -5668,7 +5670,7 @@ fn drain_output_events(receiver: &mpsc::Receiver<OutputEvent>, output: &mut Stri
 
 fn print_help() {
     println!("Usage: cargo xtask <command>");
-    println!("  run [--net] [--desktop] [--framebuffer] [--terminal]  Build the default image (init starts storage, then network) and boot it in QEMU with the persistent data disk target/system-data.img (created if missing); --net also starts the network fixture peer; --desktop passes fw_cfg opt/clean-slate/desktop=q1, a VirtIO-GPU and a window (QEMU_DISPLAY, default gtk), --desktop --framebuffer passes q0 with -vga std, and --terminal adds the terminal window and its shell (q1-terminal or q0-terminal)");
+    println!("  run [--net] [--desktop] [--framebuffer] [--terminal]  Build the default image (init starts storage, then network) and boot it in QEMU with the persistent data disk target/system-data.img (created if missing); --net also starts the network fixture peer; --desktop passes fw_cfg opt/clean-slate/desktop=q1, a VirtIO-GPU, a virtio keyboard and tablet (#313) and a window (QEMU_DISPLAY, default gtk), --desktop --framebuffer passes q0 with -vga std, and --terminal adds the terminal window and its shell (q1-terminal or q0-terminal)");
     println!("  test-m1      Build the M1 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m2      Build the M2 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m3      M3 milestone gate: run every M3 acceptance boot in order (test-m3-address-space and test-m3-lifecycle as one merged boot), print [M3  ] PASS only if all pass");
@@ -5719,6 +5721,7 @@ fn print_help() {
     println!("  test-m10-desktop M10 #118 desktop lane on the system image (#218 S6f): desktop-shell host tests, then the system-test-hooks build with fw_cfg opt/clean-slate/desktop=q1 on VirtIO-GPU and =q0 on the -vga std framebuffer; each boot must reach init's eight-row settle line, then test-system-desktop's closed-loop driver runs (click, toggle, background click, key, title-bar drag, close, app, desktop shell and compositor faults) with serial, resource-baseline, quiet-stretch and screendump checks; artifacts under target/xtask-artifacts; prints [M10.9] PASS (aliases: m10-desktop, m10.118)");
     println!("  test-m10        M10 milestone gate: every test-m10-* constituent, clean-slate-ui host tests and test-qmp-smoke, then test-m10-desktop; prints [M10 ] PASS (aliases: m10, m10.119)");
     println!("  test-system-terminal #311 system-test-hooks build with fw_cfg opt/clean-slate/desktop=q1-terminal on a VirtIO-GPU, COM1 and QMP: init settles with ten rows, the terminal shell holds a console session record and the terminal a front-end one, a closed-loop click focuses the terminal, typed echo hello must come back from the terminal's shell through the console session, the window must change, and the serial shell still answers; transcript and screendumps under target/xtask-artifacts/system-terminal; prints [STT ] test-system-terminal PASS (alias: system-terminal)");
+    println!("  test-system-tablet  #313 system-test-hooks build on a VirtIO-GPU at q1 plus virtio-keyboard-pci and virtio-tablet-pci: the kernel gives both input slots to virtio, single absolute QMP moves to the tablet must settle exactly on their targets, clicks must hit the expected window at that position, a virtio key reaches the app, and the tablet corners map to the output edges; prints [STB ] test-system-tablet PASS (alias: system-tablet)");
     println!("  test-serial-input #218 S4 serial receive lane: COM1 on a private loopback socket; the host types a script (plain line, backspace/delete, Ctrl-U, an overlong line, a burst, a full committed buffer, Ctrl-D on a non-empty and an empty line) and checks the echo and every committed read byte for byte; prints [TTY ] PASS (aliases: serial-input)");
     println!("  test-system-boot #218 S3b default image: boots it twice on a fresh lane-owned data disk with the network fixture peer; init starts storage then network, the kernel checks every launched pid holds exactly its manifest grants and reports ready from that pid, boot 1 formats and boot 2 mounts, and the idle thread halts while init waits; prints [SYS ] PASS (aliases: system-boot)");
     println!("  test-system-shell #218 S5 default image to its serial-console shell: COM1 on a private loopback socket, a fresh lane-owned data disk and the network fixture peer; the host types echo, ls /bin, a pipeline, a /tmp write and read and a backspace edit and checks output only execution produces, then exit and Ctrl-D, each followed by a new shell one generation on with a new prompt; prints [SHL ] PASS (aliases: system-shell)");
@@ -5880,6 +5883,7 @@ enum ParsedCommand {
     TestSystem,
     TestSystemDesktop,
     TestSystemTerminal,
+    TestSystemTablet,
     TestM10Desktop,
     TestM10,
     RunM10Desktop,
@@ -6071,6 +6075,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-system-terminal" || cmd == "system-terminal" => {
             ParsedCommand::TestSystemTerminal
+        }
+        Some(cmd) if cmd == "test-system-tablet" || cmd == "system-tablet" => {
+            ParsedCommand::TestSystemTablet
         }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
@@ -6802,6 +6809,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestSystemTerminal
+            );
+        }
+        for alias in ["test-system-tablet", "system-tablet"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestSystemTablet
             );
         }
         assert_eq!(
