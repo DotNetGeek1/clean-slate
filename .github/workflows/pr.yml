@@ -16,6 +16,7 @@ on:
       - "network/**"
       - "playground/**"
       - "port/**"
+      - "runtime/**"
       - "raster/**"
       - "rootfs/**"
       - "service-fixtures/**"
@@ -48,6 +49,7 @@ on:
       - "network/**"
       - "playground/**"
       - "port/**"
+      - "runtime/**"
       - "raster/**"
       - "rootfs/**"
       - "service-fixtures/**"
@@ -132,6 +134,8 @@ jobs:
         run: |
           cargo clippy -p clean-slate-port --all-targets -- -D warnings
           cargo clippy -p clean-slate-port --all-targets --features fake -- -D warnings
+          cargo clippy -p clean-slate-runtime --all-targets -- -D warnings
+          cargo clippy -p clean-slate-runtime --all-targets --features fake -- -D warnings
 
       - name: Clippy (compositor)
         run: |
@@ -319,6 +323,7 @@ jobs:
           cargo test -p clean-slate-net-service
           cargo test -p clean-slate-port
           cargo test -p clean-slate-port --features fake
+          cargo test -p clean-slate-runtime
           cargo test -p clean-slate-compositor
           cargo test -p clean-slate-playground
           cargo test -p clean-slate-desktop-shell

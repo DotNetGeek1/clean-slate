@@ -47,6 +47,7 @@ userspace = []
 [dependencies]
 clean-slate-capability = { path = "../capability" }
 clean-slate-native-abi = { path = "../native-abi" }
+clean-slate-runtime = { path = "../runtime" }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 

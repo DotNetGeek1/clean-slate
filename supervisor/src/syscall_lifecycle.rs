@@ -4,6 +4,8 @@ use clean_slate_service_lifecycle::{
     ControlRequest, LifecycleEvent, LifecycleMessage, ServiceId, LIFECYCLE_WIRE_MAX_BYTES,
 };
 
+use clean_slate_runtime::sys::raw_syscall;
+
 use crate::control::{LifecycleControl, LifecycleControlError};
 
 const SYSCALL_NR_LIFECYCLE_CONTROL: u64 = 4;
@@ -47,22 +49,17 @@ impl<const MAX_EVENTS: usize> SyscallLifecycleControl<MAX_EVENTS> {
         let wire = LifecycleMessage::ControlRequest(request);
         let encoded = wire.encode();
         let mut reply = [0u8; LIFECYCLE_WIRE_MAX_BYTES];
-        let result: u64;
-        unsafe {
-            core::arch::asm!(
-                "syscall",
-                in("rax") SYSCALL_NR_LIFECYCLE_CONTROL,
-                in("rdi") self.capability,
-                in("rsi") encoded.as_ptr(),
-                in("rdx") encoded.len(),
-                in("r8") reply.len(),
-                in("r10") reply.as_mut_ptr(),
-                lateout("rax") result,
-                lateout("rcx") _,
-                lateout("r11") _,
-                options(nostack),
-            );
-        }
+        let result = raw_syscall(
+            SYSCALL_NR_LIFECYCLE_CONTROL,
+            [
+                self.capability,
+                encoded.as_ptr() as u64,
+                encoded.len() as u64,
+                reply.as_mut_ptr() as u64,
+                reply.len() as u64,
+                0,
+            ],
+        );
         if result == SYSCALL_ESTALE {
             return Err(LifecycleControlError::TransportFailed);
         }
@@ -85,21 +82,17 @@ impl<const MAX_EVENTS: usize> SyscallLifecycleControl<MAX_EVENTS> {
         service: ServiceId,
     ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
         let mut reply = [0u8; LIFECYCLE_WIRE_MAX_BYTES];
-        let result: u64;
-        unsafe {
-            core::arch::asm!(
-                "syscall",
-                in("rax") SYSCALL_NR_LIFECYCLE_POLL,
-                in("rdi") service.0,
-                in("rsi") self.capability,
-                in("r8") reply.len(),
-                in("r10") reply.as_mut_ptr(),
-                lateout("rax") result,
-                lateout("rcx") _,
-                lateout("r11") _,
-                options(nostack),
-            );
-        }
+        let result = raw_syscall(
+            SYSCALL_NR_LIFECYCLE_POLL,
+            [
+                u64::from(service.0),
+                self.capability,
+                0,
+                reply.as_mut_ptr() as u64,
+                reply.len() as u64,
+                0,
+            ],
+        );
         if result == 0 {
             return Ok(None);
         }

@@ -132,7 +132,7 @@ impl Link<'_> {
         self.proc_
             .conn
             .send(self.port, &frame, transfer)
-            .map_err(HostError::Failed)?;
+            .map_err(HostError::from_status)?;
         self.waiter.raise(WAKE_REQUESTS);
         Ok(())
     }
@@ -151,7 +151,7 @@ impl Link<'_> {
                 byte_len as u64,
                 Rights::READ.union(Rights::DELEGATE),
             )
-            .map_err(HostError::Failed)?;
+            .map_err(HostError::from_status)?;
         while self.proc_.shm_ids.len() <= slot {
             self.proc_.shm_ids.push(0);
             self.proc_.caps.push(0);
@@ -188,7 +188,6 @@ impl clean_slate_playground::Host for Link<'_> {
         transfer: Option<clean_slate_playground::BufferSlot>,
     ) -> Result<(), clean_slate_playground::HostError> {
         self.send_frame(request, transfer.map(|s| usize::from(s.0)))
-            .map_err(|_| clean_slate_playground::HostError::Failed(0))
     }
 
     fn pixels(&mut self, slot: clean_slate_playground::BufferSlot) -> Option<&mut [u8]> {

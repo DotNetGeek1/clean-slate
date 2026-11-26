@@ -140,6 +140,7 @@ dependencies = [
  "clean-slate-playground",
  "clean-slate-port",
  "clean-slate-raster",
+ "clean-slate-runtime",
  "clean-slate-ui",
 ]
 
@@ -221,6 +222,7 @@ dependencies = [
  "clean-slate-native-abi",
  "clean-slate-port",
  "clean-slate-raster",
+ "clean-slate-runtime",
  "clean-slate-ui",
 ]
 
@@ -242,6 +244,16 @@ dependencies = [
 [[package]]
 name = "clean-slate-rootfs"
 version = "0.0.1"
+
+[[package]]
+name = "clean-slate-runtime"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-capability",
+ "clean-slate-graphics",
+ "clean-slate-native-abi",
+ "clean-slate-port",
+]
 
 [[package]]
 name = "clean-slate-service-fixtures"
@@ -275,6 +287,7 @@ version = "0.0.1"
 dependencies = [
  "clean-slate-capability",
  "clean-slate-native-abi",
+ "clean-slate-runtime",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
 ]

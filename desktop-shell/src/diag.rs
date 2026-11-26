@@ -5,7 +5,7 @@ use clean_slate_native_abi::desktop::ConsoleLine;
 use clean_slate_ui::shell::rail_entry;
 use clean_slate_ui::QualityTier;
 
-use crate::session::ShellSession;
+use crate::session::{ExitReason, HostError, Outcome, ShellSession};
 
 /// Emitted once both shell surfaces are committed.
 pub const READY_PREFIX: &str = "[SHELL] ready";
@@ -42,6 +42,17 @@ pub fn exit_line(reason: &str) -> ConsoleLine {
     ConsoleLine::format(format_args!("[SHELL] exit reason={reason}"))
 }
 
+/// The `reason=` word for how the session ended. A compositor that ended, seen on a receive
+/// or on a send, is `compositor-gone`: the desktop lane relaunches on that word.
+pub const fn exit_reason(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Continue | Outcome::Exit(ExitReason::HostFailed(HostError::Gone)) => {
+            "compositor-gone"
+        }
+        Outcome::Exit(_) => "setup-failed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +74,22 @@ mod tests {
         assert_eq!(tier_name(QualityTier::Q0), "Q0");
         assert_eq!(tier_name(QualityTier::Q1), "Q1");
         assert_eq!(tier_name(QualityTier::Q3), "Q1");
+    }
+
+    #[test]
+    fn a_compositor_that_ended_mid_send_is_compositor_gone() {
+        assert_eq!(exit_reason(Outcome::Continue), "compositor-gone");
+        assert_eq!(
+            exit_reason(Outcome::Exit(ExitReason::HostFailed(HostError::Gone))),
+            "compositor-gone"
+        );
+        assert_eq!(
+            exit_reason(Outcome::Exit(ExitReason::HostFailed(HostError::Failed(1)))),
+            "setup-failed"
+        );
+        assert_eq!(
+            exit_reason(Outcome::Exit(ExitReason::BadOutput)),
+            "setup-failed"
+        );
     }
 }
