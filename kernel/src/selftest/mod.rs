@@ -37,6 +37,8 @@ pub(crate) mod m10_nxe;
 pub(crate) mod m10_port;
 #[cfg(feature = "m10-shared-buffer-self-test")]
 pub(crate) mod m10_shared_buffer;
+#[cfg(clean_slate_userspace_selftest = "m10-storage")]
+pub(crate) mod m10_storage;
 #[cfg(feature = "m10-virtio-gpu-self-test")]
 pub(crate) mod m10_virtio_gpu;
 #[cfg(feature = "m10-virtio-modern-self-test")]

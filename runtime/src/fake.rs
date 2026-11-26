@@ -142,6 +142,16 @@ impl FakeKernel {
         self.objects.gone.push(id);
     }
 
+    /// The storage service restarted, or the machine rebooted: everything staged since the
+    /// last commit is forgotten, and buffers and requests are gone with the old process.
+    pub fn restart_storage(&mut self) {
+        for object in &mut self.objects.objects {
+            object.staged = object.committed.clone();
+        }
+        self.objects.done.clear();
+        self.buffers.clear();
+    }
+
     /// `(op, object id, offset, len)` of every object request submitted.
     pub fn object_requests(&self) -> &[(u64, u64, u64, u64)] {
         &self.objects.requests

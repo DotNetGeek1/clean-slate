@@ -18,6 +18,7 @@ mod m10_desktop_lane;
 mod m10_desktop_visual;
 mod m10_framebuffer_validate;
 mod m10_input_lane;
+mod m10_storage;
 mod m10_virtio_gpu;
 mod m5_torn;
 mod m7_certs;
@@ -1301,7 +1302,7 @@ const M9_MILESTONE_STEPS: [M9MilestoneStep; 18] = [
 /// boots, display backends, input, compositor and app host suites), then the #118 desktop lane
 /// on both display backends and the system image's desktop (#218 S6e). `[M10 ] PASS` is printed
 /// only after all of them succeed.
-const M10_MILESTONE_STEPS: [M9MilestoneStep; 16] = [
+const M10_MILESTONE_STEPS: [M9MilestoneStep; 17] = [
     ("test-m10-contract", run_m10_contract_acceptance),
     ("clean-slate-ui (host)", run_m10_ui_host_tests),
     ("test-m10-nxe", run_m10_nxe_acceptance),
@@ -1309,6 +1310,7 @@ const M10_MILESTONE_STEPS: [M9MilestoneStep; 16] = [
     ("test-m10-port", run_m10_port_acceptance),
     ("test-m10-native-memory", run_m10_native_memory_acceptance),
     ("test-m10-clock", m10_clock::run),
+    ("test-m10-storage", m10_storage::run),
     ("test-qmp-smoke", run_qmp_smoke_acceptance),
     ("test-m10-virtio-modern", run_m10_virtio_modern_acceptance),
     ("test-m10-framebuffer", run_m10_framebuffer_acceptance),
@@ -1407,6 +1409,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
         ParsedCommand::TestM10NativeMemory => run_m10_native_memory_acceptance(),
         ParsedCommand::TestM10Clock => m10_clock::run(),
+        ParsedCommand::TestM10Storage => m10_storage::run(),
         ParsedCommand::TestQmpSmoke => run_qmp_smoke_acceptance(),
         ParsedCommand::TestM10Desktop => m10_desktop_lane::run(),
         ParsedCommand::RunM10Desktop => run_m10_desktop_interactive(&trailing_args),
@@ -5698,6 +5701,9 @@ fn print_help() {
         "  test-m10-clock  #308 native clock: clock host tests, then two m10-clock-self-test QEMU boots: monotonic time across a wait and a wall clock within 3 s of the host's (-rtc base=now), and no wall clock from an RTC before the build floor; prints [M10.clock] lane PASS (aliases: m10-clock, m10.308)"
     );
     println!(
+        "  test-m10-storage  #312 native storage: storage host tests, then three m10-storage-self-test QEMU boots on one disk: a native app writes a named 1 MiB entry through a shared buffer and commits, reads it back by name and truncates it, then reads the 4 KiB back and unlinks it; prints [M10.storage] lane PASS (aliases: m10-storage, m10.312)"
+    );
+    println!(
         "  test-m10-native-memory  #306 native memory: native-abi and kernel host tests, then the m10-native-memory-self-test QEMU lane (map to budget, refusal, partial unmap, read-only fault, teardown baseline); prints [M10.mem] PASS (aliases: m10-native-memory, m10.306)"
     );
     println!(
@@ -5868,6 +5874,7 @@ enum ParsedCommand {
     TestM10Port,
     TestM10NativeMemory,
     TestM10Clock,
+    TestM10Storage,
     TestQmpSmoke,
     TestM10VirtioModern,
     TestM10VirtioGpu,
@@ -6032,6 +6039,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-m10-clock" || cmd == "m10-clock" || cmd == "m10.308" => {
             ParsedCommand::TestM10Clock
+        }
+        Some(cmd) if cmd == "test-m10-storage" || cmd == "m10-storage" || cmd == "m10.312" => {
+            ParsedCommand::TestM10Storage
         }
         Some(cmd) if cmd == "test-qmp-smoke" || cmd == "qmp-smoke" => ParsedCommand::TestQmpSmoke,
         Some(cmd) if cmd == "test-m10-virtio-modern" || cmd == "m10-virtio-modern" => {
@@ -6687,6 +6697,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestM10Clock
+            );
+        }
+        for alias in ["test-m10-storage", "m10-storage", "m10.312"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestM10Storage
             );
         }
         assert_eq!(
@@ -7589,6 +7605,7 @@ mod tests {
             "test-m10-port",
             "test-m10-native-memory",
             "test-m10-clock",
+            "test-m10-storage",
             "test-qmp-smoke",
             "test-m10-virtio-modern",
             "test-m10-framebuffer",

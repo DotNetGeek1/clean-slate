@@ -135,8 +135,13 @@ pub(crate) fn is_fixture_pid(pid: u64) -> bool {
     }
 }
 
-#[cfg(clean_slate_fixture_spawn)]
-fn register_fixture_pid(pid: u64) -> Result<(), &'static str> {
+/// Lets `pid` use the harness sub-operations. The storage lane (#312) registers its native
+/// probe here so the probe can report through lane checks.
+#[cfg(any(
+    clean_slate_fixture_spawn,
+    clean_slate_userspace_selftest = "m10-storage"
+))]
+pub(crate) fn register_fixture_pid(pid: u64) -> Result<(), &'static str> {
     unsafe {
         let count = *FIXTURE_PID_COUNT.get();
         if count >= MAX_FIXTURE_REGISTRY {
@@ -258,6 +263,7 @@ pub(crate) fn set_report_handler(handler: fn(u64, &M6FixtureBootstrap) -> Fixtur
 
 #[cfg(any(
     clean_slate_userspace_selftest = "m6-object",
+    clean_slate_userspace_selftest = "m10-storage",
     feature = "m10-shared-buffer-self-test",
     feature = "m10-native-memory-self-test",
     feature = "m10-clock-self-test"

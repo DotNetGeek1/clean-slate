@@ -25,6 +25,8 @@ pub mod object_capability;
 pub mod object_churn;
 /// #218 `SERVICE_READY` detail words of the system services.
 pub mod ready_detail;
+/// #312 native storage probe bootstrap page and lane checks.
+pub mod storage_probe;
 mod storage_service;
 mod unrelated_workload;
 

@@ -1,0 +1,32 @@
+[package]
+name = "clean-slate-storage-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "#312 native storage probe: writes, reads back, truncates and unlinks a 1 MiB directory entry across reboots"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "clean-slate-storage-probe-userspace"
+path = "src/bin/storage_probe.rs"
+required-features = ["userspace"]
+
+[features]
+default = []
+userspace = []
+
+[dependencies]
+clean-slate-capability = { path = "../capability" }
+clean-slate-native-abi = { path = "../native-abi" }
+clean-slate-runtime = { path = "../runtime" }
+clean-slate-service-fixtures = { path = "../service-fixtures" }
+
+[dev-dependencies]
+clean-slate-runtime = { path = "../runtime", features = ["fake"] }
+
+[lints]
+workspace = true

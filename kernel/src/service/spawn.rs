@@ -13,6 +13,26 @@ use crate::mm::frame_allocator::PageAllocator;
     feature = "m2-timer-self-test"
 )))]
 use crate::mm::PAGE_SIZE;
+#[cfg(clean_slate_userspace_selftest = "m10-storage")]
+include!(concat!(
+    env!("OUT_DIR"),
+    "/storage_probe_userspace_entry.rs"
+));
+#[cfg(clean_slate_userspace_selftest = "m10-storage")]
+const STORAGE_PROBE_USERSPACE_IMAGE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/storage_probe_userspace.bin"));
+/// The probe's stack holds a directory table and a 4.5 KiB read.
+#[cfg(clean_slate_userspace_selftest = "m10-storage")]
+const STORAGE_PROBE_STACK_PAGES: u64 = 8;
+#[cfg(clean_slate_userspace_selftest = "m10-storage")]
+const _: () = assert!(STORAGE_PROBE_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDRESS);
+#[cfg(clean_slate_userspace_selftest = "m10-storage")]
+const _: () = assert!(
+    // The bootstrap page sits 1 MiB above the code address.
+    STORAGE_PROBE_USERSPACE_MAPPED_CODE_PAGES < 256
+        && STORAGE_PROBE_USERSPACE_MAPPED_CODE_PAGES + (STORAGE_PROBE_STACK_PAGES as usize)
+            < crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
+);
 #[cfg(clean_slate_system_init)]
 include!(concat!(env!("OUT_DIR"), "/console_userspace_entry.rs"));
 #[cfg(clean_slate_system_init)]
@@ -1264,7 +1284,10 @@ fn launch_console_userspace_service(
 
 /// An embedded native image that reads a `repr(C)` bootstrap page, with its stack directly
 /// above that page.
-#[cfg(clean_slate_system_init)]
+#[cfg(any(
+    clean_slate_system_init,
+    clean_slate_userspace_selftest = "m10-storage"
+))]
 struct BootstrapPageImage {
     bytes: &'static [u8],
     segments: &'static [crate::mm::image_loader::EmbeddedSegment],
@@ -1276,7 +1299,10 @@ struct BootstrapPageImage {
 /// Maps `image` at the service code address, its stack and its bootstrap page, then registers
 /// it Ready on `scheduler_slot`. `bootstrap_for` gets the pid before the process can run, so
 /// every handle it grants is in the page before the first instruction.
-#[cfg(clean_slate_system_init)]
+#[cfg(any(
+    clean_slate_system_init,
+    clean_slate_userspace_selftest = "m10-storage"
+))]
 fn launch_bootstrap_page_image<B: Copy>(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
@@ -1349,6 +1375,50 @@ fn launch_bootstrap_page_image<B: Copy>(
                 entry_rip,
                 scheduler_slot,
             )
+        },
+    )
+}
+
+/// #312: launches the native storage probe (`clean-slate-storage-probe-userspace`) with one
+/// capability, `READ | WRITE | DIRECTORY` on the directory whose table is `directory_id`.
+/// Outside the controller, like the M6 fixtures: it is the lane's app, not a service.
+#[cfg(clean_slate_userspace_selftest = "m10-storage")]
+#[inline(never)]
+pub(crate) fn launch_storage_probe(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+    directory_id: u64,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    use crate::capability::object::grant_object_capability;
+    use clean_slate_capability::{HolderId, Rights};
+    use clean_slate_service_fixtures::storage_probe::{
+        StorageProbeBootstrap, STORAGE_PROBE_BOOTSTRAP_ADDRESS,
+    };
+
+    launch_bootstrap_page_image(
+        allocator,
+        kernel_stack_top,
+        scheduler_slot,
+        &BootstrapPageImage {
+            bytes: STORAGE_PROBE_USERSPACE_IMAGE,
+            segments: &STORAGE_PROBE_USERSPACE_SEGMENTS,
+            entry_offset: STORAGE_PROBE_USERSPACE_ENTRY_OFFSET,
+            stack_pages: STORAGE_PROBE_STACK_PAGES,
+            bootstrap_address: STORAGE_PROBE_BOOTSTRAP_ADDRESS,
+        },
+        |pid| {
+            let handle = grant_object_capability(
+                HolderId(pid),
+                directory_id,
+                Rights::READ.union(Rights::WRITE).union(Rights::DIRECTORY),
+            )
+            .map_err(|_| "storage probe directory grant failed")?;
+            Ok(StorageProbeBootstrap {
+                self_pid: pid,
+                directory_handle: handle.encode(),
+                directory_id,
+            })
         },
     )
 }
