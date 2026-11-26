@@ -245,6 +245,11 @@ impl Server {
         Ok(Self { serve })
     }
 
+    /// A serve handle the caller was given, such as init's from its bootstrap page.
+    pub const fn from_raw(serve: u64) -> Self {
+        Self { serve }
+    }
+
     pub const fn raw(self) -> u64 {
         self.serve
     }

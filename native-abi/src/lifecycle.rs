@@ -1,27 +1,42 @@
-//! Syscall 21 `LIFECYCLE_WAIT`: block until the lifecycle controller has a pending message.
+//! Syscall 21 `LIFECYCLE_WAIT`: block until the lifecycle controller has a pending message, or
+//! (#237) have each new message set a bit of the caller's work set.
 //!
 //! ```text
-//! | Register | Meaning                                                                 |
-//! | rdi      | lifecycle-control capability handle (the one `LIFECYCLE_POLL` takes)    |
-//! | rsi      | deadline: absolute monotonic ns (`WORK_SET` op `NOW`); 0 = no deadline  |
-//! | rdx, r10, r8, r9 | reserved, must be 0                                            |
+//! | Register | WAIT (rdx = 0)                                                  | BIND_WAKE (rdx = 1)            |
+//! | rdi      | lifecycle-control capability handle (the one `LIFECYCLE_POLL` takes) | the same                 |
+//! | rsi      | deadline: absolute monotonic ns (`WORK_SET` op `NOW`); 0 = no deadline | work-set id (the caller's own) |
+//! | rdx      | [`LIFECYCLE_WAIT_OP_WAIT`]                                       | [`LIFECYCLE_WAIT_OP_BIND_WAKE`] |
+//! | r10      | reserved, must be 0                                              | work-set bit, 0..=31           |
+//! | r8, r9   | reserved, must be 0                                              | reserved, must be 0            |
 //! ```
 //!
 //! | Result | Meaning |
 //! |--------|---------|
-//! | `1..=u32::MAX` | id of a service with a pending lifecycle message; read it with `LIFECYCLE_POLL` (5) |
-//! | `STATUS_ETIMEDOUT` | the deadline was reached with nothing pending |
+//! | `1..=u32::MAX` | WAIT: id of a service with a pending lifecycle message; read it with `LIFECYCLE_POLL` (5) |
+//! | `0` | BIND_WAKE: bound |
+//! | `STATUS_ETIMEDOUT` | WAIT: the deadline was reached with nothing pending |
 //! | `STATUS_EACCES` | the caller does not hold this lifecycle-control capability |
 //! | `STATUS_ESTALE` | the handle names a revoked capability |
-//! | `STATUS_EINVAL` | malformed handle, a reserved register is non-zero, or a deadline without a calibrated clock |
+//! | `STATUS_EINVAL` | malformed handle, an unknown op, a reserved register is non-zero, a deadline without a calibrated clock, or BIND_WAKE naming a work set or bit the caller does not own |
 //!
 //! A pending message wins over an expired deadline, so a deadline at or before now is a
 //! non-blocking check. The kernel only compares the deadline with the clock; it never adds
 //! to it. The wait does not consume the message: the caller polls it.
+//!
+//! BIND_WAKE lets a holder that waits on other sources too (init and its launcher port, #237)
+//! sleep in `WORK_SET` `WAIT` alone: from the bind on, each message the controller queues sets
+//! the bit, and binding with a message already pending sets it at once. A later bind replaces
+//! the earlier one. The bit says only that something may be pending; the holder then drains
+//! with non-blocking WAITs.
 
 use crate::status::{is_status, STATUS_ETIMEDOUT};
 
 pub const SYSCALL_NR_LIFECYCLE_WAIT: u64 = 21;
+
+/// `rdx` sub-operation: block until a message is pending or the deadline passes.
+pub const LIFECYCLE_WAIT_OP_WAIT: u64 = 0;
+/// `rdx` sub-operation: set a work-set bit on every later message.
+pub const LIFECYCLE_WAIT_OP_BIND_WAKE: u64 = 1;
 
 /// `rsi` value that waits until a message is pending, however long that takes.
 pub const LIFECYCLE_WAIT_NO_DEADLINE: u64 = 0;

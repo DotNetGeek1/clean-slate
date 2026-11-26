@@ -17,6 +17,8 @@ pub(crate) mod graphics;
 pub(crate) mod handle_family;
 #[cfg(any(test, feature = "m10-input-self-test", clean_slate_desktop))]
 pub(crate) mod input;
+#[cfg(any(test, clean_slate_system_init))]
+pub(crate) mod launcher;
 pub(crate) mod network;
 pub(crate) mod object;
 pub(crate) mod process_control;

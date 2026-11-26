@@ -17,8 +17,10 @@ use core::ptr::addr_of_mut;
 use clean_slate_desktop_shell::host::Client;
 use clean_slate_desktop_shell::{diag, ExitReason, Outcome, ShellSession};
 use clean_slate_native_abi::desktop::{ConsoleLine, DesktopLaunchPage, DESKTOP_LAUNCH_ADDRESS};
+use clean_slate_native_abi::launcher::LauncherEvent;
 use clean_slate_runtime::console::Console;
-use clean_slate_runtime::port::Wait;
+use clean_slate_runtime::launcher::Launcher;
+use clean_slate_runtime::port::{self, Deadline, Wait};
 use clean_slate_runtime::{process, Kernel};
 use clean_slate_ui::QualityTier;
 
@@ -37,6 +39,40 @@ fn console(boot: &DesktopLaunchPage, line: &ConsoleLine) {
     if let Some(handle) = boot.console() {
         let _ = Console::new(handle).send(&mut Kernel, line.as_bytes());
     }
+}
+
+/// How long the first listing may take: init answers at once unless it is busy starting rows.
+const LAUNCHER_LIST_TIMEOUT_NS: u64 = 2_000_000_000;
+
+/// #237 part 1: asks init's launcher port for the rows it may start, and logs how many there
+/// are. The rail does not use them yet; a launcher that cannot be reached leaves the rail as
+/// it is.
+fn list_launchable(boot: &DesktopLaunchPage) {
+    let Ok(launcher) = Launcher::connect(&mut Kernel) else {
+        console(boot, &diag::launcher_unavailable_line("connect"));
+        return;
+    };
+    if launcher.request_list(&mut Kernel).is_err() {
+        console(boot, &diag::launcher_unavailable_line("send"));
+        let _ = launcher.connection().close(&mut Kernel, 0);
+        return;
+    }
+    let deadline = port::now(&mut Kernel).map_or(Deadline::NEVER, |now| {
+        Deadline::after(now, LAUNCHER_LIST_TIMEOUT_NS)
+    });
+    let line = loop {
+        match launcher.next_event(&mut Kernel, Wait::Until(deadline)) {
+            Ok(LauncherEvent::ListEnd { count }) => {
+                break diag::launcher_listed_line(usize::from(count));
+            }
+            // Entries and changes: the rail does not show them yet.
+            Ok(_) => {}
+            Err(_) => break diag::launcher_unavailable_line("list"),
+        }
+    };
+    console(boot, &line);
+    // Until the rail follows the changes init posts, the connection is not kept.
+    let _ = launcher.connection().close(&mut Kernel, 0);
 }
 
 fn run(boot: &DesktopLaunchPage, session: &mut ShellSession) {
@@ -60,6 +96,7 @@ fn run(boot: &DesktopLaunchPage, session: &mut ShellSession) {
                 announced = true;
                 console(boot, &line);
                 report_service_ready();
+                list_launchable(boot);
             }
         }
         if let Some(index) = session.take_activation() {

@@ -37,6 +37,16 @@ pub fn activation_line(index: usize) -> ConsoleLine {
     ConsoleLine::format(format_args!("[SHELL] rail selected={index} {label}"))
 }
 
+/// `[SHELL] launcher listed=<count>`, once the shell has its first launcher listing (#237).
+pub fn launcher_listed_line(count: usize) -> ConsoleLine {
+    ConsoleLine::format(format_args!("[SHELL] launcher listed={count}"))
+}
+
+/// `[SHELL] launcher unavailable reason=<reason>`: no listing, the rail carries on without it.
+pub fn launcher_unavailable_line(reason: &str) -> ConsoleLine {
+    ConsoleLine::format(format_args!("[SHELL] launcher unavailable reason={reason}"))
+}
+
 /// `[SHELL] exit reason=<reason>`.
 pub fn exit_line(reason: &str) -> ConsoleLine {
     ConsoleLine::format(format_args!("[SHELL] exit reason={reason}"))
@@ -56,6 +66,18 @@ pub const fn exit_reason(outcome: Outcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_lines_fit_one_message() {
+        assert_eq!(
+            launcher_listed_line(2).as_bytes(),
+            b"[SHELL] launcher listed=2"
+        );
+        assert_eq!(
+            launcher_unavailable_line("connect").as_bytes(),
+            b"[SHELL] launcher unavailable reason=connect"
+        );
+    }
 
     #[test]
     fn lines_match_what_the_desktop_lane_parses() {

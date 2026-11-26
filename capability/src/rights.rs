@@ -53,6 +53,11 @@ impl Rights {
     /// the attached front end and its input comes only from there (the terminal's shell, #311).
     /// Only a manifest row grants it at the root; forks inherit it.
     pub const CONSOLE_SESSION: Self = Self(1 << 23);
+    /// Ask init, over the launcher port, to start a manifest row by name and list the rows it
+    /// may start (the desktop shell, #237).
+    pub const LAUNCH_CONNECT: Self = Self(1 << 24);
+    /// Serve the launcher port (init only).
+    pub const LAUNCH_SERVE: Self = Self(1 << 25);
 
     const ALL_KNOWN: u32 = (1 << 0)
         | (1 << 1)
@@ -77,7 +82,9 @@ impl Rights {
         | (1 << 20)
         | (1 << 21)
         | (1 << 22)
-        | (1 << 23);
+        | (1 << 23)
+        | (1 << 24)
+        | (1 << 25);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -179,6 +186,10 @@ impl Rights {
                     | Self::DELEGATE.0
                     | Self::REVOKE.0,
             ),
+            // Connecting may be delegated as on the other ports; serving is init's alone.
+            ResourceClass::Launcher => Self(
+                Self::LAUNCH_CONNECT.0 | Self::LAUNCH_SERVE.0 | Self::DELEGATE.0 | Self::REVOKE.0,
+            ),
         }
     }
 
@@ -200,13 +211,14 @@ impl Rights {
             ResourceClass::Console => {
                 Self(Self::CONSOLE_SERVE.0 | Self::CONSOLE_ATTACH.0 | Self::READ.0 | Self::WRITE.0)
             }
+            ResourceClass::Launcher => Self::LAUNCH_SERVE,
             _ => Self::empty(),
         }
     }
 
     /// Lowercase, pipe-separated names in deterministic bit order.
     pub fn write_names(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        const NAMES: [(&str, u32); 24] = [
+        const NAMES: [(&str, u32); 26] = [
             ("read", 1 << 0),
             ("write", 1 << 1),
             ("inspect", 1 << 2),
@@ -231,6 +243,8 @@ impl Rights {
             ("console_serve", 1 << 21),
             ("console_attach", 1 << 22),
             ("console_session", 1 << 23),
+            ("launch_connect", 1 << 24),
+            ("launch_serve", 1 << 25),
         ];
         let mut first = true;
         for (name, bit) in NAMES {

@@ -10,6 +10,7 @@
 pub mod clock;
 pub mod console;
 pub mod desktop;
+pub mod launcher;
 pub mod lifecycle;
 pub mod memory;
 pub mod shared_buffer;

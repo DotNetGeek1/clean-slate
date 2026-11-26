@@ -1378,6 +1378,26 @@ impl InstanceGrantAuthority for KernelInstanceGrants {
         Ok(())
     }
 
+    /// Init serves the launcher port from boot on and never restarts, so there is no live
+    /// instance to look up.
+    #[cfg(clean_slate_desktop)]
+    fn grant_launcher_client(&mut self, pid: u64) -> Result<(), &'static str> {
+        use crate::capability::launcher::{grant_launcher_port, LAUNCHER_CLIENT_RIGHTS};
+        use clean_slate_capability::HolderId;
+
+        grant_launcher_port(HolderId(pid), LAUNCHER_CLIENT_RIGHTS)
+            .map_err(|_| self.grant_failed(pid, "launcher client", "capability refused"))?;
+        kernel_log_fmt(format_args!(
+            "[KERN] launcher authority granted pid={pid} rights=connect\n"
+        ));
+        Ok(())
+    }
+
+    #[cfg(not(clean_slate_desktop))]
+    fn grant_launcher_client(&mut self, pid: u64) -> Result<(), &'static str> {
+        Err(self.grant_failed(pid, "launcher client", DESKTOP_NOT_COMPILED))
+    }
+
     #[cfg(not(clean_slate_desktop))]
     fn grant_console_service(&mut self, pid: u64) -> Result<(), &'static str> {
         Err(self.grant_failed(pid, "console port", DESKTOP_NOT_COMPILED))
@@ -1434,6 +1454,7 @@ const fn rollback_failure_message(grant: Grant) -> &'static str {
         | Grant::ConsoleClient
         | Grant::ConsoleSession
         | Grant::ConsoleFrontEnd => "console grant rollback teardown failed",
+        Grant::LauncherClient => "launcher grant rollback teardown failed",
     }
 }
 
@@ -1796,7 +1817,7 @@ mod tests {
 
     #[test]
     fn launch_grants_come_from_the_active_manifest() {
-        use clean_slate_service_fixtures::manifest::{RestartSpec, ServiceImage};
+        use clean_slate_service_fixtures::manifest::{RestartSpec, ServiceImage, Start};
         static SCENARIO: &[ServiceSpec] = &[ServiceSpec {
             id: STORAGE_SERVICE_ID,
             image: ServiceImage::Storage,
@@ -1806,6 +1827,8 @@ mod tests {
             depends_on: &[],
             slot_allowance: None,
             memory_pages: 0,
+            launch_name: None,
+            start: Start::AtBoot,
         }];
 
         let mut controller = ServiceLifecycleController::new();

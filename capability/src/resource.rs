@@ -17,6 +17,8 @@ pub enum ResourceClass {
     Input = 11,
     /// Console streams (#310): the console service's port and the serial console device.
     Console = 12,
+    /// The launcher port init serves (#237): ask init to start a manifest row by name.
+    Launcher = 13,
 }
 
 impl ResourceClass {
@@ -38,6 +40,7 @@ impl ResourceClass {
             10 => Some(Self::Display),
             11 => Some(Self::Input),
             12 => Some(Self::Console),
+            13 => Some(Self::Launcher),
             _ => None,
         }
     }
@@ -56,6 +59,7 @@ impl ResourceClass {
             Self::Display => "display",
             Self::Input => "input",
             Self::Console => "console",
+            Self::Launcher => "launcher",
         }
     }
 }
@@ -63,6 +67,9 @@ impl ResourceClass {
 /// `ResourceClass::Console` id of the serial console device. Service ids are never 0, so it
 /// cannot name a console port.
 pub const SERIAL_CONSOLE_DEVICE_ID: u64 = 0;
+
+/// `ResourceClass::Launcher` id of the one launcher port, served by init (#237).
+pub const LAUNCHER_PORT_ID: u64 = 1;
 
 /// Stable resource key bound by a capability (independent of handle slot/generation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -174,6 +181,17 @@ impl ResourceRef {
         Self {
             class: ResourceClass::Console,
             id: SERIAL_CONSOLE_DEVICE_ID,
+            instance_generation: 0,
+        }
+    }
+
+    /// The launcher port (#237), served by init: `id` is [`LAUNCHER_PORT_ID`]. Init is not a
+    /// service instance and is never restarted (its death is fatal), so the port has no
+    /// instance generation.
+    pub const fn launcher_port() -> Self {
+        Self {
+            class: ResourceClass::Launcher,
+            id: LAUNCHER_PORT_ID,
             instance_generation: 0,
         }
     }
