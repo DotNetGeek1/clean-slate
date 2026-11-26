@@ -684,3 +684,84 @@ fn shared_buffer_kernel_owned_buffers_refuse_client_pins() {
     assert_eq!(pin(id), Err(ShareError::Denied));
     harness.teardown_both();
 }
+
+#[test]
+fn shared_buffer_object_io_pin_checks_rights_and_range_and_holds_frames_past_release() {
+    use super::object_io::{for_each_chunk, pin_for_holder, unpin as unpin_object_io};
+    let mut harness = Harness::new();
+    let (id, root) = harness.allocate(2);
+    let child = harness.delegate_read(root);
+    // The owner may move bytes either way; a read-only holder only out of the buffer.
+    assert_eq!(
+        pin_for_holder(HolderId(READER), child.encode(), Rights::WRITE, 0, 16),
+        Err(STATUS_EACCES)
+    );
+    assert_eq!(
+        pin_for_holder(HolderId(READER), root.encode(), Rights::READ, 0, 16),
+        Err(STATUS_EACCES),
+        "another holder's handle"
+    );
+    assert_eq!(
+        pin_for_holder(
+            HolderId(OWNER),
+            root.encode(),
+            Rights::WRITE,
+            PAGE_SIZE,
+            PAGE_SIZE + 1
+        ),
+        Err(STATUS_EINVAL),
+        "past the buffer's end"
+    );
+    let read_pin = pin_for_holder(
+        HolderId(READER),
+        child.encode(),
+        Rights::READ,
+        0,
+        2 * PAGE_SIZE,
+    )
+    .unwrap();
+    let pinned = pin_for_holder(
+        HolderId(OWNER),
+        root.encode(),
+        Rights::WRITE,
+        0,
+        2 * PAGE_SIZE,
+    )
+    .unwrap();
+    assert_eq!((read_pin, pinned), (id, id));
+    let mut seen = std::vec::Vec::new();
+    for_each_chunk(id, PAGE_SIZE - 2, 4, |at, bytes| {
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = 0x40 + (at as u8) + index as u8;
+        }
+        seen.push((at, bytes.len()));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen, [(0, 2), (2, 2)], "chunks never cross a page");
+    assert_eq!(
+        for_each_chunk(id, 2 * PAGE_SIZE - 1, 2, |_, _| Ok(())),
+        Err(())
+    );
+
+    // The owner releases the buffer while requests still hold it.
+    revoke_for_resource(id.resource_ref());
+    drain_pending(&mut harness.frames);
+    assert_eq!(
+        buffer_state(id),
+        Some(BufferState::Dying),
+        "pinned frames stay"
+    );
+    let mut bytes = [0u8; 4];
+    for_each_chunk(id, PAGE_SIZE - 2, 4, |at, chunk| {
+        bytes[at as usize..at as usize + chunk.len()].copy_from_slice(chunk);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(bytes, [0x40, 0x41, 0x42, 0x43]);
+    unpin_object_io(read_pin);
+    unpin_object_io(pinned);
+    drain_pending(&mut harness.frames);
+    assert_eq!(buffer_state(id), Some(BufferState::Free));
+    harness.teardown_both();
+}

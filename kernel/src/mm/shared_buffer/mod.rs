@@ -386,6 +386,8 @@ fn unmap_at(pid: u64, va: u64, frames: &mut impl FrameSource) -> Result<(), Shar
 
 /// W7: kernel-owned buffers and pins; the display presenter's scanout buffers (#111).
 pub(crate) mod kernel_owned;
+/// #312: object I/O through a client's shared buffer.
+pub(crate) mod object_io;
 #[cfg(test)]
 pub(crate) use table::test_support::ArenaFrames;
 pub(crate) use table::{FrameSource as BufferFrames, ShareError};

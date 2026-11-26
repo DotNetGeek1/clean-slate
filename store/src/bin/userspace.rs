@@ -21,7 +21,8 @@ use clean_slate_service_fixtures::{
     BlockTransportOp, BlockTransportRequest, BlockTransportResponse, BlockTransportStatus,
     ObjectServiceRequest, StorageServiceBootstrap, BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES,
     BLOCK_TRANSPORT_REQUEST_BYTES, BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION,
-    OBJECT_MAX_PAYLOAD_BYTES, OBJECT_SERVICE_REQUEST_BYTES, OBJECT_STATUS_TOO_LARGE,
+    OBJECT_MAX_BUFFER_PAYLOAD_BYTES, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_READ_AT,
+    OBJECT_REQUEST_STAGED, OBJECT_SERVICE_REQUEST_BYTES, OBJECT_STATUS_TOO_LARGE,
     OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT, STORAGE_BLOCK_DEVICE_ID,
     STORAGE_SERVICE_BOOTSTRAP_ADDRESS as BOOTSTRAP_ADDRESS, STORAGE_SERVICE_LIVE_BYTES_BUDGET,
     STORAGE_SERVICE_MODE_CRASH_ARM_EARLY, STORAGE_SERVICE_MODE_CRASH_ARM_LATE,
@@ -208,14 +209,23 @@ fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u6
         ],
     );
     let mut request_buf = [0u8; OBJECT_SERVICE_REQUEST_BYTES];
+    // Where the kernel copies a staged `WRITE_AT`'s bytes from the client's shared buffer
+    // (#312).
+    let mut staging = vec![0u8; OBJECT_MAX_BUFFER_PAYLOAD_BYTES];
     loop {
         // Blocks in the kernel until a request is pending; it never reports an empty queue.
-        if object_service_next(role_handle, &mut request_buf)? != 1 {
+        if object_service_next(role_handle, &mut request_buf, &mut staging)? != 1 {
             return Err(0);
         }
         let request = ObjectServiceRequest::decode(&request_buf).map_err(|_| 0u64)?;
         let len = usize::try_from(request.len).map_err(|_| 0u64)?;
-        if len > OBJECT_MAX_PAYLOAD_BYTES {
+        let staged = request.flags == OBJECT_REQUEST_STAGED;
+        let max = if staged {
+            OBJECT_MAX_BUFFER_PAYLOAD_BYTES
+        } else {
+            OBJECT_MAX_PAYLOAD_BYTES
+        };
+        if len > max {
             object_service_complete_or_abandon(
                 role_handle,
                 request.request_id,
@@ -224,13 +234,27 @@ fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u6
             )?;
             continue;
         }
-        let (status, read) = serve(&mut store, &request, len, STORAGE_SERVICE_LIVE_BYTES_BUDGET);
+        let payload: &[u8] = match (staged, request.op) {
+            (_, OBJECT_OP_READ_AT) => &[],
+            (true, _) => &staging[..len],
+            (false, _) => &request.payload[..len],
+        };
+        let (status, read) = serve(
+            &mut store,
+            &request,
+            payload,
+            STORAGE_SERVICE_LIVE_BYTES_BUDGET,
+        );
         let payload = read.as_deref().unwrap_or(&[]);
         object_service_complete_or_abandon(role_handle, request.request_id, status, payload)?;
     }
 }
 
-fn object_service_next(role_handle: u64, buffer: &mut [u8]) -> Result<u64, u64> {
+fn object_service_next(
+    role_handle: u64,
+    buffer: &mut [u8],
+    staging: &mut [u8],
+) -> Result<u64, u64> {
     if buffer.len() < OBJECT_SERVICE_REQUEST_BYTES {
         return Err(0);
     }
@@ -240,8 +264,8 @@ fn object_service_next(role_handle: u64, buffer: &mut [u8]) -> Result<u64, u64> 
             OBJECT_SUBOP_SERVICE_NEXT,
             role_handle,
             buffer.as_ptr() as u64,
-            0,
-            0,
+            staging.as_mut_ptr() as u64,
+            staging.len() as u64,
             0,
         ],
     );

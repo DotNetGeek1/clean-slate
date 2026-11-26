@@ -162,7 +162,27 @@ impl FakeKernel {
                 if id != submit.object_id || (submit.op != OBJECT_OP_READ_AT && !write) {
                     return STATUS_EACCES;
                 }
-                let payload = if submit.op == OBJECT_OP_WRITE_AT {
+                let staged = if submit.buffer == 0 {
+                    None
+                } else {
+                    let Some(index) = self.buffers.iter().position(|b| b.handle == submit.buffer)
+                    else {
+                        return STATUS_EACCES;
+                    };
+                    let start = submit.buffer_offset as usize;
+                    let end = start + submit.len as usize;
+                    if end > self.buffers[index].bytes.len() {
+                        return STATUS_EINVAL;
+                    }
+                    Some((index, start, end))
+                };
+                let payload = if let Some((index, start, end)) = staged {
+                    if submit.op == OBJECT_OP_WRITE_AT {
+                        self.buffers[index].bytes[start..end].to_vec()
+                    } else {
+                        Vec::new()
+                    }
+                } else if submit.op == OBJECT_OP_WRITE_AT {
                     // SAFETY: the client passes `len` live bytes at `data`.
                     unsafe {
                         std::slice::from_raw_parts(submit.data as *const u8, submit.len as usize)
@@ -174,7 +194,16 @@ impl FakeKernel {
                 self.objects
                     .requests
                     .push((submit.op, id, submit.offset, submit.len));
-                let (result, read) = self.serve_object(&submit, &payload);
+                let (mut result, mut read) = self.serve_object(&submit, &payload);
+                if let Some((index, start, _)) = staged {
+                    // The bytes moved through the buffer: the poll returns their count.
+                    if submit.op == OBJECT_OP_READ_AT {
+                        self.buffers[index].bytes[start..start + read.len()].copy_from_slice(&read);
+                    } else if result == 0 {
+                        result = submit.len;
+                    }
+                    read = Vec::new();
+                }
                 self.objects.next_request += 1;
                 let request_id = self.objects.next_request;
                 self.objects.done.push((request_id, result, read));

@@ -6,11 +6,15 @@
 //! them. A write that would take the store past its live-byte budget fails with
 //! [`Error::Failed`]`(STATUS_ENOSPC)` and stages nothing; a capability bound to an object
 //! that was deleted fails with [`Error::Gone`].
+//!
+//! [`Object::write_from`] and [`Object::read_into`] move bytes through a shared buffer the
+//! process holds ([`crate::buffer::SharedBuffer`]), up to
+//! [`OBJECT_MAX_BUFFER_PAYLOAD_BYTES`] per request instead of 512.
 
 use clean_slate_native_abi::object::{
-    ObjectSubmitAt, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_COMMIT, OBJECT_OP_READ_AT,
-    OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE_AT, OBJECT_POLL_NO_DEADLINE, OBJECT_SUBMIT_AT_BYTES,
-    OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT_AT, SYSCALL_NR_CAP_OBJECT,
+    ObjectSubmitAt, OBJECT_MAX_BUFFER_PAYLOAD_BYTES, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_COMMIT,
+    OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE_AT, OBJECT_POLL_NO_DEADLINE,
+    OBJECT_SUBMIT_AT_BYTES, OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT_AT, SYSCALL_NR_CAP_OBJECT,
 };
 
 use crate::{Error, Syscalls};
@@ -75,6 +79,62 @@ impl Object {
         Ok(())
     }
 
+    /// Stages `len` bytes from the shared buffer `buffer` (a capability handle with `READ`),
+    /// starting `buffer_offset` bytes into it, at `offset` in the object.
+    pub fn write_from<S: Syscalls>(
+        self,
+        sys: &mut S,
+        offset: u64,
+        buffer: u64,
+        buffer_offset: u64,
+        len: u64,
+    ) -> Result<(), Error> {
+        let mut done = 0;
+        while done < len {
+            let chunk = (len - done).min(OBJECT_MAX_BUFFER_PAYLOAD_BYTES as u64);
+            self.submit_staged(
+                sys,
+                OBJECT_OP_WRITE_AT,
+                offset + done,
+                chunk,
+                buffer,
+                buffer_offset + done,
+            )?;
+            done += chunk;
+        }
+        Ok(())
+    }
+
+    /// Reads up to `len` bytes from `offset` into the shared buffer `buffer` (a capability
+    /// handle with `WRITE`), starting `buffer_offset` bytes into it; returns the bytes read,
+    /// fewer than `len` only at the object's end.
+    pub fn read_into<S: Syscalls>(
+        self,
+        sys: &mut S,
+        offset: u64,
+        buffer: u64,
+        buffer_offset: u64,
+        len: u64,
+    ) -> Result<u64, Error> {
+        let mut done = 0;
+        while done < len {
+            let chunk = (len - done).min(OBJECT_MAX_BUFFER_PAYLOAD_BYTES as u64);
+            let read = self.submit_staged(
+                sys,
+                OBJECT_OP_READ_AT,
+                offset + done,
+                chunk,
+                buffer,
+                buffer_offset + done,
+            )?;
+            done += read;
+            if read < chunk {
+                break;
+            }
+        }
+        Ok(done)
+    }
+
     /// Stages the object cut or zero-extended to `len` bytes.
     pub fn truncate<S: Syscalls>(self, sys: &mut S, len: u64) -> Result<(), Error> {
         self.request(sys, OBJECT_OP_TRUNCATE, len, 0, 0, &mut [])
@@ -85,6 +145,29 @@ impl Object {
     pub fn commit<S: Syscalls>(self, sys: &mut S) -> Result<(), Error> {
         self.request(sys, OBJECT_OP_COMMIT, 0, 0, 0, &mut [])
             .map(drop)
+    }
+
+    /// One request through a shared buffer; returns the bytes it moved.
+    fn submit_staged<S: Syscalls>(
+        self,
+        sys: &mut S,
+        op: u64,
+        offset: u64,
+        len: u64,
+        buffer: u64,
+        buffer_offset: u64,
+    ) -> Result<u64, Error> {
+        let descriptor = ObjectSubmitAt {
+            op,
+            object_id: self.id,
+            offset,
+            len,
+            data: 0,
+            buffer,
+            buffer_offset,
+        };
+        self.submit_and_wait(sys, &descriptor, &mut [])
+            .map(|moved| moved as u64)
     }
 
     /// One request: submit it, then wait for its completion. Returns the bytes copied to `out`.
@@ -104,8 +187,17 @@ impl Object {
             len: len as u64,
             data,
             ..ObjectSubmitAt::default()
-        }
-        .encode();
+        };
+        self.submit_and_wait(sys, &descriptor, out)
+    }
+
+    fn submit_and_wait<S: Syscalls>(
+        self,
+        sys: &mut S,
+        descriptor: &ObjectSubmitAt,
+        out: &mut [u8],
+    ) -> Result<usize, Error> {
+        let descriptor = descriptor.encode();
         let request_id = sys.call(
             SYSCALL_NR_CAP_OBJECT,
             [
@@ -162,6 +254,45 @@ mod tests {
             .filter(|(op, ..)| *op == OBJECT_OP_READ_AT)
             .count();
         assert_eq!(reads, 3);
+    }
+
+    #[test]
+    fn a_shared_buffer_moves_a_mebibyte_in_eight_requests() {
+        use crate::buffer::SharedBuffer;
+        const MIB: usize = 1024 * 1024;
+        let mut sys = FakeKernel::new();
+        sys.grant_object(OBJECT.handle(), OBJECT.id(), true);
+        let mut buffer = SharedBuffer::allocate(&mut sys, MIB).unwrap();
+        for (index, byte) in buffer.bytes().iter_mut().enumerate() {
+            *byte = (index / 4096) as u8 ^ index as u8;
+        }
+        let expected = buffer.bytes().to_vec();
+        OBJECT
+            .write_from(&mut sys, 0, buffer.handle(), 0, MIB as u64)
+            .unwrap();
+        let writes = sys
+            .object_requests()
+            .iter()
+            .filter(|(op, ..)| *op == OBJECT_OP_WRITE_AT)
+            .count();
+        assert_eq!(writes, MIB / OBJECT_MAX_BUFFER_PAYLOAD_BYTES);
+        OBJECT.commit(&mut sys).unwrap();
+        assert_eq!(sys.object_committed(OBJECT.id()), Some(&expected[..]));
+
+        buffer.bytes().fill(0);
+        assert_eq!(
+            OBJECT.read_into(&mut sys, 0, buffer.handle(), 0, MIB as u64),
+            Ok(MIB as u64)
+        );
+        assert_eq!(buffer.bytes(), &expected[..]);
+        assert_eq!(
+            OBJECT.read_into(&mut sys, MIB as u64 - 10, buffer.handle(), 0, 4096),
+            Ok(10)
+        );
+        // The buffer range must fit the buffer.
+        assert!(OBJECT
+            .read_into(&mut sys, 0, buffer.handle(), 1, MIB as u64)
+            .is_err());
     }
 
     #[test]

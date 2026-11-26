@@ -8,10 +8,12 @@ use clean_slate_capability::{
     Rights,
 };
 use clean_slate_native_abi::status::STATUS_ETIMEDOUT;
+use clean_slate_native_abi::SharedBufferId;
 use clean_slate_service_fixtures::{
-    object_status_to_native, ObjectServiceRequest, ObjectSubmitAt, OBJECT_MAX_PAYLOAD_BYTES,
-    OBJECT_OP_COMMIT, OBJECT_OP_DELETE, OBJECT_OP_READ, OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE,
-    OBJECT_OP_WRITE, OBJECT_OP_WRITE_AT, OBJECT_POLL_NO_DEADLINE, OBJECT_REQUEST_SLOTS,
+    object_status_to_native, ObjectServiceRequest, ObjectSubmitAt, OBJECT_MAX_BUFFER_PAYLOAD_BYTES,
+    OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_COMMIT, OBJECT_OP_DELETE, OBJECT_OP_READ,
+    OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE, OBJECT_OP_WRITE_AT,
+    OBJECT_POLL_NO_DEADLINE, OBJECT_REQUEST_SLOTS, OBJECT_REQUEST_STAGED,
     OBJECT_SERVICE_REQUEST_BYTES, OBJECT_SERVICE_ROLE_ID, OBJECT_STATUS_PENDING,
     OBJECT_SUBMIT_AT_BYTES, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, OBJECT_SUBOP_POLL,
     OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT, OBJECT_SUBOP_SUBMIT,
@@ -21,6 +23,7 @@ use clean_slate_service_fixtures::{
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::qemu::fatal_kernel_error;
+use crate::mm::shared_buffer::object_io;
 use crate::mm::user_access::{copy_from_user, copy_to_user};
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::sched::wait::{
@@ -59,6 +62,21 @@ struct ObjectRequestSlot {
     /// Submitted through `OBJECT_SUBOP_SUBMIT_AT`: a failure polls as a native status
     /// ([`object_status_to_native`]), never as a small number a read length could be.
     native_statuses: bool,
+    /// The bytes move through the client's shared buffer (#312): `len` is the byte count,
+    /// not a payload length, and a done `READ_AT` polls its count with nothing copied.
+    staged: bool,
+    /// The client's pinned shared buffer and the offset in it, until completion or reclaim
+    /// releases the pin.
+    buffer: Option<(SharedBufferId, u64)>,
+}
+
+/// What the storage service's next request needs from the client's shared buffer: a staged
+/// request's buffer, the offset in it, and the byte count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StagedBytes {
+    pub buffer: SharedBufferId,
+    pub buffer_offset: u64,
+    pub len: u64,
 }
 
 impl ObjectRequestSlot {
@@ -75,6 +93,8 @@ impl ObjectRequestSlot {
             payload: [0; OBJECT_MAX_PAYLOAD_BYTES],
             status: 0,
             native_statuses: false,
+            staged: false,
+            buffer: None,
         }
     }
 }
@@ -164,6 +184,35 @@ impl ObjectRequestQueue {
         Ok(request_id)
     }
 
+    /// A `SUBMIT_AT` request whose `len` bytes move through the client's shared buffer
+    /// `buffer`, which the caller pinned; the queue holds the pin until the request completes
+    /// or is reclaimed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_staged(
+        &mut self,
+        client: HolderId,
+        op: u64,
+        object_id: u64,
+        epoch: u64,
+        offset: u64,
+        len: u64,
+        buffer: SharedBufferId,
+        buffer_offset: u64,
+    ) -> Result<u64, SyscallQueueError> {
+        let len = usize::try_from(len).map_err(|_| SyscallQueueError::PayloadTooLarge)?;
+        let request_id = self.submit_native_at(client, op, object_id, epoch, offset, &[])?;
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.request_id == request_id)
+        {
+            slot.staged = true;
+            slot.len = len;
+            slot.buffer = Some((buffer, buffer_offset));
+        }
+        Ok(request_id)
+    }
+
     pub fn poll(
         &mut self,
         client: HolderId,
@@ -194,6 +243,11 @@ impl ObjectRequestQueue {
                     return Err(SyscallQueueError::CompletionStatus(status));
                 }
                 let len = slot.len;
+                if slot.staged {
+                    // The bytes went to the client's buffer at completion.
+                    self.slots[index] = ObjectRequestSlot::free();
+                    return Ok(len as u64);
+                }
                 if out.len() < len {
                     // Match success-path behavior: undersized buffer is EINVAL without freeing
                     // (client can poll again with a large enough buffer).
@@ -207,7 +261,14 @@ impl ObjectRequestQueue {
         }
     }
 
+    #[cfg(test)]
     pub fn service_next(&mut self) -> Option<ObjectServiceRequest> {
+        self.service_next_staged().map(|(request, _)| request)
+    }
+
+    /// [`service_next`](Self::service_next), with the client buffer a staged request's
+    /// bytes move through.
+    pub fn service_next_staged(&mut self) -> Option<(ObjectServiceRequest, Option<StagedBytes>)> {
         let index = self
             .slots
             .iter()
@@ -218,15 +279,65 @@ impl ObjectRequestQueue {
             ObjectServiceRequest::new(slot.request_id, slot.op, slot.object_id, slot.len as u64);
         request.epoch = slot.epoch;
         request.offset = slot.offset;
-        request.payload[..slot.len].copy_from_slice(&slot.payload[..slot.len]);
-        Some(request)
+        let staged = slot.buffer.map(|(buffer, buffer_offset)| StagedBytes {
+            buffer,
+            buffer_offset,
+            len: slot.len as u64,
+        });
+        if slot.staged {
+            request.flags = OBJECT_REQUEST_STAGED;
+        } else {
+            request.payload[..slot.len].copy_from_slice(&slot.payload[..slot.len]);
+        }
+        Some((request, staged))
     }
 
-    /// Frees every queue slot owned by `holder` (any state).
+    /// Returns an in-service request to the queue: the service could not take its bytes.
+    pub fn return_to_pending(&mut self, request_id: u64) {
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.request_id == request_id && slot.state == SlotState::InService)
+        {
+            slot.state = SlotState::Pending;
+        }
+    }
+
+    /// The client buffer an in-service staged request's completion copies into.
+    pub fn in_service_staged(&self, request_id: u64) -> Option<(u64, StagedBytes)> {
+        let slot = self
+            .slots
+            .iter()
+            .find(|slot| slot.request_id == request_id && slot.state == SlotState::InService)?;
+        let (buffer, buffer_offset) = slot.buffer?;
+        Some((
+            slot.op,
+            StagedBytes {
+                buffer,
+                buffer_offset,
+                len: slot.len as u64,
+            },
+        ))
+    }
+
+    /// Frees every queue slot owned by `holder` (any state), passing each pinned client
+    /// buffer to `release`.
+    #[cfg(test)]
     pub fn reclaim_for_holder(&mut self, holder: HolderId) -> usize {
+        self.reclaim_for_holder_releasing(holder, |_| {})
+    }
+
+    pub fn reclaim_for_holder_releasing(
+        &mut self,
+        holder: HolderId,
+        mut release: impl FnMut(SharedBufferId),
+    ) -> usize {
         let mut reclaimed = 0usize;
         for slot in &mut self.slots {
             if slot.state != SlotState::Free && slot.client == holder {
+                if let Some((buffer, _)) = slot.buffer {
+                    release(buffer);
+                }
                 *slot = ObjectRequestSlot::free();
                 reclaimed += 1;
             }
@@ -265,12 +376,40 @@ impl ObjectRequestQueue {
             return Err(SyscallQueueError::PayloadTooLarge);
         }
         let slot = &mut self.slots[index];
+        if slot.staged {
+            return Err(SyscallQueueError::InvalidRequest);
+        }
         slot.state = SlotState::Done;
         slot.status = status;
         slot.len = len;
         slot.payload[..len].copy_from_slice(payload);
         wake_all_registered(object_request_wait_key(request_id));
         Ok(())
+    }
+
+    /// Completes a staged request: `moved` bytes went to or came from the client's buffer,
+    /// which the request polls as its count. Returns the buffer whose pin the caller
+    /// releases.
+    pub fn service_complete_staged(
+        &mut self,
+        request_id: u64,
+        status: u64,
+        moved: u64,
+    ) -> Result<Option<SharedBufferId>, SyscallQueueError> {
+        let slot = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.request_id == request_id && slot.state == SlotState::InService)
+            .ok_or(SyscallQueueError::InvalidRequest)?;
+        if !slot.staged || moved > slot.len as u64 {
+            return Err(SyscallQueueError::InvalidRequest);
+        }
+        slot.state = SlotState::Done;
+        slot.status = status;
+        slot.len = if status == 0 { moved as usize } else { 0 };
+        let buffer = slot.buffer.take().map(|(buffer, _)| buffer);
+        wake_all_registered(object_request_wait_key(request_id));
+        Ok(buffer)
     }
 }
 
@@ -469,7 +608,7 @@ pub(crate) fn recover_object_queue_for_service_holder_exit(holder: HolderId) {
 
 /// Drops all object request slots owned by a client holder that is tearing down.
 pub(crate) fn reclaim_object_requests_for_holder(holder: HolderId) {
-    let reclaimed = queue_mut().reclaim_for_holder(holder);
+    let reclaimed = queue_mut().reclaim_for_holder_releasing(holder, object_io::unpin);
     if reclaimed > 0 {
         kernel_log_fmt(format_args!(
             "[CAP ] object queue reclaimed holder={} requests={reclaimed}\n",
@@ -723,6 +862,10 @@ fn handle_submit_at(frame: &mut SyscallContext) {
             return;
         }
     };
+    if submit.buffer != 0 {
+        frame.rax = submit_staged(holder, &submit, epoch);
+        return;
+    }
     let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
     if payload_len > 0 && copy_from_user(&mut payload[..payload_len], submit.data).is_err() {
         frame.rax = SYSCALL_EINVAL;
@@ -738,6 +881,43 @@ fn handle_submit_at(frame: &mut SyscallContext) {
     ) {
         Ok(request_id) => frame.rax = request_id,
         Err(error) => frame.rax = error.syscall_status(),
+    }
+}
+
+/// Queues a `SUBMIT_AT` whose bytes move through the caller's shared buffer: the buffer must
+/// give the right the transfer needs (`READ` to write the object from it, `WRITE` to read
+/// the object into it) over the whole range, and stays pinned until the request completes.
+fn submit_staged(holder: HolderId, submit: &ObjectSubmitAt, epoch: u64) -> u64 {
+    let right = if submit.op == OBJECT_OP_READ_AT {
+        Rights::WRITE
+    } else {
+        Rights::READ
+    };
+    let buffer = match object_io::pin_for_holder(
+        holder,
+        submit.buffer,
+        right,
+        submit.buffer_offset,
+        submit.len,
+    ) {
+        Ok(buffer) => buffer,
+        Err(status) => return status,
+    };
+    match queue_mut().submit_staged(
+        holder,
+        submit.op,
+        submit.object_id,
+        epoch,
+        submit.offset,
+        submit.len,
+        buffer,
+        submit.buffer_offset,
+    ) {
+        Ok(request_id) => request_id,
+        Err(error) => {
+            object_io::unpin(buffer);
+            error.syscall_status()
+        }
     }
 }
 
@@ -858,8 +1038,16 @@ fn handle_service_next(frame: &mut SyscallContext) {
         frame.rax = error.syscall_status();
         return;
     }
-    match queue_mut().service_next() {
-        Some(request) => {
+    match queue_mut().service_next_staged() {
+        Some((request, staged)) => {
+            let staged_write = staged.filter(|_| request.op == OBJECT_OP_WRITE_AT);
+            if let Some(staged) = staged_write {
+                if copy_buffer_to_staging(staged, frame.r10, frame.r8).is_err() {
+                    queue_mut().return_to_pending(request.request_id);
+                    frame.rax = SYSCALL_EINVAL;
+                    return;
+                }
+            }
             frame.rax = match copy_to_user(frame.rdx, &request.encode()) {
                 Ok(()) => 1,
                 Err(_) => SYSCALL_EINVAL,
@@ -867,6 +1055,62 @@ fn handle_service_next(frame: &mut SyscallContext) {
         }
         None => block_until_service_work(frame),
     }
+}
+
+/// Completes a staged request. A successful `READ_AT`'s `len` bytes at `src` (the service's
+/// memory) go into the client's pinned buffer; a successful `WRITE_AT` moved the request's
+/// whole length. Either way the pin is released.
+fn complete_staged(
+    request_id: u64,
+    status: u64,
+    op: u64,
+    staged: StagedBytes,
+    src: u64,
+    len: u64,
+) -> u64 {
+    let moved = match (status, op) {
+        (0, OBJECT_OP_READ_AT) => {
+            if len > staged.len {
+                return SYSCALL_EINVAL;
+            }
+            let copied =
+                object_io::for_each_chunk(staged.buffer, staged.buffer_offset, len, |at, bytes| {
+                    copy_from_user(bytes, src + at).map_err(|_| ())
+                });
+            if copied.is_err() {
+                return SYSCALL_EINVAL;
+            }
+            len
+        }
+        (0, _) => staged.len,
+        _ => 0,
+    };
+    match queue_mut().service_complete_staged(request_id, status, moved) {
+        Ok(buffer) => {
+            if let Some(buffer) = buffer {
+                object_io::unpin(buffer);
+            }
+            0
+        }
+        Err(error) => error.syscall_status(),
+    }
+}
+
+/// Copies a staged `WRITE_AT`'s bytes from the client's pinned buffer into the storage
+/// service's staging area at `staging` (`staging_len` bytes), in the service's own address
+/// space: the service is the caller.
+fn copy_buffer_to_staging(staged: StagedBytes, staging: u64, staging_len: u64) -> Result<(), ()> {
+    if staged.len > staging_len
+        || (staged.len > 0 && validate_user_writable_pointer_range(staging, staged.len).is_err())
+    {
+        return Err(());
+    }
+    object_io::for_each_chunk(
+        staged.buffer,
+        staged.buffer_offset,
+        staged.len,
+        |at, bytes| copy_to_user(staging + at, bytes).map_err(|_| ()),
+    )
 }
 
 /// An empty queue blocks the storage service on [`OBJECT_SERVICE_WORK_KEY`] with no
@@ -898,7 +1142,13 @@ fn handle_service_complete(frame: &mut SyscallContext) {
             return;
         }
     };
-    if len > OBJECT_MAX_PAYLOAD_BYTES {
+    let staged = queue_mut().in_service_staged(request_id);
+    let max = if staged.is_some() {
+        OBJECT_MAX_BUFFER_PAYLOAD_BYTES
+    } else {
+        OBJECT_MAX_PAYLOAD_BYTES
+    };
+    if len > max {
         frame.rax = SYSCALL_EINVAL;
         return;
     }
@@ -916,6 +1166,10 @@ fn handle_service_complete(frame: &mut SyscallContext) {
     if let Err(error) = authorize_service_role(frame.rsi) {
         log_deny(holder, OBJECT_SERVICE_ROLE_ID, 0, error);
         frame.rax = error.syscall_status();
+        return;
+    }
+    if let Some((op, staged)) = staged {
+        frame.rax = complete_staged(request_id, status, op, staged, frame.r8, len as u64);
         return;
     }
     let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
@@ -1121,6 +1375,133 @@ mod tests {
             assert_eq!(queue.poll(client, request.request_id, &mut []), Ok(0));
         }
         assert_eq!(decoded(OBJECT_OP_READ_AT, 0, 512).payload_len(), 0);
+    }
+
+    fn buffer_id(slot: u16) -> SharedBufferId {
+        SharedBufferId::new(slot, 1).expect("buffer id")
+    }
+
+    #[test]
+    fn a_staged_request_carries_its_length_and_buffer_not_a_payload() {
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(3);
+        let max = OBJECT_MAX_BUFFER_PAYLOAD_BYTES as u64;
+        let id = queue
+            .submit_staged(
+                client,
+                OBJECT_OP_WRITE_AT,
+                7,
+                0x42,
+                0x8_0000,
+                max,
+                buffer_id(2),
+                4096,
+            )
+            .unwrap();
+        let (request, staged) = queue.service_next_staged().unwrap();
+        assert_eq!(
+            (
+                request.op,
+                request.len,
+                request.offset,
+                request.epoch,
+                request.flags
+            ),
+            (
+                OBJECT_OP_WRITE_AT,
+                max,
+                0x8_0000,
+                0x42,
+                OBJECT_REQUEST_STAGED
+            )
+        );
+        assert_eq!(request.payload, [0; OBJECT_MAX_PAYLOAD_BYTES]);
+        let expected = StagedBytes {
+            buffer: buffer_id(2),
+            buffer_offset: 4096,
+            len: max,
+        };
+        assert_eq!(staged, Some(expected));
+        assert_eq!(
+            queue.in_service_staged(id),
+            Some((OBJECT_OP_WRITE_AT, expected))
+        );
+        // A staged request completes only as staged, and never with more than it asked for.
+        assert_eq!(
+            queue.service_complete(id, 0, &[]),
+            Err(SyscallQueueError::InvalidRequest)
+        );
+        assert_eq!(
+            queue.service_complete_staged(id, 0, max + 1),
+            Err(SyscallQueueError::InvalidRequest)
+        );
+        assert_eq!(
+            queue.service_complete_staged(id, 0, max),
+            Ok(Some(buffer_id(2)))
+        );
+        // The count polls without an output buffer: the bytes went through the client's buffer.
+        assert_eq!(queue.poll(client, id, &mut []), Ok(max));
+        assert_eq!(queue.in_service_staged(id), None);
+    }
+
+    #[test]
+    fn a_staged_read_polls_the_bytes_moved_and_a_failure_releases_the_buffer() {
+        use clean_slate_native_abi::status::STATUS_ENOSPC;
+        use clean_slate_service_fixtures::OBJECT_STATUS_NO_SPACE;
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(3);
+        let read = queue
+            .submit_staged(client, OBJECT_OP_READ_AT, 7, 0, 0, 4096, buffer_id(2), 0)
+            .unwrap();
+        queue.service_next_staged().unwrap();
+        assert_eq!(
+            queue.service_complete_staged(read, 0, 100),
+            Ok(Some(buffer_id(2)))
+        );
+        assert_eq!(queue.poll(client, read, &mut []), Ok(100));
+
+        let write = queue
+            .submit_staged(client, OBJECT_OP_WRITE_AT, 7, 0, 0, 4096, buffer_id(3), 0)
+            .unwrap();
+        queue.service_next_staged().unwrap();
+        assert_eq!(
+            queue.service_complete_staged(write, OBJECT_STATUS_NO_SPACE, 0),
+            Ok(Some(buffer_id(3)))
+        );
+        assert_eq!(
+            queue.poll(client, write, &mut []),
+            Err(SyscallQueueError::CompletionStatus(STATUS_ENOSPC))
+        );
+    }
+
+    #[test]
+    fn reclaim_and_a_refused_staging_copy_keep_pins_accounted() {
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(3);
+        let pending = queue
+            .submit_staged(client, OBJECT_OP_WRITE_AT, 7, 0, 0, 16, buffer_id(2), 0)
+            .unwrap();
+        queue.service_next_staged().unwrap();
+        // The service's staging area was unusable: the request waits for the next dequeue,
+        // still holding its buffer.
+        queue.return_to_pending(pending);
+        let (again, staged) = queue.service_next_staged().unwrap();
+        assert_eq!(again.request_id, pending);
+        assert_eq!(staged.map(|staged| staged.buffer), Some(buffer_id(2)));
+        queue
+            .submit_staged(client, OBJECT_OP_READ_AT, 7, 0, 0, 16, buffer_id(3), 0)
+            .unwrap();
+        queue.submit(client, OBJECT_OP_READ, 8, 0, &[]).unwrap();
+        let mut released = std::vec::Vec::new();
+        assert_eq!(
+            queue.reclaim_for_holder_releasing(client, |buffer| released.push(buffer)),
+            3
+        );
+        assert_eq!(released, [buffer_id(2), buffer_id(3)]);
+        assert_eq!(
+            queue.service_complete_staged(pending, 0, 16),
+            Err(SyscallQueueError::InvalidRequest)
+        );
     }
 
     #[test]

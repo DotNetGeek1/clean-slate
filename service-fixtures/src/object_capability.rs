@@ -19,8 +19,17 @@ pub struct ObjectServiceRequest {
     /// Byte offset for [`OBJECT_OP_READ_AT`] and [`OBJECT_OP_WRITE_AT`], and the new length
     /// for [`OBJECT_OP_TRUNCATE`]; 0 for the whole-object ops.
     pub offset: u64,
+    /// [`OBJECT_REQUEST_STAGED`] for a request whose bytes move through the client's shared
+    /// buffer (#312), else 0.
+    pub flags: u64,
     pub payload: [u8; OBJECT_MAX_PAYLOAD_BYTES],
 }
+
+/// [`ObjectServiceRequest::flags`]: the request's `len` bytes (up to
+/// [`OBJECT_MAX_BUFFER_PAYLOAD_BYTES`]) do not travel in `payload`. A `WRITE_AT`'s bytes are
+/// in the staging area the service passed to [`OBJECT_SUBOP_SERVICE_NEXT`]; a `READ_AT`'s
+/// completion passes up to `len` bytes, which the kernel copies into the client's buffer.
+pub const OBJECT_REQUEST_STAGED: u64 = 1;
 
 pub const OBJECT_SERVICE_REQUEST_BYTES: usize = core::mem::size_of::<ObjectServiceRequest>();
 
@@ -33,6 +42,7 @@ impl ObjectServiceRequest {
             len,
             epoch: OBJECT_EPOCH_UNBOUND,
             offset: 0,
+            flags: 0,
             payload: [0; OBJECT_MAX_PAYLOAD_BYTES],
         }
     }
@@ -45,7 +55,8 @@ impl ObjectServiceRequest {
         bytes[24..32].copy_from_slice(&self.len.to_le_bytes());
         bytes[32..40].copy_from_slice(&self.epoch.to_le_bytes());
         bytes[40..48].copy_from_slice(&self.offset.to_le_bytes());
-        bytes[48..48 + OBJECT_MAX_PAYLOAD_BYTES].copy_from_slice(&self.payload);
+        bytes[48..56].copy_from_slice(&self.flags.to_le_bytes());
+        bytes[56..56 + OBJECT_MAX_PAYLOAD_BYTES].copy_from_slice(&self.payload);
         bytes
     }
 
@@ -57,13 +68,19 @@ impl ObjectServiceRequest {
         let op = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
         let object_id = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
         let len = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
-        if len > OBJECT_MAX_PAYLOAD_BYTES as u64 {
-            return Err(ObjectServiceDecodeError::LengthOutOfRange);
-        }
         let epoch = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
         let offset = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
+        let flags = u64::from_le_bytes(bytes[48..56].try_into().unwrap());
+        let max = match flags {
+            0 => OBJECT_MAX_PAYLOAD_BYTES,
+            OBJECT_REQUEST_STAGED => OBJECT_MAX_BUFFER_PAYLOAD_BYTES,
+            _ => return Err(ObjectServiceDecodeError::UnknownFlags),
+        };
+        if len > max as u64 {
+            return Err(ObjectServiceDecodeError::LengthOutOfRange);
+        }
         let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
-        payload.copy_from_slice(&bytes[48..48 + OBJECT_MAX_PAYLOAD_BYTES]);
+        payload.copy_from_slice(&bytes[56..56 + OBJECT_MAX_PAYLOAD_BYTES]);
         Ok(Self {
             request_id,
             op,
@@ -71,6 +88,7 @@ impl ObjectServiceRequest {
             len,
             epoch,
             offset,
+            flags,
             payload,
         })
     }
@@ -80,6 +98,7 @@ impl ObjectServiceRequest {
 pub enum ObjectServiceDecodeError {
     TooShort,
     LengthOutOfRange,
+    UnknownFlags,
 }
 
 #[cfg(test)]
@@ -88,7 +107,7 @@ mod tests {
 
     #[test]
     fn object_service_request_size_matches_repr_c() {
-        assert_eq!(OBJECT_SERVICE_REQUEST_BYTES, 48 + OBJECT_MAX_PAYLOAD_BYTES);
+        assert_eq!(OBJECT_SERVICE_REQUEST_BYTES, 56 + OBJECT_MAX_PAYLOAD_BYTES);
     }
 
     #[test]
@@ -110,6 +129,28 @@ mod tests {
         let bytes = request.encode();
         let decoded = ObjectServiceRequest::decode(&bytes).expect("decode");
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn only_a_staged_request_carries_more_than_a_frame() {
+        let mut request = ObjectServiceRequest::new(9, OBJECT_OP_WRITE_AT, 7, 4096);
+        assert_eq!(
+            ObjectServiceRequest::decode(&request.encode()),
+            Err(ObjectServiceDecodeError::LengthOutOfRange)
+        );
+        request.flags = OBJECT_REQUEST_STAGED;
+        assert_eq!(ObjectServiceRequest::decode(&request.encode()), Ok(request));
+        request.len = OBJECT_MAX_BUFFER_PAYLOAD_BYTES as u64 + 1;
+        assert_eq!(
+            ObjectServiceRequest::decode(&request.encode()),
+            Err(ObjectServiceDecodeError::LengthOutOfRange)
+        );
+        request.len = 0;
+        request.flags = 2;
+        assert_eq!(
+            ObjectServiceRequest::decode(&request.encode()),
+            Err(ObjectServiceDecodeError::UnknownFlags)
+        );
     }
 
     #[test]
