@@ -80,6 +80,7 @@ const M6_AUDIT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M6_CAPABILITIES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(180);
 const M7_NET_CAPS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M10_PORT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+const M10_NATIVE_MEMORY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M10_FRAMEBUFFER_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M7_NET_DEVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -810,6 +811,15 @@ const M10_PORT_ACCEPTANCE_MARKERS: [&str; 23] = [
     "[M10.port] baseline restored",
     "[M10.port] PASS",
 ];
+/// #306 native memory through syscall 23: budget, refusal past it, partial unmap, read-only
+/// fault, and the teardown of a process that still holds its whole budget.
+const M10_NATIVE_MEMORY_ACCEPTANCE_MARKERS: [&str; 5] = [
+    "[M10.mem] fixture spawned pid=1 budget=48",
+    "[M10.mem] at budget used=48 budget=48",
+    "[M10.mem] read-only write faulted pid=1",
+    "[M10.mem] baseline restored",
+    "[M10.mem] PASS",
+];
 const M6_CAPABILITIES_ACCEPTANCE_MARKERS: [&str; 31] = [
     "[STOR] object-service started pid=",
     "[CAP ] object grant holder=3 object=7",
@@ -1289,12 +1299,13 @@ const M9_MILESTONE_STEPS: [M9MilestoneStep; 18] = [
 /// boots, display backends, input, compositor and app host suites), then the #118 desktop lane
 /// on both display backends and the system image's desktop (#218 S6e). `[M10 ] PASS` is printed
 /// only after all of them succeed.
-const M10_MILESTONE_STEPS: [M9MilestoneStep; 14] = [
+const M10_MILESTONE_STEPS: [M9MilestoneStep; 15] = [
     ("test-m10-contract", run_m10_contract_acceptance),
     ("clean-slate-ui (host)", run_m10_ui_host_tests),
     ("test-m10-nxe", run_m10_nxe_acceptance),
     ("test-m10-shared-buffer", run_m10_shared_buffer_acceptance),
     ("test-m10-port", run_m10_port_acceptance),
+    ("test-m10-native-memory", run_m10_native_memory_acceptance),
     ("test-qmp-smoke", run_qmp_smoke_acceptance),
     ("test-m10-virtio-modern", run_m10_virtio_modern_acceptance),
     ("test-m10-framebuffer", run_m10_framebuffer_acceptance),
@@ -1391,6 +1402,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10App => run_m10_app_acceptance(),
         ParsedCommand::TestM10Nxe => run_m10_nxe_acceptance(),
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
+        ParsedCommand::TestM10NativeMemory => run_m10_native_memory_acceptance(),
         ParsedCommand::TestQmpSmoke => run_qmp_smoke_acceptance(),
         ParsedCommand::TestM10Desktop => m10_desktop_lane::run(),
         ParsedCommand::RunM10Desktop => run_m10_desktop_interactive(&trailing_args),
@@ -3059,6 +3071,23 @@ fn run_m10_port_acceptance() -> Result<(), XtaskError> {
         Some((
             MarkerSet::Ordered(&M10_PORT_ACCEPTANCE_MARKERS),
             M10_PORT_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+/// #306 gate: the native-abi and native memory host tests, then the `m10-native-memory-self-test`
+/// QEMU lane through syscall 23.
+fn run_m10_native_memory_acceptance() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-native-abi", &[])?;
+    run_cargo_package_tests("clean-slate-kernel", &["native_mem"])?;
+    build_m6_fixture_userspace(true)?;
+    run_vm_inner(
+        false,
+        false,
+        &["m10-native-memory-self-test"],
+        Some((
+            MarkerSet::Ordered(&M10_NATIVE_MEMORY_ACCEPTANCE_MARKERS),
+            M10_NATIVE_MEMORY_ACCEPTANCE_TIMEOUT,
         )),
     )
 }
@@ -5637,6 +5666,9 @@ fn print_help() {
         "  test-m10-port   M10 #200 service port: port/kernel host tests, then the m10-port-self-test QEMU lane with ordered markers; prints [M10.port] PASS (aliases: m10-port, m10.200)"
     );
     println!(
+        "  test-m10-native-memory  #306 native memory: native-abi and kernel host tests, then the m10-native-memory-self-test QEMU lane (map to budget, refusal, partial unmap, read-only fault, teardown baseline); prints [M10.mem] PASS (aliases: m10-native-memory, m10.306)"
+    );
+    println!(
         "  test-qmp-smoke  QMP harness smoke: SeaBIOS boot-sector fixture, marker-paced key/pointer injection, PNG screendump, failure cleanup; no kernel or OVMF; prints [QMP.smoke] PASS (aliases: qmp-smoke)"
     );
     println!(
@@ -5801,6 +5833,7 @@ enum ParsedCommand {
     TestM10App,
     TestM10Nxe,
     TestM10Port,
+    TestM10NativeMemory,
     TestQmpSmoke,
     TestM10VirtioModern,
     TestM10VirtioGpu,
@@ -5954,6 +5987,13 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m10-nxe" || cmd == "m10-nxe" => ParsedCommand::TestM10Nxe,
         Some(cmd) if cmd == "test-m10-port" || cmd == "m10-port" || cmd == "m10.200" => {
             ParsedCommand::TestM10Port
+        }
+        Some(cmd)
+            if cmd == "test-m10-native-memory"
+                || cmd == "m10-native-memory"
+                || cmd == "m10.306" =>
+        {
+            ParsedCommand::TestM10NativeMemory
         }
         Some(cmd) if cmd == "test-qmp-smoke" || cmd == "qmp-smoke" => ParsedCommand::TestQmpSmoke,
         Some(cmd) if cmd == "test-m10-virtio-modern" || cmd == "m10-virtio-modern" => {
@@ -6594,6 +6634,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestM10Port
+            );
+        }
+        for alias in ["test-m10-native-memory", "m10-native-memory", "m10.306"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestM10NativeMemory
             );
         }
         assert_eq!(
@@ -7488,6 +7534,7 @@ mod tests {
             "test-m10-nxe",
             "test-m10-shared-buffer",
             "test-m10-port",
+            "test-m10-native-memory",
             "test-qmp-smoke",
             "test-m10-virtio-modern",
             "test-m10-framebuffer",

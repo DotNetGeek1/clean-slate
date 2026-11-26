@@ -13,6 +13,7 @@ path = "src/lib.rs"
 clean-slate-block = { path = "../block" }
 clean-slate-capability = { path = "../capability" }
 clean-slate-graphics = { path = "../graphics" }
+clean-slate-native-abi = { path = "../native-abi" }
 clean-slate-network = { path = "../network" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 

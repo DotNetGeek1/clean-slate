@@ -47,7 +47,8 @@ use crate::mm::stack_guard::{GuardedStackRecord, SlotLabel};
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 use crate::process::current_process_id;
 use crate::process::domain::teardown_current_process;
@@ -129,7 +130,8 @@ use crate::selftest::m5_storage::handle_userspace_storage_entry;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 use crate::selftest::m6_fixture::handle_fixture_report;
 #[cfg(any(
@@ -142,7 +144,8 @@ use crate::selftest::m6_fixture::handle_fixture_report;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test"
 ))]
 use crate::selftest::m6_fixture::is_fixture_pid;
 use crate::service::service_lifecycle_controller_mut;
@@ -269,7 +272,8 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         feature = "m6-revocation-self-test",
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
-        feature = "m6-fixture-smoke-self-test"
+        feature = "m6-fixture-smoke-self-test",
+        feature = "m10-native-memory-self-test"
     ))]
     if context.vector as usize == USER_TEST_VECTOR {
         if let Ok(pid) = current_process_id() {
@@ -717,6 +721,7 @@ pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> 
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
         feature = "m6-fixture-smoke-self-test",
+        feature = "m10-native-memory-self-test",
         feature = "m7-net-caps-self-test",
         feature = "m10-port-self-test",
         feature = "m10-shared-buffer-self-test"
@@ -768,7 +773,12 @@ pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> 
         {
             crate::selftest::m10_shared_buffer::maybe_continue_after_fixture_fault(pid);
         }
+        #[cfg(feature = "m10-native-memory-self-test")]
+        {
+            crate::selftest::m10_native_memory::finish_after_fixture_fault(pid);
+        }
         #[cfg(not(any(
+            feature = "m10-native-memory-self-test",
             feature = "m6-fixture-smoke-self-test",
             feature = "m6-revocation-self-test",
             feature = "m6-object-self-test",

@@ -975,6 +975,9 @@ fn dispatch_native(frame: &mut SyscallContext) {
         lifecycle_abi::SYSCALL_NR_LIFECYCLE_WAIT => {
             crate::service::lifecycle_wait::handle_syscall(frame)
         }
+        clean_slate_native_abi::memory::SYSCALL_NR_MEMORY => {
+            crate::process::native_mem::handle_syscall(frame)
+        }
         clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY => {
             crate::service::service_ready::handle_syscall(frame)
         }
@@ -1198,6 +1201,16 @@ mod tests {
         assert_eq!(
             dispatch_native_zeroed(SYSCALL_NR_SERVICE_READY, 0),
             SYSCALL_EACCES
+        );
+    }
+
+    #[test]
+    fn dispatch_native_memory_reaches_its_handler() {
+        use clean_slate_native_abi::memory::{MEMORY_SUBOP_QUERY, SYSCALL_NR_MEMORY};
+        // An unresolvable caller is refused before any bookkeeping is read.
+        assert_eq!(
+            dispatch_native_zeroed(SYSCALL_NR_MEMORY, MEMORY_SUBOP_QUERY),
+            SYSCALL_EINVAL
         );
     }
 

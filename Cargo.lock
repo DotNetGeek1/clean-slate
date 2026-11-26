@@ -250,6 +250,7 @@ dependencies = [
  "clean-slate-block",
  "clean-slate-capability",
  "clean-slate-graphics",
+ "clean-slate-native-abi",
  "clean-slate-network",
  "clean-slate-service-lifecycle",
 ]

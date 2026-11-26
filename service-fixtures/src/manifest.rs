@@ -15,6 +15,7 @@ use clean_slate_capability::{
     HOLDER_SLOT_QUOTA, MAX_SLOTS, MAX_SLOT_ALLOWANCE, MAX_SLOT_ALLOWANCES,
 };
 use clean_slate_graphics::limits::MAX_REGISTERED_BUFFERS;
+use clean_slate_native_abi::memory::NATIVE_MEMORY_MAX_BUDGET_PAGES;
 use clean_slate_service_lifecycle::ServiceId;
 
 /// Built-in image a row runs. Every variant names an ELF or payload the kernel already embeds for
@@ -169,6 +170,11 @@ pub struct ServiceSpec {
     /// nothing the process does can raise it, and its forks and delegates get the default.
     /// `None` for the default; otherwise above it and at most `MAX_SLOT_ALLOWANCE`.
     pub slot_allowance: Option<usize>,
+    /// Pages of native memory (syscall 23 `MEMORY`, #306) each instance may have mapped at once.
+    /// The kernel sets it when it starts the row; nothing the process does can raise it. 0 for
+    /// none; at most `NATIVE_MEMORY_MAX_BUDGET_PAGES`, and only on native images (Linux rows have
+    /// their own brk and mmap budget).
+    pub memory_pages: u64,
 }
 
 impl ServiceSpec {
@@ -202,6 +208,7 @@ pub const STORAGE_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     restart: SYSTEM_RESTART,
     depends_on: &[],
     slot_allowance: None,
+    memory_pages: 0,
 };
 
 /// `NETWORK_SERVICE_MODE_ACCEPTANCE` is the network image's request-serving loop. Init starts it
@@ -214,6 +221,7 @@ pub const NETWORK_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     restart: SYSTEM_RESTART,
     depends_on: &[STORAGE_SERVICE_ID],
     slot_allowance: None,
+    memory_pages: 0,
 };
 
 /// Provisional (#218 S5): a shell that exits (`exit`, Ctrl-D) is started again 0.5 s later. At
@@ -241,6 +249,7 @@ pub const SYSTEM_SHELL_SPEC: ServiceSpec = ServiceSpec {
     restart: SHELL_RESTART,
     depends_on: &[STORAGE_SERVICE_ID],
     slot_allowance: None,
+    memory_pages: 0,
 };
 
 /// The capability audit log's reader (#219 stage B). It is a holder of its own, apart from the
@@ -254,6 +263,7 @@ pub const AUDIT_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     restart: SYSTEM_RESTART,
     depends_on: &[],
     slot_allowance: None,
+    memory_pages: 0,
 };
 
 pub const SYSTEM_MANIFEST: &[ServiceSpec] = &[
@@ -284,6 +294,7 @@ pub const COMPOSITOR_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     restart: DESKTOP_RESTART,
     depends_on: &[],
     slot_allowance: Some(COMPOSITOR_SLOT_ALLOWANCE),
+    memory_pages: 0,
 };
 
 /// The compositor's launch grants, one capability record each.
@@ -310,6 +321,7 @@ pub const DESKTOP_SHELL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     restart: DESKTOP_RESTART,
     depends_on: &[COMPOSITOR_SERVICE_ID],
     slot_allowance: None,
+    memory_pages: 0,
 };
 
 /// The playground app. It depends on the shell so the panel is mapped before the app's first
@@ -322,6 +334,7 @@ pub const PLAYGROUND_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     restart: DESKTOP_RESTART,
     depends_on: &[COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID],
     slot_allowance: None,
+    memory_pages: 0,
 };
 
 /// The desktop profile: the four system rows followed by the three desktop rows.
@@ -404,6 +417,10 @@ pub enum ManifestError {
     GraphicsRoleWithoutPortDependency {
         row: usize,
     },
+    /// `memory_pages` is above `NATIVE_MEMORY_MAX_BUDGET_PAGES`, or set on a Linux row.
+    MemoryBudgetOutOfRange {
+        row: usize,
+    },
     /// `slot_allowance` is not above `HOLDER_SLOT_QUOTA` or is above `MAX_SLOT_ALLOWANCE`.
     SlotAllowanceOutOfRange {
         row: usize,
@@ -436,6 +453,11 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
             if allowance_total > MAX_SLOTS {
                 return Err(ManifestError::SlotAllowancesExceedTable { row });
             }
+        }
+        if spec.memory_pages > NATIVE_MEMORY_MAX_BUDGET_PAGES
+            || (spec.memory_pages != 0 && spec.image.is_linux())
+        {
+            return Err(ManifestError::MemoryBudgetOutOfRange { row });
         }
         let mut earlier = 0;
         while earlier < row {
@@ -595,6 +617,7 @@ mod tests {
             restart: RestartSpec::Never,
             depends_on: &[],
             slot_allowance: None,
+            memory_pages: 0,
         }
     }
 
@@ -607,6 +630,24 @@ mod tests {
         assert_eq!(
             COMPOSITOR_SLOT_ALLOWANCE,
             COMPOSITOR_SERVICE_SPEC.grants.len() + MAX_REGISTERED_BUFFERS + 4
+        );
+    }
+
+    #[test]
+    fn validation_bounds_each_memory_budget() {
+        let mut spec = row(7, ServiceImage::Playground, &[]);
+        spec.memory_pages = NATIVE_MEMORY_MAX_BUDGET_PAGES;
+        assert_eq!(validate_manifest(&[spec]), Ok(()));
+        spec.memory_pages = NATIVE_MEMORY_MAX_BUDGET_PAGES + 1;
+        assert_eq!(
+            validate_manifest(&[spec]),
+            Err(ManifestError::MemoryBudgetOutOfRange { row: 0 })
+        );
+        let mut linux = row(7, ServiceImage::LinuxShell, &[]);
+        linux.memory_pages = 1;
+        assert_eq!(
+            validate_manifest(&[linux]),
+            Err(ManifestError::MemoryBudgetOutOfRange { row: 0 })
         );
     }
 

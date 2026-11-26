@@ -521,6 +521,8 @@ fn release_address_space(
         Some(address_space) => destroy_process_address_space(&address_space, ctx.allocator),
         None => Err(path.address_space_missing),
     };
+    // The address space freed every native memory page it tracked; drop the record of them.
+    crate::process::native_mem::release_for_process(ctx.process_id, ctx.instance_generation);
     if !path.best_effort {
         destroyed?;
     }

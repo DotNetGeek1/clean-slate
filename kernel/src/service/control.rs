@@ -403,6 +403,7 @@ impl ServiceLifecycleController {
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
         feature = "m6-fixture-smoke-self-test",
+        feature = "m10-native-memory-self-test",
         feature = "m7-net-service-self-test",
         feature = "m8-linux-hello",
         clean_slate_system_init
@@ -693,6 +694,26 @@ impl ServiceLifecycleController {
                 return Err(LifecycleControlError::SpawnFailed(
                     "service slot allowance refused",
                 ));
+            }
+        }
+        let memory_pages = context.spec.map_or(0, |spec| spec.memory_pages);
+        if memory_pages != 0 {
+            if let Err(message) =
+                crate::process::native_mem::set_budget(spawned.pid, generation, memory_pages)
+            {
+                kernel_log_fmt(format_args!(
+                    "[FAIL] service={} pid={} memory budget={memory_pages} refused\n",
+                    service_id.0, spawned.pid
+                ));
+                teardown_process_by_id(
+                    allocator,
+                    kernel_root_frame,
+                    spawned.pid,
+                    SERVICE_TERMINATE_STATUS,
+                    false,
+                )
+                .map_err(LifecycleControlError::SpawnFailed)?;
+                return Err(LifecycleControlError::SpawnFailed(message));
             }
         }
         self.apply_instance_grants_with_rollback(
@@ -1670,6 +1691,7 @@ mod tests {
             restart: RestartSpec::Never,
             depends_on: &[],
             slot_allowance: None,
+            memory_pages: 0,
         }];
 
         let mut controller = ServiceLifecycleController::new();

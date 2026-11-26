@@ -27,6 +27,8 @@ pub(crate) mod boot_wait;
 pub(crate) mod m10_framebuffer;
 #[cfg(feature = "m10-input-self-test")]
 pub(crate) mod m10_input;
+#[cfg(feature = "m10-native-memory-self-test")]
+pub(crate) mod m10_native_memory;
 #[cfg(feature = "m10-nxe-self-test")]
 pub(crate) mod m10_nxe;
 #[cfg(feature = "m10-port-self-test")]
@@ -90,6 +92,7 @@ pub(crate) mod m6_delegation;
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test",
     feature = "m7-net-caps-self-test",
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test"
@@ -104,6 +107,7 @@ pub(crate) mod m6_fixture;
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test",
+    feature = "m10-native-memory-self-test",
     feature = "m7-net-caps-self-test",
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test"
