@@ -103,6 +103,70 @@ impl Modifiers {
     }
 }
 
+/// Most UTF-8 bytes one [`Event::Text`](crate::protocol::Event::Text) frame carries.
+pub const TEXT_RUN_MAX_BYTES: usize = 36;
+
+/// A short run of typed text: 1..=[`TEXT_RUN_MAX_BYTES`] bytes of UTF-8 with no control
+/// characters (#309). Typed keys produce one character each; the limit leaves room for a
+/// compose or dead-key commit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TextRun {
+    len: u8,
+    bytes: [u8; TEXT_RUN_MAX_BYTES],
+}
+
+impl TextRun {
+    /// `None` if `text` is empty, longer than [`TEXT_RUN_MAX_BYTES`], or holds a control
+    /// character.
+    pub fn new(text: &str) -> Option<Self> {
+        if text.is_empty() || text.len() > TEXT_RUN_MAX_BYTES || text.chars().any(char::is_control)
+        {
+            return None;
+        }
+        let mut bytes = [0u8; TEXT_RUN_MAX_BYTES];
+        bytes[..text.len()].copy_from_slice(text.as_bytes());
+        Some(Self {
+            len: text.len() as u8,
+            bytes,
+        })
+    }
+
+    /// One character; `None` for a control character.
+    pub fn from_char(c: char) -> Option<Self> {
+        let mut buf = [0u8; 4];
+        Self::new(c.encode_utf8(&mut buf))
+    }
+
+    /// Validates wire bytes (exactly the run, no padding).
+    pub fn from_utf8(bytes: &[u8]) -> Option<Self> {
+        Self::new(core::str::from_utf8(bytes).ok()?)
+    }
+
+    pub fn as_str(&self) -> &str {
+        // Only `new` builds a run, from a `&str`.
+        core::str::from_utf8(self.as_bytes()).unwrap_or("")
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Always `false`: a run holds at least one byte.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl core::fmt::Debug for TextRun {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "TextRun({:?})", self.as_str())
+    }
+}
+
 /// Wheel delta in 1/120 detent units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AxisValue120(pub i32);

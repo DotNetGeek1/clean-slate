@@ -7,7 +7,7 @@ use super::request::{Request, DAMAGE_RECTS_PER_FRAME, REGION_RECTS_PER_FRAME};
 use super::*;
 use crate::geometry::{BufferRect, Fixed24_8, Rect, Scale120, Size};
 use crate::ids::{ClientBufferId, ObjectId, OutputId, Serial, SurfaceId, WindowId};
-use crate::input::{AxisValue120, KeyState, KeyUsage, Modifiers, PointerButton, KEY_A};
+use crate::input::{AxisValue120, KeyState, KeyUsage, Modifiers, PointerButton, TextRun, KEY_A};
 use crate::limits::MAX_TITLE_BYTES;
 use crate::mode::{OutputInfo, REFERENCE_MODE};
 use crate::pixel::{BufferLayout, ColorSpace, PixelFormat};
@@ -326,6 +326,17 @@ fn all_events_round_trip() {
         horizontal: AxisValue120(i32::MAX),
     });
     round_trip_event(Event::InputReset);
+    round_trip_event(Event::Text {
+        serial: Serial(13),
+        time_ns: 14,
+        text: TextRun::new("é").unwrap(),
+    });
+    round_trip_event(Event::KeyRepeat {
+        serial: Serial(15),
+        time_ns: 16,
+        usage: KeyUsage(0x2A),
+        modifiers: Modifiers::from_bits(Modifiers::CTRL).unwrap(),
+    });
 }
 
 /// Hand-derived from §2.3 / §3.3 (surface slot 1 gen 1 → `0x0101`, window slot 2 gen 1 → `0x0102`).
@@ -1026,6 +1037,17 @@ fn canonical_event_for_opcode(op: u16) -> [u8; FRAME_BYTES] {
             horizontal: AxisValue120(0),
         },
         OP_INPUT_RESET => Event::InputReset,
+        OP_TEXT => Event::Text {
+            serial: Serial(1),
+            time_ns: 0,
+            text: TextRun::new("a").unwrap(),
+        },
+        OP_KEY_REPEAT => Event::KeyRepeat {
+            serial: Serial(1),
+            time_ns: 0,
+            usage: KeyUsage(0x04),
+            modifiers: Modifiers::from_bits(0).unwrap(),
+        },
         _ => panic!("opcode"),
     };
     ev.encode(0).unwrap()

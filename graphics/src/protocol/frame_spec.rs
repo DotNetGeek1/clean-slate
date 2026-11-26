@@ -244,6 +244,16 @@ pub static EVENT_SPECS: &[OpcodeSpec] = &[
         object: ObjectRule::MustBeZero,
         pads: &[(12, 64)],
     },
+    OpcodeSpec {
+        opcode: super::OP_TEXT,
+        object: ObjectRule::MustBeZero,
+        pads: &[(25, 28)],
+    },
+    OpcodeSpec {
+        opcode: super::OP_KEY_REPEAT,
+        object: ObjectRule::MustBeZero,
+        pads: &[(26, 28), (30, 64)],
+    },
 ];
 
 pub(crate) fn run_decode_prelude(

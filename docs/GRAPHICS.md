@@ -611,10 +611,18 @@ Protocol version `1.0` (`PROTOCOL_MAJOR`, `PROTOCOL_MINOR`); `M10_SERVER_FEATURE
 | keyboard | — | `KeyboardFocus` 0x8040, `Key` 0x8041, `ModifiersChanged` 0x8042 |
 | pointer | — | `PointerEnter` 0x8050, `PointerLeave` 0x8051, `PointerMotion` 0x8052, `PointerButton` 0x8053, `PointerAxis` 0x8054 |
 | seat | — | `InputReset` 0x8060 |
+| text input (`TEXT_INPUT`) | — | `Text` 0x8100, `KeyRepeat` 0x8101 (0x8102 reserved for preedit) |
 
 Per-frame limits: `Damage` carries at most `DAMAGE_RECTS_PER_FRAME` (5) `BufferRect`s and the region requests at most `REGION_RECTS_PER_FRAME` (3) `Rect`s; larger sets use several requests before one `Commit`. `SetTitle` carries a `WindowTitle` of at most `MAX_TITLE_BYTES` (40) bytes of UTF-8, truncated on a character boundary by the encoder. `Commit` carries `request_frame`, `color_space` and an optional configure `ack`.
 
 **Input events** are raw and focus-routed by the compositor: `Key` carries a HID usage (`KeyUsage`, page 0x07) and `KeyState`, not text. Clients never name the surface that receives input; they receive `KeyboardFocus`, `PointerEnter` and `PointerLeave` for their own surfaces only, with surface-local `Fixed24_8` positions. `Key`, `PointerEnter`, `PointerLeave` and `PointerButton` carry a `Serial` from the connection's minter (move, resize and future popup grabs quote it); `Key`, `PointerMotion`, `PointerButton` and `PointerAxis` carry a monotonic `time_ns`. `Key` also carries the current `Modifiers`.
+
+**Text input (#309).** A client that wants typed text sets `Features::TEXT_INPUT` in `Hello`. The compositor owns the keyboard layout (`graphics::keymap`, US first) and key repeat, so every app gets the same text for the same keys; a client that does not ask (a game) keeps raw `Key` events only and gets no repeats.
+
+- `Text` (0x8100): `serial` u32 @12, `time_ns` u64 @16, `len` u8 @24 (1..=36), 25..28 zero, UTF-8 @28 (`len` bytes, the rest zero; `TextRun`, no control characters). It follows the `Key` press or `KeyRepeat` that produced it, carries the same serial, and goes only to the focused surface's client.
+- Text is printable characters only. Enter, Tab, Backspace, Escape, Delete, arrows, navigation and function keys produce none, and nothing is typed while Ctrl, Alt or Super is held: the client maps those from `Key` and `Modifiers`, so no keystroke reaches it twice. Caps Lock changes letters only; keypad digits need Num Lock (Shift inverts it).
+- `KeyRepeat` (0x8101): `serial` u32 @12, `time_ns` u64 @16, `usage` u16 @24, 26..28 zero, `modifiers` u16 @28 (Key's offsets without the state byte). The compositor repeats the most recently pressed key that repeats (`keymap::repeats`: not modifiers or lock keys) after a delay, at a rate; a `Text` follows each repeat that types. Repeat stops on that key's release, on another key press, on a focus change and on `InputReset`.
+- Dead keys and compose will use a preedit event at 0x8102; it decodes as `UnknownOpcode` today.
 
 **Negotiation.** `Hello { version, features }` must be the first request; `Welcome` replies with the negotiated version and features and the output (`OutputInfo`: id, mode, logical size). `negotiate`:
 
@@ -820,11 +828,11 @@ None collides with `NETWORK_STATUS_PENDING` (`u64::MAX - 15`). Capability failur
 
 - **Version.** `ProtocolVersion { major, minor }`, 1.0 in M10. A major bump is incompatible and rejected at `Hello`. A minor bump may only add opcodes inside the reserved ranges below, and the server may use them only when the negotiated minor allows it.
 - **Opcodes.** In 1.0 every reserved or unassigned opcode decodes to `UnknownOpcode` (recoverable). Core growth: requests `0x0002..=0x000F` and unused holes in `0x0010..=0x00FF`; events `0x8003..=0x800F` (`0x8003` is earmarked for `OutputChanged` when `MAX_OUTPUTS > 1`) and unused holes in `0x8010..=0x80FF`. Unassigned: `0x0700..=0x7FFF` and `0x8700..=0xFFFF`.
-- **Features.** `Features(u64)`; `Features::KNOWN` = `0x3F` (the OR of `Features::TEXT_INPUT` … `Features::SUBSURFACES`). The M10 compositor offers `Features(0)`, so every feature below is negotiated off and its opcodes are `UnknownOpcode`. The bit assignments and opcode ranges are frozen in `graphics::protocol`.
+- **Features.** `Features(u64)`; `Features::KNOWN` = `0x3F` (the OR of `Features::TEXT_INPUT` … `Features::SUBSURFACES`). The M10 compositor offers `Features(0)`, so every feature below is negotiated off; `TEXT_INPUT` is turned on by #309 part 2. Opcodes of a feature not negotiated are never sent. The bit assignments and opcode ranges are frozen in `graphics::protocol`.
 
 | Bit | Feature | Opcodes (request / event) | Future content |
 |---|---|---|---|
-| `1 << 0` | text input | `0x0100..=0x01FF` / `0x8100..=0x81FF` | text commit and preedit, enable and disable (IME) |
+| `1 << 0` | text input | `0x0100..=0x01FF` / `0x8100..=0x81FF` | `Text` 0x8100 and `KeyRepeat` 0x8101 (#309); later preedit, enable and disable (IME) |
 | `1 << 1` | presentation detail | `0x0200..=0x02FF` / `0x8200..=0x82FF` | detailed presentation feedback |
 | `1 << 2` | relative pointer | `0x0300..=0x03FF` / `0x8300..=0x83FF` | relative motion, pointer lock |
 | `1 << 3` | fractional scale | `0x0400..=0x04FF` / `0x8400..=0x84FF` | preferred-scale event; `Scale120` ≠ 120 |

@@ -155,6 +155,14 @@ pub const OP_POINTER_MOTION: u16 = 0x8052;
 pub const OP_POINTER_BUTTON: u16 = 0x8053;
 pub const OP_POINTER_AXIS: u16 = 0x8054;
 pub const OP_INPUT_RESET: u16 = 0x8060;
+// Text input feature events (`Features::TEXT_INPUT`, #309). Sent only on connections that
+// negotiated the feature.
+/// `Text` (`0x8100`): typed text for the focused surface.
+pub const OP_TEXT: u16 = 0x8100;
+/// `KeyRepeat` (`0x8101`): compositor key repeat of a held key.
+pub const OP_KEY_REPEAT: u16 = 0x8101;
+/// Reserved for preedit (dead keys, compose); not sent yet.
+pub const OP_TEXT_PREEDIT_RESERVED: u16 = 0x8102;
 
 /// Version and feature negotiation (§4).
 pub fn negotiate(
@@ -333,3 +341,5 @@ mod tests;
 mod tests_layout;
 #[cfg(test)]
 mod tests_malformed;
+#[cfg(test)]
+mod tests_text;

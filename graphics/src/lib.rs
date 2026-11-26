@@ -25,6 +25,7 @@ pub mod fake;
 pub mod geometry;
 pub mod ids;
 pub mod input;
+pub mod keymap;
 pub mod limits;
 pub mod mode;
 pub mod objects;
@@ -43,9 +44,9 @@ pub use ids::{
     KEYBOARD_INDEX, MOUSE_INDEX,
 };
 pub use input::{
-    AxisValue120, KeyState, KeyUsage, Modifiers, PointerButton, KEY_A, KEY_CAPS_LOCK, KEY_ENTER,
-    KEY_ESCAPE, KEY_LEFT_ALT, KEY_LEFT_CTRL, KEY_LEFT_GUI, KEY_LEFT_SHIFT, KEY_NUM_LOCK,
-    KEY_RIGHT_ALT, KEY_RIGHT_CTRL, KEY_RIGHT_GUI, KEY_RIGHT_SHIFT,
+    AxisValue120, KeyState, KeyUsage, Modifiers, PointerButton, TextRun, KEY_A, KEY_CAPS_LOCK,
+    KEY_ENTER, KEY_ESCAPE, KEY_LEFT_ALT, KEY_LEFT_CTRL, KEY_LEFT_GUI, KEY_LEFT_SHIFT, KEY_NUM_LOCK,
+    KEY_RIGHT_ALT, KEY_RIGHT_CTRL, KEY_RIGHT_GUI, KEY_RIGHT_SHIFT, TEXT_RUN_MAX_BYTES,
 };
 pub use limits::{
     CLIENT_EVENT_QUEUE_DEPTH, DISPLAY_COMMAND_TIMEOUT_NS, MAX_BUFFERS_PER_CLIENT, MAX_BUFFER_BYTES,
