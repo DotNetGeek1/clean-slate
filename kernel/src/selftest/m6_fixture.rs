@@ -36,7 +36,8 @@ use clean_slate_capability::syscall_abi::{SYSCALL_EINVAL, SYSCALL_NR_CAP_GRANT};
     feature = "m7-net-caps-self-test",
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test",
-    feature = "m10-native-memory-self-test"
+    feature = "m10-native-memory-self-test",
+    feature = "m10-clock-self-test"
 ))]
 use clean_slate_service_fixtures::m6_fixture::M6FixtureStep;
 use clean_slate_service_fixtures::m6_fixture::{
@@ -245,6 +246,7 @@ pub(crate) fn spawn_fixture(
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test",
     feature = "m10-native-memory-self-test",
+    feature = "m10-clock-self-test",
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test"
 ))]
@@ -257,7 +259,8 @@ pub(crate) fn set_report_handler(handler: fn(u64, &M6FixtureBootstrap) -> Fixtur
 #[cfg(any(
     clean_slate_userspace_selftest = "m6-object",
     feature = "m10-shared-buffer-self-test",
-    feature = "m10-native-memory-self-test"
+    feature = "m10-native-memory-self-test",
+    feature = "m10-clock-self-test"
 ))]
 pub(crate) fn set_lane_check_handler(handler: FixtureLaneCheckHandler) {
     unsafe {
@@ -339,7 +342,8 @@ pub(crate) fn park_step() -> M6FixtureStep {
 #[cfg(any(
     clean_slate_userspace_selftest = "m6-object",
     feature = "m10-shared-buffer-self-test",
-    feature = "m10-native-memory-self-test"
+    feature = "m10-native-memory-self-test",
+    feature = "m10-clock-self-test"
 ))]
 pub(crate) fn lane_check_step(check: u64, arg: u64) -> M6FixtureStep {
     lane_query_step(check, arg).expect_eq(0)
@@ -349,7 +353,8 @@ pub(crate) fn lane_check_step(check: u64, arg: u64) -> M6FixtureStep {
 #[cfg(any(
     clean_slate_userspace_selftest = "m6-object",
     feature = "m10-shared-buffer-self-test",
-    feature = "m10-native-memory-self-test"
+    feature = "m10-native-memory-self-test",
+    feature = "m10-clock-self-test"
 ))]
 pub(crate) fn lane_query_step(check: u64, arg: u64) -> M6FixtureStep {
     M6FixtureStep::syscall(

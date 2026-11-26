@@ -103,6 +103,7 @@ const USERSPACE_DISPATCH_ARMS: &[(&str, &[&str])] = &[
     ("m7-net-caps", &["m7-net-caps-self-test"]),
     ("m10-port", &["m10-port-self-test"]),
     ("m10-native-memory", &["m10-native-memory-self-test"]),
+    ("m10-clock", &["m10-clock-self-test"]),
     ("m6-revocation", &["m6-revocation-self-test"]),
     ("m6-capabilities", &["m6-capabilities-self-test"]),
     ("m6-object", &["m6-object-self-test"]),
@@ -251,6 +252,7 @@ const FIXTURE_SPAWN_FEATURES: &[&str] = &[
     "m10-port-self-test",
     "m10-shared-buffer-self-test",
     "m10-native-memory-self-test",
+    "m10-clock-self-test",
 ];
 
 fn emit_fixture_spawn_cfg(userspace_arm: Option<&str>) {
@@ -344,7 +346,21 @@ fn emit_desktop_snapshot_cfg() {
     }
 }
 
+/// #308: the wall-clock floor is the build date when the build names one
+/// (`SOURCE_DATE_EPOCH`, as reproducible builds do), and 0 otherwise, which leaves the
+/// kernel's built-in floor (`WALL_CLOCK_DEFAULT_FLOOR_UNIX`). The wall time itself is never
+/// read here, so a build stays reproducible.
+fn emit_wall_clock_floor() {
+    println!("cargo::rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    let floor = env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    println!("cargo::rustc-env=CLEAN_SLATE_BUILD_FLOOR_UNIX={floor}");
+}
+
 fn main() {
+    emit_wall_clock_floor();
     let system_init = emit_system_init_cfg();
     emit_boot_tail_cfgs(system_init);
     emit_linux_cfgs(system_init);
@@ -376,7 +392,8 @@ fn main() {
         || env::var("CARGO_FEATURE_M7_NET_CAPS_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M10_PORT_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M10_SHARED_BUFFER_SELF_TEST").is_ok()
-        || env::var("CARGO_FEATURE_M10_NATIVE_MEMORY_SELF_TEST").is_ok();
+        || env::var("CARGO_FEATURE_M10_NATIVE_MEMORY_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M10_CLOCK_SELF_TEST").is_ok();
     if env::var("CARGO_FEATURE_M4_SUPERVISOR_SELF_TEST").is_ok() {
         embed_userspace_image(
             "supervisor_userspace.bin",

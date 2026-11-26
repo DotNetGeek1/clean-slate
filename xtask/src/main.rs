@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 #[cfg(test)]
 mod ci_coverage;
 mod guest_reboot;
+mod m10_clock;
 mod m10_desktop_lane;
 mod m10_desktop_visual;
 mod m10_framebuffer_validate;
@@ -1299,13 +1300,14 @@ const M9_MILESTONE_STEPS: [M9MilestoneStep; 18] = [
 /// boots, display backends, input, compositor and app host suites), then the #118 desktop lane
 /// on both display backends and the system image's desktop (#218 S6e). `[M10 ] PASS` is printed
 /// only after all of them succeed.
-const M10_MILESTONE_STEPS: [M9MilestoneStep; 15] = [
+const M10_MILESTONE_STEPS: [M9MilestoneStep; 16] = [
     ("test-m10-contract", run_m10_contract_acceptance),
     ("clean-slate-ui (host)", run_m10_ui_host_tests),
     ("test-m10-nxe", run_m10_nxe_acceptance),
     ("test-m10-shared-buffer", run_m10_shared_buffer_acceptance),
     ("test-m10-port", run_m10_port_acceptance),
     ("test-m10-native-memory", run_m10_native_memory_acceptance),
+    ("test-m10-clock", m10_clock::run),
     ("test-qmp-smoke", run_qmp_smoke_acceptance),
     ("test-m10-virtio-modern", run_m10_virtio_modern_acceptance),
     ("test-m10-framebuffer", run_m10_framebuffer_acceptance),
@@ -1403,6 +1405,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10Nxe => run_m10_nxe_acceptance(),
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
         ParsedCommand::TestM10NativeMemory => run_m10_native_memory_acceptance(),
+        ParsedCommand::TestM10Clock => m10_clock::run(),
         ParsedCommand::TestQmpSmoke => run_qmp_smoke_acceptance(),
         ParsedCommand::TestM10Desktop => m10_desktop_lane::run(),
         ParsedCommand::RunM10Desktop => run_m10_desktop_interactive(&trailing_args),
@@ -5689,6 +5692,9 @@ fn print_help() {
         "  test-m10-port   M10 #200 service port: port/kernel host tests, then the m10-port-self-test QEMU lane with ordered markers; prints [M10.port] PASS (aliases: m10-port, m10.200)"
     );
     println!(
+        "  test-m10-clock  #308 native clock: clock host tests, then two m10-clock-self-test QEMU boots: monotonic time across a wait and a wall clock within 3 s of the host's (-rtc base=now), and no wall clock from an RTC before the build floor; prints [M10.clock] lane PASS (aliases: m10-clock, m10.308)"
+    );
+    println!(
         "  test-m10-native-memory  #306 native memory: native-abi and kernel host tests, then the m10-native-memory-self-test QEMU lane (map to budget, refusal, partial unmap, read-only fault, teardown baseline); prints [M10.mem] PASS (aliases: m10-native-memory, m10.306)"
     );
     println!(
@@ -5857,6 +5863,7 @@ enum ParsedCommand {
     TestM10Nxe,
     TestM10Port,
     TestM10NativeMemory,
+    TestM10Clock,
     TestQmpSmoke,
     TestM10VirtioModern,
     TestM10VirtioGpu,
@@ -6017,6 +6024,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
                 || cmd == "m10.306" =>
         {
             ParsedCommand::TestM10NativeMemory
+        }
+        Some(cmd) if cmd == "test-m10-clock" || cmd == "m10-clock" || cmd == "m10.308" => {
+            ParsedCommand::TestM10Clock
         }
         Some(cmd) if cmd == "test-qmp-smoke" || cmd == "qmp-smoke" => ParsedCommand::TestQmpSmoke,
         Some(cmd) if cmd == "test-m10-virtio-modern" || cmd == "m10-virtio-modern" => {
@@ -6663,6 +6673,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestM10NativeMemory
+            );
+        }
+        for alias in ["test-m10-clock", "m10-clock", "m10.308"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestM10Clock
             );
         }
         assert_eq!(
@@ -7558,6 +7574,7 @@ mod tests {
             "test-m10-shared-buffer",
             "test-m10-port",
             "test-m10-native-memory",
+            "test-m10-clock",
             "test-qmp-smoke",
             "test-m10-virtio-modern",
             "test-m10-framebuffer",

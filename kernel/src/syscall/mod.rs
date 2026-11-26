@@ -978,6 +978,7 @@ fn dispatch_native(frame: &mut SyscallContext) {
         clean_slate_native_abi::memory::SYSCALL_NR_MEMORY => {
             crate::process::native_mem::handle_syscall(frame)
         }
+        clean_slate_native_abi::clock::SYSCALL_NR_CLOCK => crate::time::wall::handle_syscall(frame),
         clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY => {
             crate::service::service_ready::handle_syscall(frame)
         }
@@ -1216,6 +1217,13 @@ mod tests {
             dispatch_native_zeroed(SYSCALL_NR_MEMORY, MEMORY_SUBOP_QUERY),
             SYSCALL_EINVAL
         );
+    }
+
+    #[test]
+    fn dispatch_native_clock_reaches_its_handler() {
+        use clean_slate_native_abi::clock::SYSCALL_NR_CLOCK;
+        // An unknown sub-operation is refused by the clock handler, not as an unknown nr.
+        assert_eq!(dispatch_native_zeroed(SYSCALL_NR_CLOCK, 9), SYSCALL_EINVAL);
     }
 
     #[test]

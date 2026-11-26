@@ -149,6 +149,8 @@ use crate::sched::dispatch::initialize_scheduler;
 use crate::sched::dispatch::start_scheduler;
 use crate::sched::task_stacks_mut;
 use crate::sched::SCHEDULER_THREAD_SLOTS;
+#[cfg(clean_slate_userspace_selftest = "m10-clock")]
+use crate::selftest::m10_clock::start_m10_clock_self_test;
 #[cfg(feature = "m10-framebuffer-self-test")]
 use crate::selftest::m10_framebuffer::run_m10_framebuffer_self_test;
 #[cfg(feature = "m10-input-self-test")]
@@ -413,11 +415,16 @@ fn run_inner() -> Result<(), &'static str> {
     let mut reserved_ranges = collect_reserved_ranges_from_firmware()?;
     crate::interrupt::acpi::capture_interrupt_topology_from_firmware();
     let boot_framebuffer = gop::capture_boot_framebuffer();
+    // #308: the firmware clock is read once, last before boot services end.
+    #[cfg(not(test))]
+    let wall_reading = crate::time::wall::capture_firmware_time();
 
     let mut memory_map = unsafe { ::uefi::boot::exit_boot_services(None) };
     memory_map.sort();
     serial_write_line("[BOOT] UEFI memory map acquired");
     serial_write_line("[BOOT] ExitBootServices OK");
+    #[cfg(not(test))]
+    crate::time::wall::log_boot_reading(wall_reading);
     let nxe = enable_and_verify_nxe()?;
     serial_write_fmt(format_args!(
         "[CPU ] NXE enabled nx=1 firmware_nxe={}\n",
@@ -779,6 +786,11 @@ fn run_inner() -> Result<(), &'static str> {
     #[cfg(clean_slate_userspace_selftest = "m10-native-memory")]
     {
         start_m10_native_memory_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m10-clock")]
+    {
+        start_m10_clock_self_test(allocator)
     }
 
     #[cfg(clean_slate_userspace_selftest = "m6-revocation")]

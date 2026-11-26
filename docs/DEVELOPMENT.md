@@ -335,6 +335,14 @@ cargo xtask test-m10-native-memory
 ```
 
 It runs `cargo test -p clean-slate-native-abi` and `cargo test -p clean-slate-kernel native_mem`, builds the M6 fixture image, then boots QEMU with feature `m10-native-memory-self-test`. One scripted fixture with a 48-page budget maps 32 and then 16 pages, fills and verifies them, is refused (`ENOSPC`) one page past the budget with and without `MEMORY_MAP_FIXED`, unmaps 8 pages from the middle of a run and maps them again (zeroed, the pages around them intact), is refused (`EEXIST`) a fixed map over a mapped page, protects a page read-only, and finally writes to it. The write must fault through the production CPL3 fault path, which tears the fixture down while it still holds all 48 pages; the lane then requires the allocator's free and allocated page counts, the native memory records and the process registry to match the snapshot taken before the spawn. Markers, in order: `[M10.mem] fixture spawned pid=1 budget=48`, `[M10.mem] at budget used=48 budget=48`, `[M10.mem] read-only write faulted pid=1`, `[M10.mem] baseline restored`, `[M10.mem] PASS`; 60 s timeout. Aliases: `m10-native-memory`, `m10.306`. `test-m10` runs it after `test-m10-port`.
+
+For the #308 native clock (syscall 24 `CLOCK`):
+
+```bash
+cargo xtask test-m10-clock
+```
+
+It runs the `clock` host tests in `clean-slate-native-abi` and `clean-slate-runtime` (date conversion both ways, time zones, the fail-closed floor) and `cargo test -p clean-slate-kernel -- time::wall dispatch_native_clock`, builds the M6 fixture image, then boots QEMU with feature `m10-clock-self-test` twice. A scripted fixture reads MONOTONIC, waits 50 ms on its work set until the wait times out, reads MONOTONIC again, reads WALL, and is refused (`EINVAL`) an unknown sub-operation and a reserved register; the kernel checks that monotonic time advanced by at least the wait and that the fixture's wall reading agrees with its own clock to within 1 s. The first boot starts QEMU's RTC at the host's time (`-rtc base=<now>,clock=host`); markers, in order: `[TIME] wall clock `, `[M10.clock] fixture spawned pid=1`, `[M10.clock] monotonic advanced across a 50 ms wait`, `[M10.clock] wall unix_s=`, `[M10.clock] PASS`, and the host then requires that reading to be within 3 s of its own clock over the run. The second boot starts the RTC at `2001-01-01T00:00:00`, before the build floor, and requires `[TIME] no wall clock: firmware time 2001-01-01T00:00:`, the same monotonic markers, `[M10.clock] wall unknown` and `[M10.clock] PASS`. 60 s timeout per boot. On success it prints `[M10.clock] lane PASS`. Aliases: `m10-clock`, `m10.308`. `test-m10` runs it after `test-m10-native-memory`.
 For the M10 #111 GOP framebuffer lane (host raster tests plus QEMU with `-vga std`; aliases `m10-framebuffer`, `test-m10-framebuffer`):
 
 ```bash

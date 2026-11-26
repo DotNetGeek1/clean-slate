@@ -7,6 +7,7 @@
 //!   ended (`ESTALE`, `EPIPE`) is [`Error::Gone`], never a generic failure.
 //! - [`port`]: service-port connections (syscall 17) and work sets with deadlines (syscall 20).
 //! - [`buffer`]: shared buffers (syscall 16), allocated and mapped as one step.
+//! - [`clock`]: the monotonic clock and the wall clock, when there is one (syscall 24, #308).
 //! - [`compositor`]: a compositor client: connect, register buffers, send requests, read events.
 //! - [`console`]: console lines over the console capability (syscall 3).
 //! - [`heap`]: a `GlobalAlloc` over the native memory call (syscall 23, #306).
@@ -19,6 +20,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod buffer;
+pub mod clock;
 pub mod compositor;
 pub mod console;
 pub mod error;
