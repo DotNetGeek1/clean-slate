@@ -452,6 +452,15 @@ fn with_text_events_printable_keys_are_left_to_them() {
 // ---- terminal -------------------------------------------------------------------------------
 
 #[test]
+fn a_bare_newline_from_the_stream_also_returns_the_cursor() {
+    let mut t = Box::new(Terminal::new());
+    t.output(b"hello\nworld\r\n");
+    assert_eq!(live(t.screen(), 0), "hello");
+    assert_eq!(live(t.screen(), 1), "world");
+    assert_eq!(t.screen().cursor(), (2, 0));
+}
+
+#[test]
 fn the_terminal_queues_lines_for_the_stream() {
     let mut t = Box::new(Terminal::new());
     t.output(b"~ # ");

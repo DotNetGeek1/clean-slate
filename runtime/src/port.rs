@@ -12,9 +12,9 @@
 use clean_slate_capability::ResourceClass;
 use clean_slate_native_abi::port::PORT_FRAME_BYTES;
 use clean_slate_native_abi::port::{
-    PORT_OP_BIND_WAKE, PORT_OP_CLOSE, PORT_OP_CONNECT, PORT_OP_DISCONNECT, PORT_OP_FIND_HANDLE,
-    PORT_OP_POST, PORT_OP_RECV, PORT_OP_RECV_EVENT, PORT_OP_SEND, PORT_RECV_NONBLOCK,
-    PORT_ROLE_CONNECT, PORT_ROLE_SERVE, PORT_SEND_WAIT,
+    PORT_OP_BIND_EVENTS, PORT_OP_BIND_WAKE, PORT_OP_CLOSE, PORT_OP_CONNECT, PORT_OP_DISCONNECT,
+    PORT_OP_FIND_HANDLE, PORT_OP_POST, PORT_OP_RECV, PORT_OP_RECV_EVENT, PORT_OP_SEND,
+    PORT_RECV_NONBLOCK, PORT_ROLE_CONNECT, PORT_ROLE_SERVE, PORT_SEND_WAIT,
 };
 use clean_slate_native_abi::status::STATUS_EINVAL;
 use clean_slate_native_abi::work_set::{
@@ -181,6 +181,29 @@ impl Connection {
             PortEvent::Frame(frame) => Ok(frame),
             PortEvent::Disconnected { .. } | PortEvent::ServerGone => Err(Error::Gone),
         }
+    }
+
+    /// `BIND_EVENTS`: each event on this connection, and its end, sets `bit` of `work_set`, so
+    /// one [`WorkSet::wait`] can cover several connections. Receive with [`Wait::No`] after a
+    /// wake until it reports [`Error::WouldBlock`].
+    pub fn bind_events<S: Syscalls>(
+        self,
+        sys: &mut S,
+        work_set: WorkSet,
+        bit: u32,
+    ) -> Result<(), Error> {
+        sys.call(
+            SYSCALL_NR_SERVICE_PORT,
+            [
+                PORT_OP_BIND_EVENTS,
+                0,
+                self.raw,
+                work_set.raw(),
+                u64::from(bit),
+                0,
+            ],
+        )
+        .map(|_| ())
     }
 
     /// Closes the connection. Closing one the server already ended is not an error.

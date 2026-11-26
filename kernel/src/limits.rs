@@ -65,7 +65,8 @@ pub(crate) const LARGE_USER_MAPPING_TABLES: usize = 5;
 /// value on kernel stacks: 61 `u64`s is 488 bytes per address space.
 pub(crate) const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 61;
 
-/// Declared services. The planned system set is six (storage, network, the Linux shell,
-/// compositor, desktop shell and one application); eight leaves two spare.
-/// A `ServiceRecord` is a few dozen bytes, so the table is under a kilobyte.
-pub(crate) const SERVICE_REGISTRY_CAPACITY: usize = 8;
+/// Declared services. The desktop set is ten (storage, audit, console, network, the serial
+/// shell, compositor, desktop shell, playground, the terminal's shell and the terminal);
+/// twelve leaves two spare. A `ServiceRecord` is a few dozen bytes, so the table is about a
+/// kilobyte.
+pub(crate) const SERVICE_REGISTRY_CAPACITY: usize = 12;

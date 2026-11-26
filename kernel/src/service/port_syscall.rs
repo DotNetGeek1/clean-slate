@@ -7,9 +7,9 @@
 
 use clean_slate_capability::{CapabilityHandle, HolderId, ResourceClass};
 use clean_slate_native_abi::port::{
-    PORT_FRAME_BYTES, PORT_OP_BIND_WAKE, PORT_OP_CLOSE, PORT_OP_CONNECT, PORT_OP_DISCONNECT,
-    PORT_OP_FIND_HANDLE, PORT_OP_POST, PORT_OP_RECV, PORT_OP_RECV_EVENT, PORT_OP_SEND,
-    PORT_RECV_NONBLOCK, PORT_SEND_WAIT,
+    PORT_FRAME_BYTES, PORT_OP_BIND_EVENTS, PORT_OP_BIND_WAKE, PORT_OP_CLOSE, PORT_OP_CONNECT,
+    PORT_OP_DISCONNECT, PORT_OP_FIND_HANDLE, PORT_OP_POST, PORT_OP_RECV, PORT_OP_RECV_EVENT,
+    PORT_OP_SEND, PORT_RECV_NONBLOCK, PORT_SEND_WAIT,
 };
 use clean_slate_native_abi::status::{STATUS_EACCES, STATUS_ETIMEDOUT};
 use clean_slate_native_abi::{ConnectionId, PortEventRecord, PortRecvRecord};
@@ -45,6 +45,7 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
         PORT_OP_POST => status(post(frame, holder)),
         PORT_OP_DISCONNECT => status(disconnect(frame, holder)),
         PORT_OP_BIND_WAKE => status(bind_wake(frame, holder)),
+        PORT_OP_BIND_EVENTS => status(bind_events(frame, holder)),
         _ => PortError::Invalid.status(),
     };
 }
@@ -257,6 +258,14 @@ fn bind_wake(frame: &SyscallContext, holder: HolderId) -> Result<u64, PortError>
     let request_bit = work_set::bind_bit(frame.r10).map_err(work_set_error)?;
     let notice_bit = work_set::bind_bit(frame.r8).map_err(work_set_error)?;
     port::server_bind_wake(holder, frame.rsi, target, request_bit, notice_bit).map(|()| 0)
+}
+
+fn bind_events(frame: &SyscallContext, holder: HolderId) -> Result<u64, PortError> {
+    reserved_zero(&[frame.rsi, frame.r9])?;
+    let connection = connection(frame.rdx)?;
+    let target = work_set::bind(holder, frame.r10).map_err(work_set_error)?;
+    let bit = work_set::bind_bit(frame.r8).map_err(work_set_error)?;
+    port::client_bind_events(holder, connection, target, bit).map(|()| 0)
 }
 
 fn work_set_error(error: work_set::WorkSetError) -> PortError {

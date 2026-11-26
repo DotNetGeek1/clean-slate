@@ -111,3 +111,7 @@ pub const COMPOSITOR_SERVICE_ID: ServiceId = ServiceId(0x0000_5300);
 pub const DESKTOP_SHELL_SERVICE_ID: ServiceId = ServiceId(0x0000_5301);
 /// The #117 playground app.
 pub const PLAYGROUND_SERVICE_ID: ServiceId = ServiceId(0x0000_5302);
+/// The #311 terminal window: the console session's front end.
+pub const TERMINAL_SERVICE_ID: ServiceId = ServiceId(0x0000_5303);
+/// The #311 terminal's shell: BusyBox `ash` in the console session.
+pub const TERMINAL_SHELL_SERVICE_ID: ServiceId = ServiceId(0x0000_5401);

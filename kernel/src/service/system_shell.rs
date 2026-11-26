@@ -67,7 +67,8 @@ impl LinuxGrants {
                 // Granted by the lifecycle controller after the spawn, like a native row's: the
                 // console port's client capability, which routes the shell's console fds
                 // through the console service (#310).
-                Grant::ConsoleClient => {}
+                // `ConsoleSession` puts them in the console session instead (#311).
+                Grant::ConsoleClient | Grant::ConsoleSession => {}
                 Grant::BlockDevice
                 | Grant::ObjectServiceRole
                 | Grant::AuditReader
@@ -77,7 +78,8 @@ impl LinuxGrants {
                 | Grant::InputSeat
                 | Grant::GraphicsShellRole
                 | Grant::GraphicsAppRole
-                | Grant::ConsoleService => {
+                | Grant::ConsoleService
+                | Grant::ConsoleFrontEnd => {
                     return Err("system shell: native grant on a Linux row");
                 }
             }

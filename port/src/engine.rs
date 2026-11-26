@@ -46,6 +46,13 @@ pub struct WakeBinding<B> {
     pub notice_bit: u32,
 }
 
+/// A client's work set and the bit its connection's events set (`BIND_EVENTS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientWake<B> {
+    pub target: B,
+    pub bit: u32,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PortReleaseCounts {
     pub served_ports: usize,
@@ -275,6 +282,8 @@ impl<B: Copy> Port<B> {
 pub struct PortCore<const PORTS: usize, const CONNS: usize, B> {
     ports: [Port<B>; PORTS],
     connections: [Connection; CONNS],
+    /// Per connection: the client's work-set bit its events set, if it bound one.
+    client_wakes: [Option<ClientWake<B>>; CONNS],
     rejections: LimitRejections,
 }
 
@@ -290,11 +299,12 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
     pub const fn new() -> Self {
         assert!(PORTS > 0 && PORTS <= u8::MAX as usize);
         assert!(CONNS > 0 && CONNS <= u16::MAX as usize);
-        assert!(4 * PORTS + CONNS <= EFFECTS_CAPACITY);
+        assert!(4 * PORTS + 2 * CONNS <= EFFECTS_CAPACITY);
         assert!(PORTS * PORT_MAX_TRANSFERS_IN_FLIGHT <= REVOKED_TRANSFERS_CAPACITY);
         Self {
             ports: [Port::EMPTY; PORTS],
             connections: [Connection::EMPTY; CONNS],
+            client_wakes: [None; CONNS],
             rejections: LimitRejections::ZERO,
         }
     }
@@ -441,6 +451,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
         conn.transfers_in_flight = 0;
         conn.close_seq = 0;
         conn.clear_events();
+        self.client_wakes[index] = None;
         Ok(self.connection_id(index))
     }
 
@@ -685,7 +696,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
         }
         let seq = self.ports[port_index].next_seq();
         self.connections[index].push_event(seq, frame);
-        effects.push(Effect::WakeConnection(self.connection_id(index)));
+        self.wake_client(index, effects);
         Ok(())
     }
 
@@ -713,8 +724,46 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
         let conn = &mut self.connections[index];
         conn.close_seq = seq;
         conn.state = ConnState::ServerClosed { reason };
-        effects.push(Effect::WakeConnection(self.connection_id(index)));
+        self.wake_client(index, effects);
         effects.push(Effect::WakeSendSpace(self.key(port_index)));
+        Ok(())
+    }
+
+    /// Wakes the client's `RECV_EVENT` waiters on connection `index`, and sets its bound
+    /// work-set bit when it has one: an event or a terminal state is there to receive.
+    fn wake_client(&self, index: usize, effects: &mut Effects<B>) {
+        effects.push(Effect::WakeConnection(self.connection_id(index)));
+        if let Some(wake) = self.client_wakes[index] {
+            effects.push(Effect::Signal(wake.target, wake.bit));
+        }
+    }
+
+    /// `BIND_EVENTS`: every event posted to the caller's `connection`, and its end (a
+    /// disconnect or the server going), sets `bit` of `target`, so a client can wait for
+    /// several connections and other sources in one `WORK_SET` `WAIT`. Replaces an earlier
+    /// binding, and signals at once when something is already there to receive.
+    pub fn bind_events(
+        &mut self,
+        caller: Caller,
+        connection: u64,
+        target: B,
+        bit: u32,
+        effects: &mut Effects<B>,
+    ) -> Result<(), PortError> {
+        if bit >= WORK_SET_BITS {
+            return Err(PortError::Invalid);
+        }
+        let index = self.client_connection(caller, connection)?;
+        let conn = &self.connections[index];
+        let pending = match conn.state {
+            ConnState::Open => conn.event_len > 0,
+            ConnState::ServerClosed { .. } | ConnState::ServerGone => true,
+            ConnState::Free | ConnState::ClosePending { .. } => return Err(PortError::Stale),
+        };
+        self.client_wakes[index] = Some(ClientWake { target, bit });
+        if pending {
+            effects.push(Effect::Signal(target, bit));
+        }
         Ok(())
     }
 
@@ -1166,7 +1215,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
                     conn.transfers_in_flight = 0;
                     conn.close_seq = seq;
                     conn.state = ConnState::ServerGone;
-                    effects.push(Effect::WakeConnection(self.connection_id(index)));
+                    self.wake_client(index, effects);
                 }
                 ConnState::ClosePending { .. } => self.free_connection(index),
                 ConnState::Free | ConnState::ServerGone => {}
@@ -1190,6 +1239,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
     }
 
     fn free_connection(&mut self, index: usize) {
+        self.client_wakes[index] = None;
         let conn = &mut self.connections[index];
         conn.state = ConnState::Free;
         conn.port = NO_PORT;

@@ -912,6 +912,58 @@ fn bind_wake_validates_bits_replaces_and_signals_pending_sources() {
     assert!(w.take_effects().contains(&Effect::Signal(2, 5)));
 }
 
+#[test]
+fn bind_events_signals_the_client_for_events_and_the_end() {
+    let mut w = World::new(SMALL);
+    let a = w.connect(A);
+    let bind = |w: &mut World, who: Caller, conn: ConnectionId, target: u32, bit: u32| {
+        w.core
+            .bind_events(who, conn.encode(), target, bit, &mut w.effects)
+    };
+    assert_eq!(bind(&mut w, A, a, 7, 32), Err(PortError::Invalid));
+    assert_eq!(
+        bind(&mut w, B, a, 7, 3),
+        Err(PortError::Denied),
+        "not B's connection"
+    );
+    bind(&mut w, A, a, 7, 3).unwrap();
+    assert!(w.take_effects().is_empty(), "nothing pending");
+    w.post(a, 1).unwrap();
+    assert_eq!(
+        w.take_effects(),
+        vec![Effect::WakeConnection(a), Effect::Signal(7, 3)]
+    );
+    // Rebinding with an event queued signals at once.
+    bind(&mut w, A, a, 8, 4).unwrap();
+    assert_eq!(w.take_effects(), vec![Effect::Signal(8, 4)]);
+    w.disconnect(a, 5).unwrap();
+    assert!(w.take_effects().contains(&Effect::Signal(8, 4)));
+
+    let b = w.connect(B);
+    bind(&mut w, B, b, 9, 0).unwrap();
+    w.take_effects();
+    w.exit(SERVER);
+    assert!(
+        w.take_effects().contains(&Effect::Signal(9, 0)),
+        "server gone"
+    );
+}
+
+#[test]
+fn a_freed_connection_forgets_its_binding() {
+    let mut w = World::new(SMALL);
+    let a = w.connect(A);
+    w.core
+        .bind_events(A, a.encode(), 7, 3, &mut w.effects)
+        .unwrap();
+    w.close(A, a, 0).unwrap();
+    w.recv().unwrap();
+    w.take_effects();
+    let again = w.connect(A);
+    w.post(again, 1).unwrap();
+    assert!(!w.take_effects().contains(&Effect::Signal(7, 3)));
+}
+
 // ---- DISCONNECT, CLOSE and RECV_EVENT transitions ----
 
 #[test]

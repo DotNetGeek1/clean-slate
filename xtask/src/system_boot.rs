@@ -215,11 +215,23 @@ struct RunOptions {
     net: bool,
     desktop: bool,
     framebuffer: bool,
+    /// `--terminal`: the desktop also declares the terminal window and its shell (#311).
+    terminal: bool,
 }
 
 /// `opt/clean-slate/desktop` plus, for `q1`, the VirtIO-GPU device `run --desktop` adds.
 pub(crate) fn desktop_qemu_args(framebuffer: bool) -> Vec<String> {
-    let value = if framebuffer { "q0" } else { "q1" };
+    desktop_qemu_args_with(framebuffer, false)
+}
+
+/// [`desktop_qemu_args`], with `-terminal` on the value when `terminal` (#311).
+pub(crate) fn desktop_qemu_args_with(framebuffer: bool, terminal: bool) -> Vec<String> {
+    let value = match (framebuffer, terminal) {
+        (true, false) => "q0",
+        (false, false) => "q1",
+        (true, true) => "q0-terminal",
+        (false, true) => "q1-terminal",
+    };
     let mut args = vec![
         "-fw_cfg".to_owned(),
         format!("name=opt/clean-slate/desktop,string={value}"),
@@ -245,13 +257,17 @@ fn parse_run_options(args: &[OsString]) -> Result<RunOptions, XtaskError> {
             options.framebuffer = true;
             continue;
         }
+        if arg == OsStr::new("--terminal") {
+            options.terminal = true;
+            continue;
+        }
         return Err(XtaskError::InvalidOption(
             arg.to_string_lossy().into_owned(),
         ));
     }
-    if options.framebuffer && !options.desktop {
+    if (options.framebuffer || options.terminal) && !options.desktop {
         return Err(XtaskError::InvalidCommand(
-            "usage: cargo xtask run [--net] [--desktop] [--framebuffer]".to_owned(),
+            "usage: cargo xtask run [--net] [--desktop] [--framebuffer] [--terminal]".to_owned(),
         ));
     }
     Ok(options)
@@ -272,7 +288,7 @@ fn launch_config(options: RunOptions, disk: PathBuf, fixture_port: Option<u16>) 
         if options.framebuffer {
             config.vga = Some("std");
         }
-        config.extra_args = desktop_qemu_args(options.framebuffer);
+        config.extra_args = desktop_qemu_args_with(options.framebuffer, options.terminal);
     }
     config
 }
@@ -307,7 +323,7 @@ fn start_peer(m9_profile: bool) -> Result<M7FixturePeer, XtaskError> {
     .map_err(XtaskError::Io)
 }
 
-/// `cargo xtask run [--net] [--desktop] [--framebuffer]`. `run-gdb` and `run-gdb-entry` take
+/// `cargo xtask run [--net] [--desktop] [--framebuffer] [--terminal]`. `run-gdb` and `run-gdb-entry` take
 /// `--net` only; `--desktop` is refused there.
 pub(crate) fn run(
     args: &[OsString],
@@ -1200,6 +1216,7 @@ mod tests {
                 net: true,
                 desktop: true,
                 framebuffer: true,
+                terminal: false,
             }
         );
         assert!(parse_run_options(&["--disk".into()]).is_err());
@@ -1238,6 +1255,16 @@ mod tests {
         );
         assert_eq!(framebuffer.vga, Some("std"));
         assert_eq!(framebuffer.extra_args, desktop_qemu_args(true));
+        assert!(parse_run_options(&["--terminal".into()]).is_err());
+        let terminal = launch_config(
+            parse_run_options(&["--desktop".into(), "--terminal".into()]).unwrap(),
+            PathBuf::from("DISK.img"),
+            None,
+        );
+        assert!(terminal
+            .extra_args
+            .iter()
+            .any(|arg| arg == "name=opt/clean-slate/desktop,string=q1-terminal"));
     }
 
     #[test]

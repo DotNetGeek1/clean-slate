@@ -11,8 +11,8 @@ use std::vec::Vec;
 use clean_slate_capability::{HolderId, Rights};
 use clean_slate_native_abi::desktop::SYSCALL_NR_IPC_SEND;
 use clean_slate_native_abi::port::{
-    PORT_FRAME_BYTES, PORT_OP_CLOSE, PORT_OP_CONNECT, PORT_OP_FIND_HANDLE, PORT_OP_RECV_EVENT,
-    PORT_OP_SEND, PORT_RECV_NONBLOCK,
+    PORT_FRAME_BYTES, PORT_OP_BIND_EVENTS, PORT_OP_CLOSE, PORT_OP_CONNECT, PORT_OP_FIND_HANDLE,
+    PORT_OP_RECV_EVENT, PORT_OP_SEND, PORT_RECV_NONBLOCK,
 };
 use clean_slate_native_abi::status::{STATUS_EAGAIN, STATUS_EINVAL, STATUS_ENOSYS};
 use clean_slate_native_abi::work_set::SYSCALL_NR_WORK_SET;
@@ -176,6 +176,12 @@ impl FakeKernel {
                 };
                 status_or_zero(connection.close(&mut self.port, args[3] as u32))
             }
+            // The fake has no work sets: a bind on the open connection is accepted and seen
+            // only in `calls`.
+            PORT_OP_BIND_EVENTS => match self.connection {
+                Some(c) if c.id().encode() == args[2] && args[4] < 32 => 0,
+                _ => STATUS_EINVAL,
+            },
             _ => STATUS_EINVAL,
         }
     }

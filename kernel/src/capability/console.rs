@@ -32,6 +32,21 @@ pub(crate) const CONSOLE_SERVICE_PORT_RIGHTS: Rights = Rights::CONSOLE_SERVE;
 /// reads the input the kernel's line discipline committed.
 pub(crate) const CONSOLE_SERVICE_DEVICE_RIGHTS: Rights = Rights::READ.union(Rights::WRITE);
 pub(crate) const CONSOLE_CLIENT_RIGHTS: Rights = Rights::CONSOLE_CONNECT;
+/// A member of the console session (#311): the terminal's shell, and its forks by inheritance.
+pub(crate) const CONSOLE_SESSION_CLIENT_RIGHTS: Rights =
+    Rights::CONSOLE_CONNECT.union(Rights::CONSOLE_SESSION);
+/// The console session's front end (#311): the terminal window.
+pub(crate) const CONSOLE_FRONT_END_RIGHTS: Rights =
+    Rights::CONSOLE_CONNECT.union(Rights::CONSOLE_ATTACH);
+
+/// The rights a reissued client gets: what it connected with, a session member staying one.
+const fn reissued_rights(stale: Rights) -> Rights {
+    if stale.contains(Rights::CONSOLE_SESSION) {
+        CONSOLE_SESSION_CLIENT_RIGHTS
+    } else {
+        CONSOLE_CLIENT_RIGHTS
+    }
+}
 
 /// Root `rights` on the console port `port` (one console service generation).
 pub(crate) fn grant_console_port(
@@ -79,19 +94,19 @@ fn reissue_clients_in<const N: usize>(
     mut reissued: impl FnMut(HolderId, Result<(), CapabilityError>),
 ) -> usize {
     // Holders first: revoking one holder's record also revokes the copies its forks made.
-    let mut holders = [HolderId(0); N];
+    let mut holders = [(HolderId(0), CONSOLE_CLIENT_RIGHTS); N];
     let mut count = 0usize;
     for slot in 0..N {
         let record = table.record_at(slot);
         if is_stale_client(record, port.id, port.instance_generation)
-            && !holders[..count].contains(&record.holder)
+            && !holders[..count].iter().any(|(h, _)| *h == record.holder)
             && kernel_client(record.holder)
         {
-            holders[count] = record.holder;
+            holders[count] = (record.holder, reissued_rights(record.rights));
             count += 1;
         }
     }
-    for &holder in &holders[..count] {
+    for &(holder, rights) in &holders[..count] {
         let mut revoked = 0usize;
         for slot in 0..N {
             let record = table.record_at(slot);
@@ -106,10 +121,10 @@ fn reissue_clients_in<const N: usize>(
             record_kernel_revoke(holder, ResourceRef::console_port(port.id, 0), revoked);
         }
         let provenance = Provenance::root(holder);
-        let result = match table.grant(holder, port, CONSOLE_CLIENT_RIGHTS, provenance) {
+        let result = match table.grant(holder, port, rights, provenance) {
             Err(CapabilityError::CapacityExhausted) => {
                 let _ = clean_slate_capability::release_revoked(table);
-                table.grant(holder, port, CONSOLE_CLIENT_RIGHTS, provenance)
+                table.grant(holder, port, rights, provenance)
             }
             other => other,
         };
@@ -118,7 +133,7 @@ fn reissue_clients_in<const N: usize>(
                 clean_slate_capability::AuditKind::Grant,
                 HolderId::KERNEL,
                 port,
-                CONSOLE_CLIENT_RIGHTS,
+                rights,
             )
             .with_subject(holder)
             .with_handle(
@@ -180,6 +195,43 @@ mod tests {
             assert!(!rights.contains(Rights::DELEGATE));
         }
         assert!(!CONSOLE_CLIENT_RIGHTS.intersects(Rights::root_only_for(ResourceClass::Console)));
+        // A session member's forks inherit it; the front end's attach stays at the root.
+        assert!(!CONSOLE_SESSION_CLIENT_RIGHTS
+            .intersects(Rights::root_only_for(ResourceClass::Console)));
+        assert!(CONSOLE_FRONT_END_RIGHTS.intersects(Rights::root_only_for(ResourceClass::Console)));
+    }
+
+    #[test]
+    fn a_session_member_is_reissued_as_one() {
+        let old = ResourceRef::console_port(0x5600, 1);
+        let new = ResourceRef::console_port(0x5600, 2);
+        let mut table = CapabilityTable::<16>::new();
+        for (holder, rights) in [
+            (6, CONSOLE_CLIENT_RIGHTS),
+            (7, CONSOLE_SESSION_CLIENT_RIGHTS),
+        ] {
+            table
+                .grant(
+                    HolderId(holder),
+                    old,
+                    rights,
+                    Provenance::root(HolderId(holder)),
+                )
+                .unwrap();
+        }
+        assert_eq!(reissue_clients_in(&mut table, new, |_| true, |_, _| {}), 2);
+        let rights_of = |holder: u64| {
+            (0..16)
+                .map(|slot| table.record_at(slot))
+                .find(|r| {
+                    r.state == CapabilityState::Live
+                        && r.holder == HolderId(holder)
+                        && r.resource == new
+                })
+                .map(|r| r.rights)
+        };
+        assert_eq!(rights_of(6), Some(CONSOLE_CLIENT_RIGHTS));
+        assert_eq!(rights_of(7), Some(CONSOLE_SESSION_CLIENT_RIGHTS));
     }
 
     fn holds(table: &CapabilityTable<16>, holder: u64, port: ResourceRef) -> bool {

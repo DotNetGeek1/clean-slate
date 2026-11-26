@@ -18,7 +18,13 @@
 //! | 7 | POST         | serve cap         | conn                | frame ptr              | 0                  | 0        | 0             |
 //! | 8 | DISCONNECT   | serve cap         | conn                | reason (u32)           | 0                  | 0        | 0             |
 //! | 9 | BIND_WAKE    | serve cap         | work-set id         | request bit (0..=31)   | notice bit (0..=31)| 0        | 0             |
+//! | 10 | BIND_EVENTS | 0                 | conn                | work-set id            | bit (0..=31)       | 0        | 0             |
 //! ```
+//!
+//! `BIND_EVENTS` is the client's counterpart of `BIND_WAKE`: each event posted to the caller's
+//! connection, and the connection's end (a disconnect or the server going), sets the bit, so
+//! one `WORK_SET` `WAIT` can cover several connections. A later bind replaces it, and binding
+//! with an event already queued sets the bit at once.
 
 use clean_slate_capability::syscall_abi::SYSCALL_NR_SERVICE_PORT as CAPABILITY_SYSCALL_NR_SERVICE_PORT;
 use clean_slate_capability::{ResourceClass, Rights};
@@ -99,6 +105,7 @@ pub const PORT_OP_RECV: u64 = 6;
 pub const PORT_OP_POST: u64 = 7;
 pub const PORT_OP_DISCONNECT: u64 = 8;
 pub const PORT_OP_BIND_WAKE: u64 = 9;
+pub const PORT_OP_BIND_EVENTS: u64 = 10;
 
 pub const PORT_SEND_WAIT: u64 = 1;
 pub const PORT_RECV_NONBLOCK: u64 = 1;

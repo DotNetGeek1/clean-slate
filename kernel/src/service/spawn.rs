@@ -500,6 +500,10 @@ impl BuiltinServiceImage {
             #[cfg(clean_slate_system_init)]
             id if id == clean_slate_service_fixtures::SYSTEM_SHELL_SERVICE_ID.0 => Self::LinuxShell,
             #[cfg(clean_slate_system_init)]
+            id if id == clean_slate_service_fixtures::TERMINAL_SHELL_SERVICE_ID.0 => {
+                Self::LinuxShell
+            }
+            #[cfg(clean_slate_system_init)]
             id if id == clean_slate_service_fixtures::AUDIT_SERVICE_ID.0 => {
                 Self::AuditUserspacePayload
             }
@@ -1777,6 +1781,7 @@ mod desktop_images {
         "/desktop_shell_userspace_entry.rs"
     ));
     include!(concat!(env!("OUT_DIR"), "/playground_userspace_entry.rs"));
+    include!(concat!(env!("OUT_DIR"), "/terminal_userspace_entry.rs"));
 
     pub(super) const COMPOSITOR_USERSPACE_IMAGE: &[u8] =
         include_bytes!(concat!(env!("OUT_DIR"), "/compositor_userspace.bin"));
@@ -1784,6 +1789,8 @@ mod desktop_images {
         include_bytes!(concat!(env!("OUT_DIR"), "/desktop_shell_userspace.bin"));
     pub(super) const PLAYGROUND_USERSPACE_IMAGE: &[u8] =
         include_bytes!(concat!(env!("OUT_DIR"), "/playground_userspace.bin"));
+    pub(super) const TERMINAL_USERSPACE_IMAGE: &[u8] =
+        include_bytes!(concat!(env!("OUT_DIR"), "/terminal_userspace.bin"));
 }
 
 /// One embedded #118 desktop image and its fixed user layout.
@@ -1831,6 +1838,15 @@ impl DesktopImage {
                 mapped_code_pages: PLAYGROUND_USERSPACE_MAPPED_CODE_PAGES,
                 stack_pages: role.stack_pages(),
             },
+            DesktopRole::Terminal => Self {
+                bytes: TERMINAL_USERSPACE_IMAGE,
+                segments: &TERMINAL_USERSPACE_SEGMENTS,
+                image_base: TERMINAL_USERSPACE_IMAGE_BASE,
+                relocated_base: TERMINAL_USERSPACE_RELOCATED_BASE,
+                entry_offset: TERMINAL_USERSPACE_ENTRY_OFFSET,
+                mapped_code_pages: TERMINAL_USERSPACE_MAPPED_CODE_PAGES,
+                stack_pages: role.stack_pages(),
+            },
         }
     }
 
@@ -1850,6 +1866,7 @@ const _: () = {
         DesktopRole::Compositor,
         DesktopRole::Shell,
         DesktopRole::App,
+        DesktopRole::Terminal,
     ];
     let mut index = 0;
     while index < roles.len() {

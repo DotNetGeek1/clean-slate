@@ -5,15 +5,29 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Native terminal window (#311): a VT100 character grid on a compositor toplevel, attached to a console service stream"
+build = "build.rs"
 
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "clean-slate-terminal-userspace"
+path = "src/bin/terminal.rs"
+required-features = ["userspace"]
+
+[features]
+default = []
+userspace = []
+
 [dependencies]
+clean-slate-native-abi = { path = "../native-abi" }
 clean-slate-graphics = { path = "../graphics" }
 clean-slate-raster = { path = "../raster" }
 clean-slate-runtime = { path = "../runtime" }
 clean-slate-ui = { path = "../ui" }
+
+[dev-dependencies]
+clean-slate-runtime = { path = "../runtime", features = ["fake"] }
 
 [lints]
 workspace = true

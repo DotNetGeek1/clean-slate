@@ -10,7 +10,7 @@
 
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use clean_slate_service_fixtures::init_bootstrap::{
-    DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_VIRTIO_GPU,
+    DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_TERMINAL, DESKTOP_MODE_VIRTIO_GPU,
 };
 
 #[cfg(not(test))]
@@ -83,6 +83,8 @@ enum Detail {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BootOption {
     pub(crate) mode: DesktopMode,
+    /// `q0-terminal` or `q1-terminal`: the desktop also declares the terminal rows (#311).
+    pub(crate) terminal: bool,
     detail: Detail,
 }
 
@@ -90,7 +92,17 @@ impl BootOption {
     const fn off() -> Self {
         Self {
             mode: DesktopMode::Off,
+            terminal: false,
             detail: Detail::Quiet,
+        }
+    }
+
+    /// The `InitBootstrap.desktop_mode` word the option asks for.
+    pub(crate) const fn word(&self) -> u64 {
+        match self.mode {
+            DesktopMode::Off => DESKTOP_MODE_OFF,
+            DesktopMode::On(_) if self.terminal => self.mode.word() | DESKTOP_MODE_TERMINAL,
+            DesktopMode::On(_) => self.mode.word(),
         }
     }
 }
@@ -139,6 +151,9 @@ pub(crate) fn log_boot_option(option: &BootOption) {
         ),
     }
     kernel_log_line(option.mode.profile_line());
+    if option.terminal && option.mode != DesktopMode::Off {
+        kernel_log_line("[KERN] boot option terminal=on: the desktop declares the terminal rows");
+    }
 }
 
 fn log_not_understood(bytes: &[u8]) {
@@ -167,11 +182,13 @@ fn log_not_understood(bytes: &[u8]) {
     ));
 }
 
-/// `q0` or `q1`, and nothing else: no whitespace, no trailing NUL.
-fn parse_desktop_value(bytes: &[u8]) -> Option<DesktopBackend> {
+/// `q0` or `q1`, optionally with `-terminal`, and nothing else: no whitespace, no trailing NUL.
+fn parse_desktop_value(bytes: &[u8]) -> Option<(DesktopBackend, bool)> {
     match bytes {
-        b"q0" => Some(DesktopBackend::Framebuffer),
-        b"q1" => Some(DesktopBackend::VirtioGpu),
+        b"q0" => Some((DesktopBackend::Framebuffer, false)),
+        b"q1" => Some((DesktopBackend::VirtioGpu, false)),
+        b"q0-terminal" => Some((DesktopBackend::Framebuffer, true)),
+        b"q1-terminal" => Some((DesktopBackend::VirtioGpu, true)),
         _ => None,
     }
 }
@@ -212,6 +229,7 @@ fn read_from_io(io: &mut impl FwCfgIo) -> BootOption {
     if size > MAX_OPTION_BYTES as u32 {
         return BootOption {
             mode: DesktopMode::Off,
+            terminal: false,
             detail: Detail::Overlong { len: size },
         };
     }
@@ -222,12 +240,14 @@ fn read_from_io(io: &mut impl FwCfgIo) -> BootOption {
         return unreadable();
     }
     match parse_desktop_value(&payload[..len]) {
-        Some(backend) => BootOption {
+        Some((backend, terminal)) => BootOption {
             mode: DesktopMode::On(backend),
+            terminal,
             detail: Detail::Quiet,
         },
         None => BootOption {
             mode: DesktopMode::Off,
+            terminal: false,
             detail: Detail::NotUnderstood {
                 bytes: payload,
                 len,
@@ -239,6 +259,7 @@ fn read_from_io(io: &mut impl FwCfgIo) -> BootOption {
 fn unreadable() -> BootOption {
     BootOption {
         mode: DesktopMode::Off,
+        terminal: false,
         detail: Detail::DirectoryUnreadable,
     }
 }
@@ -413,10 +434,12 @@ mod tests {
                 option,
                 BootOption {
                     mode: DesktopMode::On(backend),
+                    terminal: false,
                     detail: Detail::Quiet,
                 }
             );
             assert_eq!(option.mode.word(), word);
+            assert_eq!(option.word(), word);
             assert_eq!(option.mode.profile_line(), line);
             let payload_reads = io.bytes_read;
             assert!(payload_reads < 4 + 4 + 2 * FILE_ENTRY_BYTES + MAX_OPTION_BYTES);
@@ -425,8 +448,41 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_value_keeps_its_tier_and_sets_the_terminal_flag() {
+        for (payload, backend, word) in [
+            (
+                b"q0-terminal".as_slice(),
+                DesktopBackend::Framebuffer,
+                DESKTOP_MODE_FRAMEBUFFER,
+            ),
+            (
+                b"q1-terminal",
+                DesktopBackend::VirtioGpu,
+                DESKTOP_MODE_VIRTIO_GPU,
+            ),
+        ] {
+            let file = entry(payload.len() as u32, 0x21, "opt/clean-slate/desktop");
+            let mut io = device(&[file], &[(0x21, payload)]);
+            let option = read_from_io(&mut io);
+            assert_eq!(option.mode, DesktopMode::On(backend));
+            assert!(option.terminal);
+            assert_eq!(option.word(), word | DESKTOP_MODE_TERMINAL);
+        }
+        assert_eq!(BootOption::off().word(), DESKTOP_MODE_OFF);
+    }
+
+    #[test]
     fn unknown_empty_and_padded_values_stay_off() {
-        for payload in [b"".as_slice(), b"q1\n", b"Q1", b"q2", b"q1 ", b"desktop"] {
+        for payload in [
+            b"".as_slice(),
+            b"q1\n",
+            b"Q1",
+            b"q2",
+            b"q1 ",
+            b"desktop",
+            b"q1-terminal ",
+            b"terminal",
+        ] {
             let file = entry(payload.len() as u32, 0x22, "opt/clean-slate/desktop");
             let mut io = device(&[file], &[(0x22, payload)]);
             let option = read_from_io(&mut io);
@@ -445,6 +501,7 @@ mod tests {
             option,
             BootOption {
                 mode: DesktopMode::Off,
+                terminal: false,
                 detail: Detail::Overlong { len: 1_000 },
             }
         );

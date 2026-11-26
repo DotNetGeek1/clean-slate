@@ -207,6 +207,12 @@ mod tests {
             "ret" => 0x28,
             "right" => 0x4F,
             "esc" => 0x29,
+            "c" => 0x06,
+            "e" => 0x08,
+            "h" => 0x0B,
+            "l" => 0x0F,
+            "o" => 0x12,
+            "spc" => 0x2C,
             other => panic!("no usage for qcode `{other}`"),
         }
     }

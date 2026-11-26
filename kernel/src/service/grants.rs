@@ -44,9 +44,35 @@ pub(crate) trait InstanceGrantAuthority {
     /// Registers the instance's console port, grants it `CONSOLE_SERVE` there and `WRITE` on
     /// the serial console device.
     fn grant_console_service(&mut self, pid: u64) -> Result<(), &'static str>;
-    /// `CONSOLE_CONNECT` on the port of the live `Grant::ConsoleService` instance; fails when
-    /// there is none.
-    fn grant_console_client(&mut self, pid: u64) -> Result<(), &'static str>;
+    /// `CONSOLE_CONNECT`, with `role`'s extra right, on the port of the live
+    /// `Grant::ConsoleService` instance; fails when there is none.
+    fn grant_console_client(
+        &mut self,
+        pid: u64,
+        role: ConsoleClientRole,
+    ) -> Result<(), &'static str>;
+}
+
+/// Which console port client a row is (#310, #311).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConsoleClientRole {
+    /// `Grant::ConsoleClient`: its streams are framed on serial.
+    Plain,
+    /// `Grant::ConsoleSession`: its streams, and its forks', belong to the console session.
+    Session,
+    /// `Grant::ConsoleFrontEnd`: it may attach as the session's front end.
+    FrontEnd,
+}
+
+#[cfg(test)]
+impl ConsoleClientRole {
+    pub(crate) const fn grant(self) -> Grant {
+        match self {
+            Self::Plain => Grant::ConsoleClient,
+            Self::Session => Grant::ConsoleSession,
+            Self::FrontEnd => Grant::ConsoleFrontEnd,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -89,7 +115,9 @@ pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
             | Grant::GraphicsShellRole
             | Grant::GraphicsAppRole
             | Grant::ConsoleService
-            | Grant::ConsoleClient => {}
+            | Grant::ConsoleClient
+            | Grant::ConsoleSession
+            | Grant::ConsoleFrontEnd => {}
             // Applied by the Linux launch path while it builds the process.
             Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {}
         }
@@ -113,7 +141,13 @@ pub(crate) fn apply_instance_grants<A: InstanceGrantAuthority>(
             Grant::GraphicsShellRole => authority.grant_graphics_role(pid, GraphicsRole::Shell),
             Grant::GraphicsAppRole => authority.grant_graphics_role(pid, GraphicsRole::App),
             Grant::ConsoleService => authority.grant_console_service(pid),
-            Grant::ConsoleClient => authority.grant_console_client(pid),
+            Grant::ConsoleClient => authority.grant_console_client(pid, ConsoleClientRole::Plain),
+            Grant::ConsoleSession => {
+                authority.grant_console_client(pid, ConsoleClientRole::Session)
+            }
+            Grant::ConsoleFrontEnd => {
+                authority.grant_console_client(pid, ConsoleClientRole::FrontEnd)
+            }
             Grant::ObjectServiceRole
             | Grant::AuditReader
             | Grant::Console
@@ -147,7 +181,7 @@ mod tests {
         InputSeat(u64),
         GraphicsRole(u64, GraphicsRole),
         ConsoleService(u64),
-        ConsoleClient(u64),
+        ConsoleClient(u64, ConsoleClientRole),
     }
 
     #[derive(Default)]
@@ -230,9 +264,13 @@ mod tests {
             self.outcome(Grant::ConsoleService)
         }
 
-        fn grant_console_client(&mut self, pid: u64) -> Result<(), &'static str> {
-            self.calls.push(Call::ConsoleClient(pid));
-            self.outcome(Grant::ConsoleClient)
+        fn grant_console_client(
+            &mut self,
+            pid: u64,
+            role: ConsoleClientRole,
+        ) -> Result<(), &'static str> {
+            self.calls.push(Call::ConsoleClient(pid, role));
+            self.outcome(role.grant())
         }
     }
 
@@ -321,7 +359,10 @@ mod tests {
             &mut recorder,
         )
         .unwrap();
-        assert_eq!(recorder.calls, [Call::ConsoleClient(7)]);
+        assert_eq!(
+            recorder.calls,
+            [Call::ConsoleClient(7, ConsoleClientRole::Plain)]
+        );
     }
 
     #[test]
@@ -397,7 +438,7 @@ mod tests {
             calls(PLAYGROUND_SERVICE_ID),
             [
                 Call::GraphicsRole(7, GraphicsRole::App),
-                Call::ConsoleClient(7)
+                Call::ConsoleClient(7, ConsoleClientRole::Plain)
             ]
         );
     }

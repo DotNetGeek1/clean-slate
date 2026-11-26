@@ -448,9 +448,22 @@ impl Screen {
         self.attr = attr;
     }
 
-    /// `RIS`: a blank screen, no history, default attributes.
+    /// `RIS`: a blank screen, no history, default attributes. Cleared in place: a fresh
+    /// `Screen` is far larger than a CPL3 stack.
     pub fn reset(&mut self) {
-        *self = Self::new();
+        for row in &mut self.ring {
+            *row = [Cell::BLANK; COLS];
+        }
+        self.top = 0;
+        self.history = 0;
+        self.row = 0;
+        self.col = 0;
+        self.wrap_pending = false;
+        self.attr = Attr::DEFAULT;
+        self.saved = (0, 0, Attr::DEFAULT);
+        self.cursor_visible = true;
+        self.view_offset = 0;
+        self.dirty = ALL_ROWS;
     }
 }
 

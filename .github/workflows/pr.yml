@@ -186,12 +186,13 @@ jobs:
             cargo clippy -p clean-slate-compositor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           done
           cargo clippy -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
+          cargo clippy -p clean-slate-terminal --bin clean-slate-terminal-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-console --bin clean-slate-console-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-desktop-shell --bin clean-slate-desktop-shell-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-store --bin clean-slate-storage-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-net-service --bin clean-slate-network-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
 
-      # The default image (and the system-test-hooks build) embeds these three ELFs for init's
+      # The default image (and the system-test-hooks build) embeds these four ELFs for init's
       # desktop rows (kernel/build.rs).
       - name: Build M10 desktop userspace images
         env:
@@ -200,6 +201,7 @@ jobs:
           cargo build -p clean-slate-compositor --bin clean-slate-compositor-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
           cargo build -p clean-slate-desktop-shell --bin clean-slate-desktop-shell-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
           cargo build -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
+          cargo build -p clean-slate-terminal --bin clean-slate-terminal-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
 
       # Every kernel build embeds the storage and network ELFs (kernel/build.rs), including
       # clippy, the bare kernel build, and host tests below; the featureless build (the default

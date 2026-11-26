@@ -39,6 +39,7 @@ mod system_desktop_faults;
 mod system_desktop_lane;
 mod system_lane;
 mod system_shell;
+mod system_terminal_lane;
 
 use marker_spec::{unexpected_guest_failure, MarkerSet, MarkerStep, MarkerTracker};
 use ovmf_vars::RuntimeVarsCopy;
@@ -1420,6 +1421,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestSystemShell => system_shell::run(),
         ParsedCommand::TestSystem => system_lane::run(),
         ParsedCommand::TestSystemDesktop => system_desktop_lane::run(),
+        ParsedCommand::TestSystemTerminal => system_terminal_lane::run(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -2989,14 +2991,15 @@ fn build_native_userspace_bin(package: &str, bin: &str) -> Result<(), XtaskError
     run_build_command(&mut cmd)
 }
 
-/// The three desktop images the system image embeds for its desktop rows.
-const DESKTOP_USERSPACE_BINS: [(&str, &str); 3] = [
+/// The desktop images the system image embeds for its desktop rows.
+const DESKTOP_USERSPACE_BINS: [(&str, &str); 4] = [
     ("clean-slate-compositor", "clean-slate-compositor-userspace"),
     (
         "clean-slate-desktop-shell",
         "clean-slate-desktop-shell-userspace",
     ),
     ("clean-slate-playground", "clean-slate-playground-userspace"),
+    ("clean-slate-terminal", "clean-slate-terminal-userspace"),
 ];
 
 fn build_desktop_userspace() -> Result<(), XtaskError> {
@@ -5665,7 +5668,7 @@ fn drain_output_events(receiver: &mpsc::Receiver<OutputEvent>, output: &mut Stri
 
 fn print_help() {
     println!("Usage: cargo xtask <command>");
-    println!("  run [--net] [--desktop] [--framebuffer]  Build the default image (init starts storage, then network) and boot it in QEMU with the persistent data disk target/system-data.img (created if missing); --net also starts the network fixture peer; --desktop passes fw_cfg opt/clean-slate/desktop=q1, a VirtIO-GPU and a window (QEMU_DISPLAY, default gtk), and --desktop --framebuffer passes q0 with -vga std");
+    println!("  run [--net] [--desktop] [--framebuffer] [--terminal]  Build the default image (init starts storage, then network) and boot it in QEMU with the persistent data disk target/system-data.img (created if missing); --net also starts the network fixture peer; --desktop passes fw_cfg opt/clean-slate/desktop=q1, a VirtIO-GPU and a window (QEMU_DISPLAY, default gtk), --desktop --framebuffer passes q0 with -vga std, and --terminal adds the terminal window and its shell (q1-terminal or q0-terminal)");
     println!("  test-m1      Build the M1 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m2      Build the M2 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m3      M3 milestone gate: run every M3 acceptance boot in order (test-m3-address-space and test-m3-lifecycle as one merged boot), print [M3  ] PASS only if all pass");
@@ -5715,6 +5718,7 @@ fn print_help() {
     println!("  test-m10-input-smoke M10 #113 i8042 input lane: init, IRQ 1/12 routing, raw queue and syscall 19 from CPL3 (controller stimulus), then BIND_WAKE-woken CPL3 consumer checked against keyboard + pointer events injected over a private QMP socket; prints [M10.input] PASS (aliases: m10-input-smoke)");
     println!("  test-m10-desktop M10 #118 desktop lane on the system image (#218 S6f): desktop-shell host tests, then the system-test-hooks build with fw_cfg opt/clean-slate/desktop=q1 on VirtIO-GPU and =q0 on the -vga std framebuffer; each boot must reach init's eight-row settle line, then test-system-desktop's closed-loop driver runs (click, toggle, background click, key, title-bar drag, close, app, desktop shell and compositor faults) with serial, resource-baseline, quiet-stretch and screendump checks; artifacts under target/xtask-artifacts; prints [M10.9] PASS (aliases: m10-desktop, m10.118)");
     println!("  test-m10        M10 milestone gate: every test-m10-* constituent, clean-slate-ui host tests and test-qmp-smoke, then test-m10-desktop; prints [M10 ] PASS (aliases: m10, m10.119)");
+    println!("  test-system-terminal #311 system-test-hooks build with fw_cfg opt/clean-slate/desktop=q1-terminal on a VirtIO-GPU, COM1 and QMP: init settles with ten rows, the terminal shell holds a console session record and the terminal a front-end one, a closed-loop click focuses the terminal, typed echo hello must come back from the terminal's shell through the console session, the window must change, and the serial shell still answers; transcript and screendumps under target/xtask-artifacts/system-terminal; prints [STT ] test-system-terminal PASS (alias: system-terminal)");
     println!("  test-serial-input #218 S4 serial receive lane: COM1 on a private loopback socket; the host types a script (plain line, backspace/delete, Ctrl-U, an overlong line, a burst, a full committed buffer, Ctrl-D on a non-empty and an empty line) and checks the echo and every committed read byte for byte; prints [TTY ] PASS (aliases: serial-input)");
     println!("  test-system-boot #218 S3b default image: boots it twice on a fresh lane-owned data disk with the network fixture peer; init starts storage then network, the kernel checks every launched pid holds exactly its manifest grants and reports ready from that pid, boot 1 formats and boot 2 mounts, and the idle thread halts while init waits; prints [SYS ] PASS (aliases: system-boot)");
     println!("  test-system-shell #218 S5 default image to its serial-console shell: COM1 on a private loopback socket, a fresh lane-owned data disk and the network fixture peer; the host types echo, ls /bin, a pipeline, a /tmp write and read and a backspace edit and checks output only execution produces, then exit and Ctrl-D, each followed by a new shell one generation on with a new prompt; prints [SHL ] PASS (aliases: system-shell)");
@@ -5875,6 +5879,7 @@ enum ParsedCommand {
     TestSystemShell,
     TestSystem,
     TestSystemDesktop,
+    TestSystemTerminal,
     TestM10Desktop,
     TestM10,
     RunM10Desktop,
@@ -6063,6 +6068,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-system" || cmd == "system" => ParsedCommand::TestSystem,
         Some(cmd) if cmd == "test-system-desktop" || cmd == "system-desktop" => {
             ParsedCommand::TestSystemDesktop
+        }
+        Some(cmd) if cmd == "test-system-terminal" || cmd == "system-terminal" => {
+            ParsedCommand::TestSystemTerminal
         }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
@@ -6788,6 +6796,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestSystemDesktop
+            );
+        }
+        for alias in ["test-system-terminal", "system-terminal"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestSystemTerminal
             );
         }
         assert_eq!(
