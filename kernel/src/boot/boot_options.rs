@@ -83,7 +83,8 @@ enum Detail {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BootOption {
     pub(crate) mode: DesktopMode,
-    /// `q0-terminal` or `q1-terminal`: the desktop also declares the terminal rows (#311).
+    /// The desktop also declares the terminal rows (#311): `q0`, `q1` and their `-terminal`
+    /// spellings. Only `q0-bare` and `q1-bare` leave them out.
     pub(crate) terminal: bool,
     detail: Detail,
 }
@@ -182,13 +183,16 @@ fn log_not_understood(bytes: &[u8]) {
     ));
 }
 
-/// `q0` or `q1`, optionally with `-terminal`, and nothing else: no whitespace, no trailing NUL.
+/// `q0` or `q1`, optionally with `-terminal` or `-bare`, and nothing else: no whitespace, no
+/// trailing NUL. The terminal is on the default desktop (#311), so plain `q0`/`q1` include it
+/// and `-terminal` is the same profile; `-bare` is the desktop without its rows, which the
+/// lanes that count the desktop's own rows boot.
 fn parse_desktop_value(bytes: &[u8]) -> Option<(DesktopBackend, bool)> {
     match bytes {
-        b"q0" => Some((DesktopBackend::Framebuffer, false)),
-        b"q1" => Some((DesktopBackend::VirtioGpu, false)),
-        b"q0-terminal" => Some((DesktopBackend::Framebuffer, true)),
-        b"q1-terminal" => Some((DesktopBackend::VirtioGpu, true)),
+        b"q0" | b"q0-terminal" => Some((DesktopBackend::Framebuffer, true)),
+        b"q1" | b"q1-terminal" => Some((DesktopBackend::VirtioGpu, true)),
+        b"q0-bare" => Some((DesktopBackend::Framebuffer, false)),
+        b"q1-bare" => Some((DesktopBackend::VirtioGpu, false)),
         _ => None,
     }
 }
@@ -410,16 +414,16 @@ mod tests {
     }
 
     #[test]
-    fn q0_and_q1_select_the_backend_and_the_bootstrap_word() {
+    fn bare_values_select_the_backend_and_the_bootstrap_word() {
         let cases = [
             (
-                b"q0".as_slice(),
+                b"q0-bare".as_slice(),
                 DesktopBackend::Framebuffer,
                 DESKTOP_MODE_FRAMEBUFFER,
                 "[KERN] boot profile=desktop tier=Q0 source=fw_cfg",
             ),
             (
-                b"q1".as_slice(),
+                b"q1-bare".as_slice(),
                 DesktopBackend::VirtioGpu,
                 DESKTOP_MODE_VIRTIO_GPU,
                 "[KERN] boot profile=desktop tier=Q1 source=fw_cfg",
@@ -448,10 +452,16 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_value_keeps_its_tier_and_sets_the_terminal_flag() {
+    fn the_default_desktop_and_its_terminal_spelling_set_the_terminal_flag() {
         for (payload, backend, word) in [
             (
-                b"q0-terminal".as_slice(),
+                b"q0".as_slice(),
+                DesktopBackend::Framebuffer,
+                DESKTOP_MODE_FRAMEBUFFER,
+            ),
+            (b"q1", DesktopBackend::VirtioGpu, DESKTOP_MODE_VIRTIO_GPU),
+            (
+                b"q0-terminal",
                 DesktopBackend::Framebuffer,
                 DESKTOP_MODE_FRAMEBUFFER,
             ),
@@ -482,6 +492,8 @@ mod tests {
             b"desktop",
             b"q1-terminal ",
             b"terminal",
+            b"q1-bare\0",
+            b"bare",
         ] {
             let file = entry(payload.len() as u32, 0x22, "opt/clean-slate/desktop");
             let mut io = device(&[file], &[(0x22, payload)]);
