@@ -27,8 +27,8 @@ pub const PROTOCOL_MAJOR: u16 = 1;
 /// Negotiated minor version (§1.1).
 pub const PROTOCOL_MINOR: u16 = 0;
 
-/// Server feature set for M10 (§1.1).
-pub const M10_SERVER_FEATURES: Features = Features(0);
+/// Server feature set (§1.1): text input since #309.
+pub const M10_SERVER_FEATURES: Features = Features(Features::TEXT_INPUT);
 
 /// Wire header fields (§1.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

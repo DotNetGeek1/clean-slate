@@ -1372,3 +1372,5 @@ fn window_tables_are_bounded_per_client_and_globally() {
     }
     assert_eq!(h.comp.wm().mapped.iter().flatten().count(), MAX_WINDOWS);
 }
+
+mod text_input;

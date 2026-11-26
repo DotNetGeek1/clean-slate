@@ -7,6 +7,7 @@ use clean_slate_graphics::abi::input::READ_BATCH_MAX_RECORDS;
 use clean_slate_graphics::connection::{Admission, RequestError};
 use clean_slate_graphics::geometry::{BufferRect, Point, Rect, RectSet, Size};
 use clean_slate_graphics::ids::{ClientBufferId, Serial, SurfaceId, WindowId};
+use clean_slate_graphics::keymap::{self, Layout};
 use clean_slate_graphics::limits::{
     MAX_BUFFERS_PER_CLIENT, MAX_CLIENTS, MAX_CLIENT_STALL_ITERATIONS, MAX_PRESENT_DAMAGE_RECTS,
     MAX_REGISTERED_BUFFERS, MAX_SURFACES, MAX_SURFACES_PER_CLIENT, MAX_SURFACE_EXTENT,
@@ -35,6 +36,7 @@ use crate::client::{BufferEntry, ClientIdentity, ClientSlot, SurfaceEntry, Windo
 use crate::compose::{self, Decor, Footprint, OpaqueCover, Visual};
 use crate::input::{Hit, Seat};
 use crate::present::{DisplayHealth, PresentTracker};
+use crate::repeat::{KeyRepeater, RepeatConfig};
 use crate::scene::{Scene, SurfaceKey};
 use crate::trace::InputTrace;
 use crate::wm::{GrabKind, PlaceRequest, Target, WindowPolicy, Wm, WmHit};
@@ -62,6 +64,10 @@ pub struct Config {
     /// Retry interval for a client whose event ring is full; after
     /// [`MAX_CLIENT_STALL_ITERATIONS`] retries it is disconnected with `QueueOverflow`.
     pub stall_retry_ns: u64,
+    /// Layout for `Text` events (#309).
+    pub layout: &'static Layout,
+    /// Key repeat for clients that negotiated `TEXT_INPUT` (#309).
+    pub repeat: RepeatConfig,
 }
 
 impl Config {
@@ -70,6 +76,8 @@ impl Config {
         display_wakes: true,
         display_poll_ns: 4_000_000,
         stall_retry_ns: 16_000_000,
+        layout: &keymap::US,
+        repeat: RepeatConfig::DEFAULT,
     };
 }
 
@@ -168,6 +176,9 @@ pub struct Compositor<P: WindowPolicy> {
     needs_composite: bool,
     backlog: bool,
     seat: Seat,
+    repeater: KeyRepeater,
+    /// `now_ns` read before the current input drain; repeat timing starts from it.
+    input_clock_ns: u64,
     trace: InputTrace,
     wm: Wm,
     policy: P,
@@ -186,6 +197,8 @@ impl<P: WindowPolicy> Compositor<P> {
             needs_composite: false,
             backlog: false,
             seat: Seat::new(),
+            repeater: KeyRepeater::new(),
+            input_clock_ns: 0,
             trace: InputTrace::new(),
             wm: Wm::new(),
             policy,
@@ -235,6 +248,10 @@ impl<P: WindowPolicy> Compositor<P> {
 
     pub fn seat(&self) -> &Seat {
         &self.seat
+    }
+
+    pub fn repeater(&self) -> &KeyRepeater {
+        &self.repeater
     }
 
     pub fn policy(&self) -> &P {
@@ -411,6 +428,9 @@ impl<P: WindowPolicy> Compositor<P> {
             let retry = now_ns.saturating_add(self.config.stall_retry_ns);
             deadline = Some(deadline.map_or(retry, |d| d.min(retry)));
         }
+        if let Some(repeat) = self.repeater.deadline() {
+            deadline = Some(deadline.map_or(repeat, |d| d.min(repeat)));
+        }
         WaitPlan::Block(deadline)
     }
 
@@ -451,6 +471,10 @@ impl<P: WindowPolicy> Compositor<P> {
         if woke & WAKE_INPUT != 0 {
             iteration.input_records = self.drain_input(io);
             self.wm_refresh();
+        }
+        if self.repeater.deadline().is_some() {
+            let now = io.waiter.now_ns();
+            self.fire_repeat(now);
         }
         let display_due = woke & WAKE_DISPLAY != 0
             || self
@@ -957,6 +981,7 @@ impl<P: WindowPolicy> Compositor<P> {
     // ---- input -------------------------------------------------------------------------------
 
     fn drain_input(&mut self, io: &mut Io<'_>) -> usize {
+        self.input_clock_ns = io.waiter.now_ns();
         let output = self.output_size();
         let mut sink = |record: RawInputRecord| {
             let (events, n) = self.seat.fold(&record, output);

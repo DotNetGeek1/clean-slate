@@ -376,6 +376,16 @@ impl<P: WindowPolicy> Harness<P> {
                     return n;
                 }
             }
+            if !in_flight && self.waiter.ready == 0 {
+                // A held key's repeat timer is not idle work either: tests step it with
+                // `advance_to`.
+                let now = self.waiter.now_ns;
+                if let Some(repeat) = self.comp.repeater().deadline() {
+                    if repeat > now && self.comp.plan_wait(now) == WaitPlan::Block(Some(repeat)) {
+                        return n;
+                    }
+                }
+            }
             match self.iterate() {
                 Ok(_) => {}
                 Err(ServiceError::Wait(WaitFailure(WAIT_WOULD_BLOCK_FOREVER))) => return n,
@@ -447,6 +457,10 @@ impl<P: WindowPolicy> Harness<P> {
     }
 
     pub fn hello(&mut self, client: &mut Client) {
+        self.hello_with(client, Features(0));
+    }
+
+    pub fn hello_with(&mut self, client: &mut Client, features: Features) {
         let inbox = self.roundtrip(
             client,
             Request::Hello {
@@ -454,13 +468,29 @@ impl<P: WindowPolicy> Harness<P> {
                     major: PROTOCOL_MAJOR,
                     minor: PROTOCOL_MINOR,
                 },
-                features: Features(0),
+                features,
             },
         );
         assert!(
             matches!(inbox.events.as_slice(), [(_, Event::Welcome { .. })]),
             "{inbox:?}"
         );
+    }
+
+    /// Steps the clock to `t`, running every key repeat due on the way.
+    pub fn advance_to(&mut self, t: u64) {
+        while let Some(due) = self.comp.repeater().deadline().filter(|d| *d <= t) {
+            self.waiter.now_ns = self.waiter.now_ns.max(due);
+            self.pump_once();
+        }
+        self.waiter.now_ns = self.waiter.now_ns.max(t);
+    }
+
+    fn pump_once(&mut self) {
+        match self.iterate() {
+            Ok(_) | Err(ServiceError::Wait(WaitFailure(WAIT_WOULD_BLOCK_FOREVER))) => {}
+            Err(other) => panic!("service error {other:?}"),
+        }
     }
 
     /// Connects and says hello.
