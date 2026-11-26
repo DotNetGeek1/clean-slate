@@ -541,7 +541,7 @@ mod tests {
             .iter()
             .map(|target| target.service.0)
             .collect();
-        assert_eq!(services, [0x5200, 0x5300, 0x5301, 0x5302]);
+        assert_eq!(services, [0x5200, 0x5300, 0x5301, 0x5302, 0x5600]);
         for byte in [AUDIT_FLOOD_QUEUE_BYTE, AUDIT_FLOOD_COMMIT_BYTE] {
             assert!(byte < b' ');
             assert!(!handled.contains(&byte));
