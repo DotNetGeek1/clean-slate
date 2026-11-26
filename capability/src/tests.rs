@@ -64,7 +64,7 @@ fn rights_subset_and_names() {
     assert!(Rights::READ.is_subset_of(full));
     assert_eq!(full.attenuate(Rights::READ), Rights::READ);
     assert!(!Rights::WRITE.is_subset_of(Rights::READ));
-    assert_eq!(Rights::from_bits(1 << 22), None);
+    assert_eq!(Rights::from_bits(1 << 24), None);
     let mut buf = alloc::string::String::new();
     full.write_names(&mut buf).unwrap();
     assert_eq!(buf, "read|write|delegate");
@@ -336,7 +336,7 @@ fn network_rights_mask_and_authorization() {
     let handle = CapabilityHandle::new(0, 1);
     let valid = Rights::valid_for(ResourceClass::Network);
     assert!(valid.contains(Rights::NET_SEND));
-    assert_eq!(Rights::from_bits(valid.bits() | (1 << 22)), None);
+    assert_eq!(Rights::from_bits(valid.bits() | (1 << 24)), None);
     assert!(!Rights::NET_SEND.is_subset_of(Rights::valid_for(ResourceClass::BlockDevice)));
 
     let parent = live_record(holder, resource, valid, 1);
@@ -456,6 +456,8 @@ fn console_rights_keep_serving_and_the_device_at_the_root() {
         valid,
         Rights::CONSOLE_CONNECT
             .union(Rights::CONSOLE_SERVE)
+            .union(Rights::CONSOLE_ATTACH)
+            .union(Rights::CONSOLE_SESSION)
             .union(Rights::READ)
             .union(Rights::WRITE)
             .union(Rights::DELEGATE)
@@ -466,13 +468,23 @@ fn console_rights_keep_serving_and_the_device_at_the_root() {
     assert!(!root_only.contains(Rights::CONSOLE_CONNECT));
     assert!(root_only.contains(Rights::CONSOLE_SERVE));
     assert!(root_only.contains(Rights::WRITE));
+    assert!(root_only.contains(Rights::CONSOLE_ATTACH));
+    assert!(
+        !root_only.contains(Rights::CONSOLE_SESSION),
+        "forks inherit membership"
+    );
     assert_eq!(ResourceClass::Console.name(), "console");
     let mut names = alloc::string::String::new();
     Rights::CONSOLE_CONNECT
         .union(Rights::CONSOLE_SERVE)
+        .union(Rights::CONSOLE_ATTACH)
+        .union(Rights::CONSOLE_SESSION)
         .write_names(&mut names)
         .unwrap();
-    assert_eq!(names, "console_connect|console_serve");
+    assert_eq!(
+        names,
+        "console_connect|console_serve|console_attach|console_session"
+    );
 }
 
 #[test]

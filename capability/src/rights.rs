@@ -46,6 +46,13 @@ impl Rights {
     pub const CONSOLE_CONNECT: Self = Self(1 << 20);
     /// Serve the console port (recv/post/disconnect).
     pub const CONSOLE_SERVE: Self = Self(1 << 21);
+    /// Attach to the console session as its front end: read the session's output and type its
+    /// input (the terminal window, #311).
+    pub const CONSOLE_ATTACH: Self = Self(1 << 22);
+    /// A stream connected with this right belongs to the console session: its output goes to
+    /// the attached front end and its input comes only from there (the terminal's shell, #311).
+    /// Only a manifest row grants it at the root; forks inherit it.
+    pub const CONSOLE_SESSION: Self = Self(1 << 23);
 
     const ALL_KNOWN: u32 = (1 << 0)
         | (1 << 1)
@@ -68,7 +75,9 @@ impl Rights {
         | (1 << 18)
         | (1 << 19)
         | (1 << 20)
-        | (1 << 21);
+        | (1 << 21)
+        | (1 << 22)
+        | (1 << 23);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -163,6 +172,8 @@ impl Rights {
             ResourceClass::Console => Self(
                 Self::CONSOLE_CONNECT.0
                     | Self::CONSOLE_SERVE.0
+                    | Self::CONSOLE_ATTACH.0
+                    | Self::CONSOLE_SESSION.0
                     | Self::READ.0
                     | Self::WRITE.0
                     | Self::DELEGATE.0
@@ -182,15 +193,20 @@ impl Rights {
             ResourceClass::SharedBuffer => Self(Self::WRITE.0 | Self::DELEGATE.0 | Self::REVOKE.0),
             // Raw NIC authority is granted by the kernel to the live network service only.
             ResourceClass::Network => Self::NET_RAW_DEVICE,
-            // Serving the port and driving the serial device are the console service's alone.
-            ResourceClass::Console => Self(Self::CONSOLE_SERVE.0 | Self::READ.0 | Self::WRITE.0),
+            // Serving the port and driving the serial device are the console service's alone,
+            // and being the session's front end comes only from a manifest row. Session
+            // membership is not: the shell's forks inherit it with their console record, and a
+            // member can only pass on the membership it has.
+            ResourceClass::Console => {
+                Self(Self::CONSOLE_SERVE.0 | Self::CONSOLE_ATTACH.0 | Self::READ.0 | Self::WRITE.0)
+            }
             _ => Self::empty(),
         }
     }
 
     /// Lowercase, pipe-separated names in deterministic bit order.
     pub fn write_names(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        const NAMES: [(&str, u32); 22] = [
+        const NAMES: [(&str, u32); 24] = [
             ("read", 1 << 0),
             ("write", 1 << 1),
             ("inspect", 1 << 2),
@@ -213,6 +229,8 @@ impl Rights {
             ("input_consume", 1 << 19),
             ("console_connect", 1 << 20),
             ("console_serve", 1 << 21),
+            ("console_attach", 1 << 22),
+            ("console_session", 1 << 23),
         ];
         let mut first = true;
         for (name, bit) in NAMES {

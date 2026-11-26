@@ -19,11 +19,21 @@
 //! ([`ConsoleCore::pump_input`], [`InputSource`]). While the shell waits for a command, its
 //! `READ` is the only one; while a command reads, the command's is the newer and the shell's,
 //! waiting in `wait4`, is not there. Input also reaches one stream through
-//! [`ConsoleCore::feed_input`], from a front end attached to it.
+//! [`ConsoleCore::feed_input`].
+//!
+//! **The session (#311).** A stream connected with `CONSOLE_SESSION` (the terminal's shell and
+//! every process it forks) belongs to the console session. Its output is framed on serial as
+//! any stream's is, and also kept raw, up to [`SESSION_OUTPUT_BYTES`], for the session's front
+//! end (the terminal window), which a connection with `CONSOLE_ATTACH` becomes with `ATTACH`.
+//! The front end takes that output with `READ_OUTPUT` and types input with `FEED`; the oldest
+//! waiting `READ` among the session's streams gets it, and serial input never reaches them.
+//! When the front end goes, the session's open streams read an end of input, so the shell
+//! exits and its restart starts a fresh one for the next front end.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+use clean_slate_capability::Rights;
 use clean_slate_native_abi::console::{
     ConsoleBytes, ConsoleEvent, ConsoleRequest, CONSOLE_DEVICE_WRITE_MAX, CONSOLE_FRAME_PAYLOAD,
 };
@@ -42,6 +52,9 @@ pub const LINE_BYTES: usize = 200;
 /// Input bytes a stream buffers before more input is dropped.
 pub const INPUT_BYTES: usize = 256;
 
+/// Session output kept for the front end; past it the oldest is dropped.
+pub const SESSION_OUTPUT_BYTES: usize = 4096;
+
 /// `pid=` plus 20 digits plus `: `.
 const LABEL_BYTES: usize = 26;
 
@@ -50,6 +63,10 @@ const _: () = assert!(LABEL_BYTES + LINE_BYTES + 2 <= CONSOLE_DEVICE_WRITE_MAX);
 /// Reasons the service gives when it closes a stream (the port's opaque `u32`).
 pub const DISCONNECT_PROTOCOL: u32 = 1;
 pub const DISCONNECT_NO_STREAM: u32 = 2;
+/// A front-end request on a connection without `CONSOLE_ATTACH`, or before its `ATTACH`.
+pub const DISCONNECT_NOT_FRONT_END: u32 = 3;
+/// `ATTACH` while another front end is attached.
+pub const DISCONNECT_FRONT_END_BUSY: u32 = 4;
 
 /// The serial device the service writes through.
 pub trait SerialDevice {
@@ -120,12 +137,22 @@ pub struct ConsoleStats {
     pub input_dropped: u64,
     /// Serial input bytes handed to streams.
     pub serial_input_bytes: u64,
+    pub front_ends_attached: u64,
+    pub front_ends_detached: u64,
+    /// Session output bytes the front end has taken.
+    pub session_output_bytes: u64,
+    /// Session output dropped because the kept output was full.
+    pub session_output_dropped: u64,
+    /// Front-end input bytes handed to session streams.
+    pub session_input_bytes: u64,
 }
 
 #[derive(Clone, Copy)]
 struct Stream {
     connection: ConnectionId,
     pid: u64,
+    /// Connected with `CONSOLE_SESSION`: a member of the session.
+    session: bool,
     line: [u8; LINE_BYTES],
     line_len: usize,
     input: [u8; INPUT_BYTES],
@@ -138,10 +165,11 @@ struct Stream {
 }
 
 impl Stream {
-    fn new(connection: ConnectionId, pid: u64) -> Self {
+    fn new(connection: ConnectionId, pid: u64, session: bool) -> Self {
         Self {
             connection,
             pid,
+            session,
             line: [0; LINE_BYTES],
             line_len: 0,
             input: [0; INPUT_BYTES],
@@ -153,8 +181,70 @@ impl Stream {
     }
 }
 
+/// The session's front end and what passes between it and the session's streams.
+#[derive(Clone, Copy)]
+struct Session {
+    front: Option<ConnectionId>,
+    /// The most bytes the front end's waiting `READ_OUTPUT` wants.
+    output_read: Option<u8>,
+    output: [u8; SESSION_OUTPUT_BYTES],
+    output_head: usize,
+    output_len: usize,
+    /// Typed input no session stream has taken yet.
+    input: [u8; INPUT_BYTES],
+    input_len: usize,
+    end_of_input: bool,
+}
+
+impl Session {
+    const fn new() -> Self {
+        Self {
+            front: None,
+            output_read: None,
+            output: [0; SESSION_OUTPUT_BYTES],
+            output_head: 0,
+            output_len: 0,
+            input: [0; INPUT_BYTES],
+            input_len: 0,
+            end_of_input: false,
+        }
+    }
+
+    /// Keeps `bytes`, dropping the oldest output when full; returns how many were dropped.
+    fn keep_output(&mut self, bytes: &[u8]) -> u64 {
+        let mut dropped = 0;
+        for &byte in bytes {
+            if self.output_len == SESSION_OUTPUT_BYTES {
+                self.output_head = (self.output_head + 1) % SESSION_OUTPUT_BYTES;
+                self.output_len -= 1;
+                dropped += 1;
+            }
+            let at = (self.output_head + self.output_len) % SESSION_OUTPUT_BYTES;
+            self.output[at] = byte;
+            self.output_len += 1;
+        }
+        dropped
+    }
+
+    /// Copies up to `out.len()` of the oldest kept output without taking it.
+    fn peek_output(&self, out: &mut [u8]) -> usize {
+        let count = out.len().min(self.output_len);
+        for (i, byte) in out[..count].iter_mut().enumerate() {
+            *byte = self.output[(self.output_head + i) % SESSION_OUTPUT_BYTES];
+        }
+        count
+    }
+
+    fn take_output(&mut self, count: usize) {
+        let count = count.min(self.output_len);
+        self.output_head = (self.output_head + count) % SESSION_OUTPUT_BYTES;
+        self.output_len -= count;
+    }
+}
+
 pub struct ConsoleCore {
     streams: [Option<Stream>; MAX_STREAMS],
+    session: Session,
     stats: ConsoleStats,
     next_read_seq: u64,
 }
@@ -169,6 +259,7 @@ impl ConsoleCore {
     pub const fn new() -> Self {
         Self {
             streams: [None; MAX_STREAMS],
+            session: Session::new(),
             stats: ConsoleStats {
                 streams_opened: 0,
                 streams_closed: 0,
@@ -178,6 +269,11 @@ impl ConsoleCore {
                 refused_streams: 0,
                 input_dropped: 0,
                 serial_input_bytes: 0,
+                front_ends_attached: 0,
+                front_ends_detached: 0,
+                session_output_bytes: 0,
+                session_output_dropped: 0,
+                session_input_bytes: 0,
             },
             next_read_seq: 0,
         }
@@ -189,6 +285,16 @@ impl ConsoleCore {
 
     pub fn open_streams(&self) -> usize {
         self.streams.iter().flatten().count()
+    }
+
+    /// The session's front end, if one is attached.
+    pub const fn front_end(&self) -> Option<ConnectionId> {
+        self.session.front
+    }
+
+    /// Session output kept and not yet taken by a front end.
+    pub const fn kept_output(&self) -> usize {
+        self.session.output_len
     }
 
     /// Handles one record from the port's `RECV`, with no serial input.
@@ -214,7 +320,9 @@ impl ConsoleCore {
         match record.kind {
             RecvKind::Request => self.request(connection, record, device, port, source),
             RecvKind::ClientClosed | RecvKind::ClientExited | RecvKind::ClientRevoked => {
-                if let Some(index) = self.find(connection) {
+                if self.session.front == Some(connection) {
+                    self.detach(port);
+                } else if let Some(index) = self.find(connection) {
                     self.close(index, device);
                 }
             }
@@ -237,13 +345,31 @@ impl ConsoleCore {
             port.disconnect(connection, DISCONNECT_PROTOCOL);
             return;
         };
-        let Some(index) = self.find_or_open(connection, record.envelope.pid) else {
+        if matches!(
+            request,
+            ConsoleRequest::Attach
+                | ConsoleRequest::ReadOutput { .. }
+                | ConsoleRequest::Feed(_)
+                | ConsoleRequest::FeedEnd
+        ) || self.session.front == Some(connection)
+        {
+            self.front_end_request(connection, record.envelope.rights, request, device, port);
+            return;
+        }
+        let session = record.envelope.rights & Rights::CONSOLE_SESSION.bits() != 0;
+        let Some(index) = self.find_or_open(connection, record.envelope.pid, session) else {
             self.stats.refused_streams += 1;
             port.disconnect(connection, DISCONNECT_NO_STREAM);
             return;
         };
         match request {
-            ConsoleRequest::Write(bytes) => self.write(index, bytes.as_slice(), device),
+            ConsoleRequest::Write(bytes) => {
+                self.write(index, bytes.as_slice(), device);
+                if session {
+                    self.stats.session_output_dropped += self.session.keep_output(bytes.as_slice());
+                    self.answer_output_read(port);
+                }
+            }
             ConsoleRequest::Read { max, nonblock } => {
                 // A writer that asks to read shows what it wrote so far, such as a prompt.
                 self.show_partial(index, device);
@@ -258,26 +384,162 @@ impl ConsoleCore {
                     let _ = port.post(connection, &ConsoleEvent::NoInput.encode());
                 }
             }
+            ConsoleRequest::Attach
+            | ConsoleRequest::ReadOutput { .. }
+            | ConsoleRequest::Feed(_)
+            | ConsoleRequest::FeedEnd => {}
+        }
+    }
+
+    /// A request on a front-end connection, or a front-end request on any connection.
+    fn front_end_request(
+        &mut self,
+        connection: ConnectionId,
+        rights: u32,
+        request: ConsoleRequest,
+        device: &mut impl SerialDevice,
+        port: &mut impl StreamPort,
+    ) {
+        let attached = self.session.front == Some(connection);
+        match request {
+            ConsoleRequest::Attach if attached => {}
+            ConsoleRequest::Attach => {
+                if rights & Rights::CONSOLE_ATTACH.bits() == 0 {
+                    self.refuse(port, connection, DISCONNECT_NOT_FRONT_END);
+                    return;
+                }
+                if self.session.front.is_some() {
+                    self.refuse(port, connection, DISCONNECT_FRONT_END_BUSY);
+                    return;
+                }
+                // A connection that already writes as a stream cannot also be the front end.
+                if let Some(index) = self.find(connection) {
+                    self.close(index, device);
+                    self.refuse(port, connection, DISCONNECT_PROTOCOL);
+                    return;
+                }
+                self.session.front = Some(connection);
+                self.stats.front_ends_attached += 1;
+            }
+            ConsoleRequest::ReadOutput { max } if attached => {
+                self.session.output_read = Some(max);
+                self.answer_output_read(port);
+            }
+            ConsoleRequest::Feed(bytes) if attached => {
+                let bytes = bytes.as_slice();
+                let session = &mut self.session;
+                let taken = bytes.len().min(INPUT_BYTES - session.input_len);
+                session.input[session.input_len..session.input_len + taken]
+                    .copy_from_slice(&bytes[..taken]);
+                session.input_len += taken;
+                self.stats.input_dropped += (bytes.len() - taken) as u64;
+                self.pump_session(port);
+            }
+            ConsoleRequest::FeedEnd if attached => {
+                self.session.end_of_input = true;
+                self.pump_session(port);
+            }
+            // The front end writes and reads as no stream.
+            ConsoleRequest::Write(_) | ConsoleRequest::Read { .. } => {
+                self.refuse(port, connection, DISCONNECT_PROTOCOL);
+            }
+            ConsoleRequest::ReadOutput { .. }
+            | ConsoleRequest::Feed(_)
+            | ConsoleRequest::FeedEnd => {
+                self.refuse(port, connection, DISCONNECT_NOT_FRONT_END);
+            }
+        }
+    }
+
+    fn refuse(&mut self, port: &mut impl StreamPort, connection: ConnectionId, reason: u32) {
+        self.stats.protocol_errors += 1;
+        port.disconnect(connection, reason);
+    }
+
+    /// Answers the front end's waiting `READ_OUTPUT` when there is output.
+    fn answer_output_read(&mut self, port: &mut impl StreamPort) {
+        let (Some(front), Some(max)) = (self.session.front, self.session.output_read) else {
+            return;
+        };
+        let mut bytes = [0u8; CONSOLE_FRAME_PAYLOAD];
+        let want = usize::from(max).min(CONSOLE_FRAME_PAYLOAD);
+        let count = self.session.peek_output(&mut bytes[..want]);
+        let Some(output) = ConsoleBytes::new(&bytes[..count]) else {
+            return;
+        };
+        // Full: the read stays waiting and the output kept; the next output tries again.
+        if port
+            .post(front, &ConsoleEvent::Output(output).encode())
+            .is_ok()
+        {
+            self.session.take_output(count);
+            self.session.output_read = None;
+            self.stats.session_output_bytes += count as u64;
+        }
+    }
+
+    /// Hands the front end's input to the session's waiting `READ`s, oldest first.
+    fn pump_session(&mut self, port: &mut impl StreamPort) {
+        while let Some(index) = self.oldest_reader(true) {
+            if !self.answer_read(index, port, &mut NoSerialInput) {
+                break;
+            }
+        }
+    }
+
+    /// The front end went: every open session stream reads an end of input (a hang-up), and
+    /// what the session kept is dropped, so the next front end starts on a fresh shell.
+    fn detach(&mut self, port: &mut impl StreamPort) {
+        self.session = Session::new();
+        self.stats.front_ends_detached += 1;
+        for index in 0..MAX_STREAMS {
+            let Some(stream) = self.streams[index].as_mut() else {
+                continue;
+            };
+            if stream.session {
+                stream.input_len = 0;
+                stream.end_of_input = true;
+                self.answer_read(index, port, &mut NoSerialInput);
+            }
+        }
+    }
+
+    /// Moves typed input to the session stream at `index`, the session's oldest reader.
+    fn take_session_input(&mut self, index: usize) {
+        let stream = self.streams[index].as_mut().expect("open stream");
+        let session = &mut self.session;
+        if session.input_len > 0 {
+            let count = session.input_len.min(INPUT_BYTES - stream.input_len);
+            stream.input[stream.input_len..stream.input_len + count]
+                .copy_from_slice(&session.input[..count]);
+            stream.input_len += count;
+            session.input.copy_within(count..session.input_len, 0);
+            session.input_len -= count;
+            self.stats.session_input_bytes += count as u64;
+        } else if session.end_of_input {
+            session.end_of_input = false;
+            stream.end_of_input = true;
         }
     }
 
     /// Hands committed serial input to the waiting `READ`s, oldest first, until the input or the
     /// readers run out: what the service does when the kernel signals that input was committed.
     pub fn pump_input(&mut self, port: &mut impl StreamPort, source: &mut impl InputSource) {
-        while let Some(index) = self.oldest_reader() {
+        while let Some(index) = self.oldest_reader(false) {
             if !self.answer_read(index, port, source) {
                 break;
             }
         }
     }
 
-    /// The stream whose `READ` has waited longest, if any is waiting.
-    fn oldest_reader(&self) -> Option<usize> {
+    /// The stream whose `READ` has waited longest, if any is waiting, among the session's
+    /// streams or among the others.
+    fn oldest_reader(&self, session: bool) -> Option<usize> {
         (0..MAX_STREAMS)
             .filter(|&index| {
-                self.streams[index]
-                    .as_ref()
-                    .is_some_and(|stream| stream.pending_read.is_some())
+                self.streams[index].as_ref().is_some_and(|stream| {
+                    stream.pending_read.is_some() && stream.session == session
+                })
             })
             .min_by_key(|&index| self.streams[index].as_ref().map_or(0, |s| s.read_seq))
     }
@@ -357,8 +619,16 @@ impl ConsoleCore {
         if stream.pending_read.is_none() {
             return false;
         }
-        if stream.input_len == 0 && !stream.end_of_input && self.oldest_reader() == Some(index) {
-            self.take_serial_input(index, source);
+        let session = stream.session;
+        if stream.input_len == 0
+            && !stream.end_of_input
+            && self.oldest_reader(session) == Some(index)
+        {
+            if session {
+                self.take_session_input(index);
+            } else {
+                self.take_serial_input(index, source);
+            }
         }
         let stream = self.streams[index].as_mut().expect("open stream");
         let Some(max) = stream.pending_read else {
@@ -455,12 +725,12 @@ impl ConsoleCore {
             .position(|stream| stream.as_ref().is_some_and(|s| s.connection == connection))
     }
 
-    fn find_or_open(&mut self, connection: ConnectionId, pid: u64) -> Option<usize> {
+    fn find_or_open(&mut self, connection: ConnectionId, pid: u64, session: bool) -> Option<usize> {
         if let Some(index) = self.find(connection) {
             return Some(index);
         }
         let index = self.streams.iter().position(Option::is_none)?;
-        self.streams[index] = Some(Stream::new(connection, pid));
+        self.streams[index] = Some(Stream::new(connection, pid, session));
         self.stats.streams_opened += 1;
         Some(index)
     }

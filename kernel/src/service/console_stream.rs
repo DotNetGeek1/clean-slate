@@ -280,7 +280,8 @@ fn take_input(pid: u64, out: &mut [u8]) -> Taken {
                         stream.held_end = true;
                     }
                     Ok(ConsoleEvent::NoInput) => stream.read_pending = false,
-                    Err(_) => return Taken::Gone,
+                    // Only a front end asks for session output (#311).
+                    Ok(ConsoleEvent::Output(_)) | Err(_) => return Taken::Gone,
                 }
                 if let Some(taken) = take_held(stream, out) {
                     return taken;
