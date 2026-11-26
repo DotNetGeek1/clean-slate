@@ -539,9 +539,9 @@ fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopS
         "[CONS] authority granted",
     ] {
         let count = lines(output).filter(|line| line.contains(prefix)).count();
-        let want = if prefix.starts_with("[GFX ]") {
-            3
-        } else if prefix.starts_with("[CONS]") {
+        // Three graphics grants (the compositor's port and its two clients) and three console
+        // grants (the service's port, the app's stream and the serial shell's).
+        let want = if prefix.starts_with("[GFX ]") || prefix.starts_with("[CONS]") {
             3
         } else {
             1
