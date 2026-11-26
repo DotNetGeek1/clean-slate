@@ -153,6 +153,11 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
         Via("capability/network.rs", "grant_entitlement_in"),
     ),
     (
+        "capability/console.rs",
+        "reissue_kernel_console_clients",
+        Via("capability/console.rs", "reissue_clients_in"),
+    ),
+    (
         "capability/network.rs",
         "on_network_instance_registered",
         Via("capability/network.rs", "reissue_client_capabilities_in"),
