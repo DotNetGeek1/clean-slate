@@ -291,7 +291,11 @@ pub(crate) fn handle_sys_writev(
         linux_fd::write_fd(pid, generation, fd, chunk)
     };
 
-    write_chunked(total_len, fetch, write_chunk)
+    let result = write_chunked(total_len, fetch, write_chunk);
+    // A console stream whose queue was full (#310) waits for room.
+    #[cfg(clean_slate_system_init)]
+    let result = crate::service::console_stream::block_if_full(request, ctx, result);
+    result
 }
 
 /// Copies request bytes `offset..offset + len` of the concatenated `iovecs` into `dst`

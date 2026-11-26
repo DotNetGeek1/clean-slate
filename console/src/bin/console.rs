@@ -117,6 +117,8 @@ pub extern "C" fn _start() -> ! {
                 Err(_) => fail(console, b"[CONS] FAIL port RECV refused"),
             }
         }
+        // Drained: show partial lines, such as a prompt, before sleeping.
+        core.idle(&mut device);
         if work_set
             .wait(&mut Kernel, WAKE_MASK, Wait::FOREVER)
             .is_err()

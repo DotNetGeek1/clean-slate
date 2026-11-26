@@ -71,7 +71,7 @@ pub(crate) const MARKERS: [MarkerStep<'static>; 19] = [
     MarkerStep::Ordered("[SVC ] authority service=20992 "),
     MarkerStep::Ordered("[SVC ] launch service=20992 "),
     MarkerStep::UnorderedGroup(&[
-        "[INIT] service=20736 ready; starting service=21504",
+        "[INIT] service=20736,22016 ready; starting service=21504",
         "[SVC ] authority service=21504 ",
         "[SVC ] launch service=21504 ",
         "[SVC ] ready service=21504 ",
@@ -825,10 +825,27 @@ fn check_shell(
     ready: &str,
 ) -> Result<(), String> {
     let expected_audit = format!(
-        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
+        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
     );
     if audit != expected_audit {
         return Err(format!("shell authority {audit:?}"));
+    }
+    // The console port's client capability routes the shell's console fds through the console
+    // service (#310): granted to the shell's pid before its launch audit.
+    let connect = only_line(
+        output,
+        &format!("[CONS] authority granted pid={pid} port={CONSOLE_SERVICE}:"),
+    )?;
+    if !connect.ends_with(" rights=connect") {
+        return Err(format!("shell console client grant {connect:?}"));
+    }
+    match (output.find(connect), output.find(audit)) {
+        (Some(granted_at), Some(audit_at)) if granted_at < audit_at => {}
+        _ => {
+            return Err(format!(
+                "shell console client granted after its launch audit: {connect:?}"
+            ))
+        }
     }
     let process = only_line(output, "[SVC ] shell process ")?;
     let expected_process = format!(
@@ -851,9 +868,9 @@ mod tests {
         format!(
             "[SVC ] declared service=20736\n\
              [SVC ] declared service=20992\n\
+             [SVC ] declared service=22016\n\
              [SVC ] declared service=21504\n\
              [SVC ] declared service=21760\n\
-             [SVC ] declared service=22016\n\
              [KERN] serial console input on vector=49\n\
              [KERN] boot profile=base\n\
              [KERN] init launched pid=3 slot=0 declared-services=5\n\
@@ -866,6 +883,12 @@ mod tests {
              [IPC ] console pid=3: [INIT] starting service=20736\n\
              [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20736 pid=4 gen=1\n\
+             [IPC ] console pid=3: [INIT] starting service=22016\n\
+             [CONS] authority granted pid=8 port=22016:8 rights=serve registered=1 device=write\n\
+             {console_authority}\n\
+             [SVC ] launch service=22016 pid=8 gen=1\n\
+             [SVC ] ready service=22016 pid=8 gen=1 source=live-instance kernel-observed ports=1 port-connections=0 work-sets=1 service-reported detail=0x0\n\
+             [IPC ] console pid=3: [INIT] service=22016 ready gen=1\n\
              [IPC ] console pid=3: [INIT] starting service=21760\n\
              {audit_authority}\n\
              [SVC ] launch service=21760 pid=7 gen=1\n\
@@ -873,24 +896,22 @@ mod tests {
              [IPC ] console pid=7: [ADT ] drained through=60 records=20 lost=40\n\
              [SVC ] ready service=21760 pid=7 gen=1 source=live-instance kernel-observed audit-read-through=60 audit-next=61 audit-dropped=40 service-reported first-drain-records=20\n\
              [IPC ] console pid=3: [INIT] service=21760 ready gen=1\n\
-             [IPC ] console pid=3: [INIT] starting service=22016\n\
-             [CONS] authority granted pid=8 port=22016:8 rights=serve registered=1 device=write\n\
-             {console_authority}\n\
-             [SVC ] launch service=22016 pid=8 gen=1\n\
-             [SVC ] ready service=22016 pid=8 gen=1 source=live-instance kernel-observed ports=1 port-connections=0 work-sets=1 service-reported detail=0x0\n\
-             [IPC ] console pid=3: [INIT] service=22016 ready gen=1\n\
              [SVC ] ready service=20736 pid=4 gen=1 source=live-instance kernel-observed block-write-requests={writes} service-reported formatted={formatted} store-generation=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=20992\n\
              [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20992 pid=5 gen=1\n\
-             [IPC ] console pid=3: [INIT] service=20736 ready; starting service=21504\n\
+             [IPC ] console pid=3: [INIT] service=20736,22016 ready; starting service=21504\n\
              [SVC ] shell process pid=6 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
-             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
+             [CONS] authority granted pid=6 port=22016:8 rights=connect\n\
+             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
              [SVC ] launch service=21504 pid=6 gen=1\n\
              [SVC ] ready service=20992 pid=5 gen=1 source=live-instance kernel-observed raw-backend=virtio service-reported link-up=1\n\
              [IPC ] console pid=3: [INIT] service=20992 ready gen=1\n\
-             \n\n# BusyBox v1.37.0 (2026-09-23 09:18:28 UTC) built-in shell (ash)\n\n\
+             [CON ] pid=6: \n\
+             [CON ] pid=6: \n\
+             [CON ] pid=6: # BusyBox v1.37.0 (2026-09-23 09:18:28 UTC) built-in shell (ash)\n\
+             [CON ] pid=6: \n\
              [SVC ] ready service=21504 pid=6 gen=1 source=live-instance kernel-observed first-console-input-wait\n\
              [IPC ] console pid=3: [INIT] service=21504 ready gen=1\n\
              [IPC ] console pid=3: [INIT] boot settled running=5 down=0; waiting, no deadline\n\

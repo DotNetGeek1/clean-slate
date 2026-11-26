@@ -9,7 +9,9 @@ use super::line_discipline::EchoSink;
 use super::uart::{self, UartIo, IER_RECEIVE, LSR_ABSENT, LSR_CLEARED_ON_READ};
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::port::{port_in, port_out};
-use crate::diagnostics::serial::{serial_write_bytes, COM1};
+#[cfg(not(clean_slate_system_init))]
+use crate::diagnostics::serial::serial_write_bytes;
+use crate::diagnostics::serial::COM1;
 use crate::interrupt::irq::{allocate_device_vector, release_device_vector, route_isa_irq};
 
 const RBR: u16 = COM1;
@@ -37,7 +39,16 @@ pub(crate) fn note_transmit_line_status(lsr: u8) {
 struct Com1;
 
 impl EchoSink for Com1 {
+    /// In the system image the echo is console-device text (#310): it continues the prompt
+    /// line the console service left open and is tagged `[CON ] ` like every other console
+    /// line, so typed text can never pass for a kernel or init line.
     fn echo(&mut self, bytes: &[u8]) {
+        #[cfg(clean_slate_system_init)]
+        crate::diagnostics::serial::serial_write_console_device(
+            crate::diagnostics::serial::ConsoleWriter::Echo,
+            bytes,
+        );
+        #[cfg(not(clean_slate_system_init))]
         serial_write_bytes(bytes);
     }
 }

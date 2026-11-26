@@ -33,6 +33,8 @@ use crate::{
 pub(crate) const SHELL_SERVICE: u32 = 0x5400;
 /// ash's prompt for uid 0.
 pub(crate) const PROMPT: &str = "# ";
+/// How a line a process wrote to its console fds starts on serial (#310), before its pid.
+pub(crate) const CONSOLE_LINE_PREFIX: &str = "[CON ] pid=";
 /// The applets the rootfs links in `/bin` (`fixtures/busybox/frozen/rootfs.toml`). `ls` prints
 /// one per line when stdout is not a terminal, in directory order: this BusyBox does not sort.
 const BIN_ENTRIES: [&str; 15] = [
@@ -69,6 +71,10 @@ enum Expect {
     /// The shell exits with status 0; a new instance one generation on is launched, prints a
     /// prompt and blocks reading stdin.
     Relaunch,
+    /// As `Lines`, where the line is a lane marker the shell must not be able to forge (#310):
+    /// it is the shell's output, so it must reach serial labeled and tagged, and no serial line
+    /// may start with it.
+    Forged(&'static str),
     /// As `Lines`, and the fixture peer reports having served at least `served` while the step
     /// ran: the lines can only come from a real exchange with it.
     Network {
@@ -110,7 +116,7 @@ struct Step {
 
 /// The script. Every expected line differs from the command that produces it, so the echo of
 /// a command cannot satisfy its own step.
-const STEPS: [Step; 10] = [
+const STEPS: [Step; 11] = [
     // The leading bytes are `test-system`'s fault bytes (Ctrl-\, Ctrl-], Ctrl-^, Ctrl-_). This
     // default image has no hook, so they must be four dropped control bytes and nothing else
     // (see `validate`).
@@ -195,7 +201,16 @@ const STEPS: [Step; 10] = [
             },
         },
     },
+    // The M4 gate's own pass marker, printed at the start of a line, as `marker_spec` reads it.
+    Step {
+        name: "forged marker",
+        send: b"printf '\\n[M4  ] PASS\\n'\r",
+        expect: Expect::Forged(FORGED_MARKER),
+    },
 ];
+
+/// A lane marker the forge step prints (`[M4  ] PASS`, the M4 gate's).
+const FORGED_MARKER: &str = "[M4  ] PASS";
 
 /// The `wget` step's one `GET /`; no other step talks HTTP.
 const SHELL_HTTP_REQUESTS: u32 = 1;
@@ -228,28 +243,31 @@ pub(crate) fn only_kernel_line<'a>(segment: &'a str, prefix: &str) -> Result<&'a
     Ok(line)
 }
 
-/// Byte offset just past `needle` in `segment`, from `from` on.
-fn offset_after(segment: &str, from: usize, needle: &str) -> Option<usize> {
-    segment[from..]
-        .find(needle)
-        .map(|at| from + at + needle.len())
+/// What a process wrote, from its console line `[CON ] pid=N: text` (#310): the console
+/// service labels every line of a Linux process's console fds with its pid, and the kernel tags
+/// it. `None` for any other line: kernel lines, which are printed between the writes of the
+/// processes a command runs, and the echo of typed input, which is tagged but not labeled.
+pub(crate) fn console_text(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix(CONSOLE_LINE_PREFIX)?;
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    rest[digits..].strip_prefix(": ")
 }
 
-/// A kernel log line (`[TAG ] ...`) or a blank one. Kernel lines are printed between the
-/// writes of the processes a command runs, so they are not part of any command's output.
-fn is_interleaved(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    line.is_empty() || (bytes.len() > 6 && bytes[0] == b'[' && bytes[5] == b']' && bytes[6] == b' ')
-}
-
-/// The finished lines of shell output in `segment`, each with the offset just past its newline.
+/// The finished, non-blank lines of process output in `segment`, each with the offset just
+/// past its newline.
 fn output_lines(segment: &str) -> Vec<(usize, &str)> {
     let mut found = Vec::new();
     let mut at = 0;
     for line in segment.split_inclusive('\n') {
         at += line.len();
-        let text = line.trim_end_matches('\n').trim_end_matches('\r');
-        if line.ends_with('\n') && !is_interleaved(text) {
+        if !line.ends_with('\n') {
+            continue;
+        }
+        let line = line.trim_end_matches('\n').trim_end_matches('\r');
+        if let Some(text) = console_text(line).filter(|text| !text.is_empty()) {
             found.push((at, text));
         }
     }
@@ -279,24 +297,29 @@ fn line_set_at(segment: &str, expected: &[&str]) -> Option<usize> {
         .map(|window| window[window.len() - 1].0)
 }
 
-/// A prompt at the start of a line after `from`.
+/// A prompt at the start of a process's console line that starts at or after `from` (a line
+/// start); returns the offset just past it. The console service shows a line without a newline
+/// (the prompt) open once it is idle, so the prompt is the end of the transcript so far.
 pub(crate) fn prompt_after(segment: &str, from: usize) -> Option<usize> {
-    let rest = &segment[from..];
-    if rest.starts_with(PROMPT) {
-        return Some(from + PROMPT.len());
+    let mut start = from;
+    for piece in segment[from..].split_inclusive('\n') {
+        if let Some(text) = console_text(piece).filter(|text| text.starts_with(PROMPT)) {
+            return Some(start + (piece.len() - text.len()) + PROMPT.len());
+        }
+        start += piece.len();
     }
-    offset_after(segment, from, &format!("\n{PROMPT}"))
+    None
 }
 
 /// The kernel's authority line for a shell instance must be exactly the row's grants.
 pub(crate) fn expected_authority(pid: u64) -> String {
     format!(
-        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
+        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
     )
 }
 
-/// One shell instance came up in `segment`: authority, launch, the process line, a prompt and
-/// then the kernel's ready report from that pid and generation, and init's announcement.
+/// One shell instance came up in `segment`: authority, launch, the process line, the kernel's
+/// ready report from that pid and generation, init's announcement and a prompt.
 fn check_instance(segment: &str, generation: u64, init_pid: u64) -> Result<Shell, String> {
     let launch = only_kernel_line(segment, &format!("[SVC ] launch service={SHELL_SERVICE} "))?;
     let pid = number(launch, "pid")?;
@@ -328,17 +351,12 @@ fn check_instance(segment: &str, generation: u64, init_pid: u64) -> Result<Shell
             "shell launched as pid={pid} gen={generation} but ready says {ready:?}"
         ));
     }
+    // The shell's console text reaches serial through the console service, after the shell
+    // wrote it: the prompt can follow the kernel's ready report, which comes when the shell
+    // blocks reading stdin.
     let launched_at = segment.find(launch).unwrap_or(0);
-    let ready_at = segment
-        .find(&ready_prefix)
-        .ok_or_else(|| "ready line vanished".to_owned())?;
-    match prompt_after(segment, launched_at) {
-        Some(prompt) if prompt <= ready_at => {}
-        _ => {
-            return Err(format!(
-                "no prompt between launch and ready of gen={generation}"
-            ))
-        }
+    if prompt_after(segment, launched_at).is_none() {
+        return Err(format!("no prompt since the launch of gen={generation}"));
     }
     let announced = format!(
         "[IPC ] console pid={init_pid}: [INIT] service={SHELL_SERVICE} ready gen={generation}"
@@ -407,7 +425,10 @@ fn check_step(
         } => {
             check_lines(segment, want)?;
             for line in absent {
-                if lines(segment).any(|got| got == *line) {
+                if lines(segment)
+                    .filter_map(console_text)
+                    .any(|got| got == *line)
+                {
                     return Err(format!("unexpected line {line:?}"));
                 }
             }
@@ -419,6 +440,13 @@ fn check_step(
             prompt_after(segment, end)
                 .map(|_| shell)
                 .ok_or_else(|| format!("no prompt after {want:?}"))
+        }
+        Expect::Forged(marker) => {
+            check_lines(segment, &[marker])?;
+            if let Some(line) = lines(segment).find(|line| line.starts_with(marker)) {
+                return Err(format!("the shell forged a serial line: {line:?}"));
+            }
+            Ok(shell)
         }
         Expect::TmpWrite { lines: want, bytes } => {
             check_lines(segment, want)?;
@@ -492,6 +520,13 @@ fn validate(segments: &[&str], served: &[Served]) -> Result<Vec<Shell>, String> 
         }
         shell = next;
     }
+    // The step's segment starts on the prompt's line, so only the whole transcript shows how
+    // every line starts.
+    if crate::marker_spec::find_marker(&whole, 0, FORGED_MARKER).is_some() {
+        return Err(format!(
+            "a lane's marker reader accepts the shell's {FORGED_MARKER:?}"
+        ));
+    }
     let launches = kernel_lines(&whole, &format!("[SVC ] launch service={SHELL_SERVICE} ")).count();
     if launches != shells.len() {
         return Err(format!(
@@ -549,7 +584,7 @@ pub(crate) fn run() -> Result<(), XtaskError> {
         .map(|shell| format!("pid={} gen={}", shell.pid, shell.generation))
         .collect();
     println!(
-        "\n[SHL ] PASS the serial-console shell ran echo, ls /bin, a pipeline, a /tmp object write and read and a backspace edit; exit ended it and its successor read /tmp back; Ctrl-D ended that one; init relaunched it each time; the third shell resolved m7.fixture.test and fetched http://m7.fixture.test:4001/ from the fixture peer, which reported serving both: {}",
+        "\n[SHL ] PASS the serial-console shell ran echo, ls /bin, a pipeline, a /tmp object write and read and a backspace edit; exit ended it and its successor read /tmp back; Ctrl-D ended that one; init relaunched it each time; the third shell resolved m7.fixture.test and fetched http://m7.fixture.test:4001/ from the fixture peer, which reported serving both; its printed `[M4  ] PASS` reached serial labeled and tagged, never as a line of its own: {}",
         pids.join(", ")
     );
     Ok(())
@@ -707,19 +742,42 @@ pub(crate) fn qemu_state(child: &mut ReapOnDrop) -> Result<String, XtaskError> {
 mod tests {
     use super::*;
 
+    /// Lines process `pid` wrote, as the console service labels them and the kernel tags them.
+    fn con(pid: u64, lines: &[&str]) -> String {
+        lines
+            .iter()
+            .map(|line| format!("{CONSOLE_LINE_PREFIX}{pid}: {line}\n"))
+            .collect()
+    }
+
+    /// `pid`'s prompt, shown open once the console service is idle.
+    fn prompt(pid: u64) -> String {
+        format!("{CONSOLE_LINE_PREFIX}{pid}: {PROMPT}")
+    }
+
     fn instance(pid: u64, generation: u64, init_pid: u64) -> String {
         format!(
             "{}\n\
              [SVC ] shell process pid={pid} gen={generation} argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
              [SVC ] console input so far lines=0 eofs=0 control-dropped={}\n\
+             [CONS] authority granted pid={pid} port=22016:3 rights=connect\n\
              [SVC ] launch service=21504 pid={pid} gen={generation}\n\
-             \n\n# BusyBox v1.37.0 (2026-09-23 09:18:28 UTC) built-in shell (ash)\n\n\
+             {}\
              [SVC ] ready service=21504 pid={pid} gen={generation} source=live-instance kernel-observed first-console-input-wait\n\
              [IPC ] console pid={init_pid}: [INIT] service=21504 ready gen={generation}\n",
             expected_authority(pid),
             // The fault bytes are typed with the first step, so every later shell has seen
             // them dropped.
-            if generation > 1 { HOOK_BYTES } else { 0 }
+            if generation > 1 { HOOK_BYTES } else { 0 },
+            con(
+                pid,
+                &[
+                    "",
+                    "",
+                    "# BusyBox v1.37.0 (2026-09-23 09:18:28 UTC) built-in shell (ash)",
+                    ""
+                ]
+            ),
         )
     }
 
@@ -729,33 +787,93 @@ mod tests {
              [KERN] boot profile=base\n\
              [KERN] init launched pid=3 slot=0 declared-services=5\n\
              [IPC ] console pid=3: [INIT] boot profile=base\n\
-             [IPC ] console pid=3: [INIT] service=20736 ready; starting service=21504\n{}",
+             [IPC ] console pid=3: [INIT] service=20736,22016 ready; starting service=21504\n{}",
             instance(6, 1, 3)
         )
     }
 
-    /// What a correct guest prints after each step is typed, echo included.
+    /// What a correct guest prints after each step is typed, echo included. The echo of a
+    /// command goes on the prompt's open line, which is where each segment starts.
     fn good_segments() -> Vec<String> {
-        let ls: String = BIN_ENTRIES.iter().map(|name| format!("{name}\n")).collect();
         vec![
             boot(),
-            "echo hel''lo-shell\r\nhello-shell\n# ".to_owned(),
-            format!("ls /bin\r\n{ls}# "),
-            "printf 'pipe-%s\\n' yes no | grep yes\r\n[LNX ] exit pid=7 status=0\npipe-yes\n# "
-                .to_owned(),
-            "printf 'obj-%d\\n' 7 > /tmp/a; cat /tmp/a\r\n[STOR] write object=4980736 bytes=6\nobj-7\n# "
-                .to_owned(),
-            "echo typo\x08 \x08\x08 \x08\x08 \x08\x08 \x08fix''ed\r\nfixed\n# ".to_owned(),
+            format!("echo hel''lo-shell\r\n{}{}", con(6, &["hello-shell"]), prompt(6)),
+            format!("ls /bin\r\n{}{}", con(8, &BIN_ENTRIES), prompt(6)),
+            format!(
+                "printf 'pipe-%s\\n' yes no | grep yes\r\n[LNX ] exit pid=7 status=0\n{}{}",
+                con(8, &["pipe-yes"]),
+                prompt(6)
+            ),
+            format!(
+                "printf 'obj-%d\\n' 7 > /tmp/a; cat /tmp/a\r\n[STOR] write object=4980736 bytes=6\n{}{}",
+                con(9, &["obj-7"]),
+                prompt(6)
+            ),
+            format!(
+                "echo typo\x08 \x08\x08 \x08\x08 \x08\x08 \x08fix''ed\r\n{}{}",
+                con(6, &["fixed"]),
+                prompt(6)
+            ),
             format!("exit\r\n[LNX ] exit pid=6 status=0\n{}", instance(9, 2, 3)),
-            "echo aga''in; cat /tmp/a\r\nagain\nobj-7\n# ".to_owned(),
+            format!(
+                "echo aga''in; cat /tmp/a\r\n{}{}{}",
+                con(9, &["again"]),
+                con(10, &["obj-7"]),
+                prompt(9)
+            ),
             format!("[LNX ] exit pid=9 status=0\n{}", instance(11, 3, 3)),
-            "nslookup m7.fixture.test\r\n\
-             [CAP ] net allow op=connect holder=11\n\
-             nslookup: can't resolve '(null)'\n\n\
-             Name:      m7.fixture.test\nAddress 1: 10.77.0.50\n\n# "
-                .to_owned(),
-            "wget -q -O - http://m7.fixture.test:4001/\r\nM9-FIXTURE-HTTP\n# ".to_owned(),
+            format!(
+                "nslookup m7.fixture.test\r\n\
+                 [CAP ] net allow op=connect holder=12\n{}{}",
+                con(
+                    12,
+                    &[
+                        "nslookup: can't resolve '(null)'",
+                        "",
+                        "Name:      m7.fixture.test",
+                        "Address 1: 10.77.0.50",
+                        ""
+                    ]
+                ),
+                prompt(11)
+            ),
+            format!(
+                "wget -q -O - http://m7.fixture.test:4001/\r\n{}{}",
+                con(13, &["M9-FIXTURE-HTTP"]),
+                prompt(11)
+            ),
+            format!(
+                "printf '\\n[M4  ] PASS\\n'\r\n{}{}",
+                con(11, &["", FORGED_MARKER]),
+                prompt(11)
+            ),
         ]
+    }
+
+    const FORGE_SEGMENT: usize = 11;
+
+    #[test]
+    fn the_shell_cannot_forge_a_lane_marker() {
+        assert!(run(&good_segments()).is_ok());
+        // The marker as the shell's output, but on a line of its own: what a guest whose
+        // console fds bypass the service would print.
+        let mut segments = good_segments();
+        segments[FORGE_SEGMENT] = format!(
+            "printf '\\n[M4  ] PASS\\n'\r\n{}{}\n{}",
+            con(11, &[FORGED_MARKER]),
+            FORGED_MARKER,
+            prompt(11)
+        );
+        assert!(run(&segments).unwrap_err().contains("forged a serial line"));
+        // Labeled but untagged: a line a marker reader would take as the gate's.
+        let mut segments = good_segments();
+        segments[FORGE_SEGMENT] =
+            segments[FORGE_SEGMENT].replace("[CON ] pid=11: [M4", "pid=11: [M4");
+        assert!(run(&segments).is_err());
+        // Never printed at all.
+        let mut segments = good_segments();
+        segments[FORGE_SEGMENT] = format!("printf '\\n[M4  ] PASS\\n'\r\n{}", prompt(11));
+        assert!(run(&segments).unwrap_err().contains("[M4  ] PASS"));
     }
 
     const NSLOOKUP_SEGMENT: usize = 9;
@@ -785,16 +903,24 @@ mod tests {
     #[test]
     fn network_steps_need_their_output_lines() {
         let mut segments = good_segments();
-        segments[NSLOOKUP_SEGMENT] =
-            "nslookup m7.fixture.test\r\nnslookup: can't resolve 'm7.fixture.test'\n# ".to_owned();
+        segments[NSLOOKUP_SEGMENT] = format!(
+            "nslookup m7.fixture.test\r\n{}{}",
+            con(12, &["nslookup: can't resolve 'm7.fixture.test'"]),
+            prompt(11)
+        );
         assert!(run(&segments).unwrap_err().contains("nslookup"));
         let mut segments = good_segments();
         segments[NSLOOKUP_SEGMENT] = segments[NSLOOKUP_SEGMENT].replace("10.77.0.50", "10.77.0.1");
         assert!(run(&segments).is_err());
         let mut segments = good_segments();
-        segments[WGET_SEGMENT] = "wget -q -O - http://m7.fixture.test:4001/\r\n\
-             wget: can't connect to remote host: Permission denied\n# "
-            .to_owned();
+        segments[WGET_SEGMENT] = format!(
+            "wget -q -O - http://m7.fixture.test:4001/\r\n{}{}",
+            con(
+                13,
+                &["wget: can't connect to remote host: Permission denied"]
+            ),
+            prompt(11)
+        );
         assert!(run(&segments).unwrap_err().contains("wget"));
     }
 
@@ -870,51 +996,64 @@ mod tests {
     #[test]
     fn the_echo_of_a_command_is_not_its_output() {
         let mut segments = good_segments();
-        segments[1] = "echo hel''lo-shell\r\n# ".to_owned();
+        segments[1] = format!("echo hel''lo-shell\r\n{}", prompt(6));
         assert!(run(&segments).unwrap_err().contains("hello-shell"));
         let mut segments = good_segments();
-        segments[3] = "printf 'pipe-%s\\n' yes no | grep yes\r\n# ".to_owned();
+        segments[3] = format!("printf 'pipe-%s\\n' yes no | grep yes\r\n{}", prompt(6));
         assert!(run(&segments).is_err());
+        // Typed text is echoed tagged but not labeled: it is never a process's output, even
+        // on a line of its own.
+        let mut segments = good_segments();
+        segments[1] = format!("[CON ] hello-shell\r\n{}", prompt(6));
+        assert!(run(&segments).unwrap_err().contains("hello-shell"));
+        // Nor is untagged text, which no process can write any more.
+        let mut segments = good_segments();
+        segments[1] = format!("echo hel''lo-shell\r\nhello-shell\n{}", prompt(6));
+        assert!(run(&segments).unwrap_err().contains("hello-shell"));
     }
 
     #[test]
     fn output_must_be_followed_by_a_prompt() {
         let mut segments = good_segments();
-        segments[1] = "echo hel''lo-shell\r\nhello-shell\n".to_owned();
+        segments[1] = format!("echo hel''lo-shell\r\n{}", con(6, &["hello-shell"]));
+        assert!(run(&segments).unwrap_err().contains("no prompt"));
+        // A bare `# ` is not the shell's prompt.
+        let mut segments = good_segments();
+        segments[1] = format!("echo hel''lo-shell\r\n{}# ", con(6, &["hello-shell"]));
         assert!(run(&segments).unwrap_err().contains("no prompt"));
     }
 
     #[test]
     fn applets_may_come_in_directory_order() {
         let mut segments = good_segments();
-        let reversed: String = BIN_ENTRIES
-            .iter()
-            .rev()
-            .map(|name| format!("{name}\n"))
-            .collect();
-        segments[2] = format!("ls /bin\r\n[LNX ] personality=x86_64 pid=8\n{reversed}# ");
+        let reversed: Vec<&str> = BIN_ENTRIES.iter().rev().copied().collect();
+        segments[2] = format!(
+            "ls /bin\r\n[LNX ] personality=x86_64 pid=8\n{}{}",
+            con(8, &reversed),
+            prompt(6)
+        );
         assert!(run(&segments).is_ok());
     }
 
     #[test]
     fn a_missing_or_extra_applet_fails() {
         let mut segments = good_segments();
-        segments[2] = segments[2].replace("grep\n", "");
+        segments[2] = segments[2].replace("[CON ] pid=8: grep\n", "");
         assert!(run(&segments).is_err());
         let mut segments = good_segments();
-        segments[2] = segments[2].replace("ls /bin\r\nbusybox\n", "ls /bin\r\nbusybox\nbash\n");
+        segments[2] = segments[2].replace(": busybox\n", ": busybox\n[CON ] pid=8: bash\n");
         assert!(run(&segments).is_err());
         let mut segments = good_segments();
         segments[2] = segments[2]
-            .replace("grep\n", "grep\ngrep\n")
-            .replace("wget\n", "");
+            .replace(": grep\n", ": grep\n[CON ] pid=8: grep\n")
+            .replace("[CON ] pid=8: wget\n", "");
         assert!(run(&segments).is_err());
     }
 
     #[test]
     fn grep_must_filter() {
         let mut segments = good_segments();
-        segments[3] = segments[3].replace("pipe-yes\n", "pipe-yes\npipe-no\n");
+        segments[3] = segments[3].replace(": pipe-yes\n", ": pipe-yes\n[CON ] pid=8: pipe-no\n");
         assert!(run(&segments).unwrap_err().contains("pipe-no"));
     }
 
@@ -934,7 +1073,7 @@ mod tests {
     #[test]
     fn backspace_must_edit_the_line() {
         let mut segments = good_segments();
-        segments[5] = segments[5].replace("\nfixed\n", "\ntypofixed\n");
+        segments[5] = segments[5].replace(": fixed\n", ": typofixed\n");
         assert!(run(&segments).is_err());
     }
 
@@ -952,9 +1091,9 @@ mod tests {
     }
 
     #[test]
-    fn the_new_shell_must_print_a_prompt_before_it_is_ready() {
+    fn the_new_shell_must_print_a_prompt() {
         let mut segments = good_segments();
-        segments[6] = segments[6].replace("# BusyBox", "BusyBox");
+        segments[6] = segments[6].replace(": # BusyBox", ": BusyBox");
         assert!(run(&segments).unwrap_err().contains("no prompt"));
     }
 
@@ -1030,11 +1169,19 @@ mod tests {
     #[test]
     fn every_step_waits_for_its_own_output_only() {
         for step in STEPS {
-            if let Expect::Lines { lines, .. }
-            | Expect::LineSet(lines)
-            | Expect::TmpWrite { lines, .. }
-            | Expect::Network { lines, .. } = step.expect
-            {
+            let forged;
+            let want = match step.expect {
+                Expect::Lines { lines, .. }
+                | Expect::LineSet(lines)
+                | Expect::TmpWrite { lines, .. }
+                | Expect::Network { lines, .. } => Some(lines),
+                Expect::Forged(marker) => {
+                    forged = [marker];
+                    Some(&forged[..])
+                }
+                Expect::Relaunch => None,
+            };
+            if let Some(lines) = want {
                 let typed = String::from_utf8_lossy(step.send);
                 for line in lines {
                     assert!(
@@ -1063,14 +1210,40 @@ mod tests {
 
     #[test]
     fn whole_lines_must_match_exactly_and_adjacently() {
-        assert_eq!(whole_lines_at("a\nb\nc\n", &["b", "c"]), Some(6));
-        assert_eq!(whole_lines_at("a\r\nbb\n", &["b"]), None);
-        assert_eq!(whole_lines_at("b\nx\nc\n", &["b", "c"]), None);
-        assert_eq!(whole_lines_at("b", &["b"]), None, "an unfinished line");
+        let abc = con(4, &["a", "b", "c"]);
+        assert_eq!(whole_lines_at(&abc, &["b", "c"]), Some(abc.len()));
+        assert_eq!(whole_lines_at(&con(4, &["a", "bb"]), &["b"]), None);
+        assert_eq!(whole_lines_at(&con(4, &["b", "x", "c"]), &["b", "c"]), None);
         assert_eq!(
-            whole_lines_at("b\n[LNX ] exit pid=4 status=0\n\nc\n", &["b", "c"]),
-            Some(32)
+            whole_lines_at(&format!("{CONSOLE_LINE_PREFIX}4: b"), &["b"]),
+            None,
+            "an unfinished line"
         );
-        assert_eq!(whole_lines_at("b\n[LNX] x\nc\n", &["b", "c"]), None);
+        let between = format!(
+            "{}[LNX ] exit pid=4 status=0\n{}{}",
+            con(4, &["b"]),
+            con(4, &[""]),
+            con(5, &["c"])
+        );
+        assert_eq!(whole_lines_at(&between, &["b", "c"]), Some(between.len()));
+        assert_eq!(whole_lines_at("b\nc\n", &["b", "c"]), None, "untagged");
+        assert_eq!(
+            whole_lines_at(
+                &format!("{}[CON ] x\n{}", con(4, &["b"]), con(4, &["c"])),
+                &["b", "c"]
+            ),
+            Some(con(4, &["b"]).len() + 9 + con(4, &["c"]).len()),
+            "an echo line between two output lines is not output"
+        );
+    }
+
+    #[test]
+    fn console_text_is_what_follows_a_pid_label() {
+        assert_eq!(console_text("[CON ] pid=6: # ls"), Some("# ls"));
+        assert_eq!(console_text("[CON ] pid=6: "), Some(""));
+        assert_eq!(console_text("[CON ] ls"), None);
+        assert_eq!(console_text("[CON ] pid=: x"), None);
+        assert_eq!(console_text("[M4  ] PASS"), None);
+        assert_eq!(console_text("x [CON ] pid=6: y"), None);
     }
 }

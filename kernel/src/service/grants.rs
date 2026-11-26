@@ -309,8 +309,10 @@ mod tests {
     }
 
     /// The Linux launch path applies its own grants and never builds a native bootstrap page.
+    /// The one post-spawn grant the shell row takes is the console port's client capability,
+    /// which routes its console fds through the console service (#310).
     #[test]
-    fn linux_process_grants_reach_no_native_instance_grant_call() {
+    fn linux_process_grants_reach_only_the_console_client_grant_call() {
         let mut recorder = Recorder::default();
         apply_instance_grants(
             grants_for(SYSTEM_MANIFEST, SYSTEM_SHELL_SERVICE_ID),
@@ -319,7 +321,7 @@ mod tests {
             &mut recorder,
         )
         .unwrap();
-        assert!(recorder.calls.is_empty());
+        assert_eq!(recorder.calls, [Call::ConsoleClient(7)]);
     }
 
     #[test]

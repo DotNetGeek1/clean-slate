@@ -9,7 +9,10 @@
 //! Inside a line, `\r` is dropped and every other control byte but `\t` is written in caret
 //! notation (`^[` for ESC), so a client cannot move the cursor or rewrite what is on the line.
 //! A line longer than [`LINE_BYTES`] is written in pieces, each but the last ending in `\`.
-//! A partial line is written when its writer asks to read (a prompt) and when it closes.
+//! A partial line is written, still open, when the service has drained its port
+//! ([`ConsoleCore::idle`]) and when its writer asks to read, so a prompt shows and the kernel's
+//! echo of what is typed continues it; it is ended when its writer closes. The device starts a
+//! line of its own for every write, so a writer's next text starts a new labeled line.
 //!
 //! Input reaches a stream through [`ConsoleCore::feed_input`] from whichever front end is
 //! attached to it. In this first stage no front end is: the serial line's input still goes to
@@ -47,8 +50,20 @@ pub const DISCONNECT_NO_STREAM: u32 = 2;
 
 /// The serial device the service writes through.
 pub trait SerialDevice {
-    /// Writes one whole line, ending in `\n`.
+    /// Writes one piece of text: a whole line ending in `\n`, or an open partial line. Each
+    /// write starts a line of its own on serial.
     fn write_line(&mut self, line: &[u8]) -> Result<(), u64>;
+}
+
+/// How a written piece of a line ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineEnd {
+    /// The line is complete: `\n`.
+    Newline,
+    /// The line goes on in the next piece: `\` and `\n`.
+    Continues,
+    /// Nothing: the line stays open on serial for the kernel's echo.
+    Open,
 }
 
 /// The service's side of its port.
@@ -181,9 +196,7 @@ impl ConsoleCore {
             ConsoleRequest::Write(bytes) => self.write(index, bytes.as_slice(), device),
             ConsoleRequest::Read { max, nonblock } => {
                 // A writer that asks to read shows what it wrote so far, such as a prompt.
-                if self.streams[index].as_ref().is_some_and(|s| s.line_len > 0) {
-                    self.flush(index, false, device);
-                }
+                self.show_partial(index, device);
                 let stream = self.streams[index].as_mut().expect("open stream");
                 stream.pending_read = Some(max);
                 if !self.answer_read(index, port) && nonblock {
@@ -192,6 +205,20 @@ impl ConsoleCore {
                     let _ = port.post(connection, &ConsoleEvent::NoInput.encode());
                 }
             }
+        }
+    }
+
+    /// Writes every stream's partial line, still open: what the service does once it has
+    /// drained its port, so text without a newline (a prompt) is not held back.
+    pub fn idle(&mut self, device: &mut impl SerialDevice) {
+        for index in 0..MAX_STREAMS {
+            self.show_partial(index, device);
+        }
+    }
+
+    fn show_partial(&mut self, index: usize, device: &mut impl SerialDevice) {
+        if self.streams[index].as_ref().is_some_and(|s| s.line_len > 0) {
+            self.flush(index, LineEnd::Open, device);
         }
     }
 
@@ -257,7 +284,7 @@ impl ConsoleCore {
     fn write(&mut self, index: usize, bytes: &[u8], device: &mut impl SerialDevice) {
         for &byte in bytes {
             match byte {
-                b'\n' => self.flush(index, false, device),
+                b'\n' => self.flush(index, LineEnd::Newline, device),
                 b'\r' => {}
                 b'\t' | 0x20..=0x7e | 0x80..=0xff => self.push(index, &[byte], device),
                 0x7f => self.push(index, b"^?", device),
@@ -269,26 +296,32 @@ impl ConsoleCore {
     fn push(&mut self, index: usize, bytes: &[u8], device: &mut impl SerialDevice) {
         let room = LINE_BYTES - self.streams[index].as_ref().expect("open stream").line_len;
         if bytes.len() > room {
-            self.flush(index, true, device);
+            self.flush(index, LineEnd::Continues, device);
         }
         let stream = self.streams[index].as_mut().expect("open stream");
         stream.line[stream.line_len..stream.line_len + bytes.len()].copy_from_slice(bytes);
         stream.line_len += bytes.len();
     }
 
-    /// Writes the stream's line, if it has one, ending in `\` when it `continues`.
-    fn flush(&mut self, index: usize, continues: bool, device: &mut impl SerialDevice) {
+    /// Writes the stream's line, ending as `end` says.
+    fn flush(&mut self, index: usize, end: LineEnd, device: &mut impl SerialDevice) {
         let stream = self.streams[index].as_mut().expect("open stream");
         let mut out = [0u8; CONSOLE_DEVICE_WRITE_MAX];
         let mut len = label(stream.pid, &mut out);
         out[len..len + stream.line_len].copy_from_slice(&stream.line[..stream.line_len]);
         len += stream.line_len;
-        if continues {
-            out[len] = b'\\';
+        match end {
+            LineEnd::Newline => {}
+            LineEnd::Continues => {
+                out[len] = b'\\';
+                len += 1;
+            }
+            LineEnd::Open => {}
+        }
+        if end != LineEnd::Open {
+            out[len] = b'\n';
             len += 1;
         }
-        out[len] = b'\n';
-        len += 1;
         stream.line_len = 0;
         match device.write_line(&out[..len]) {
             Ok(()) => self.stats.lines_written += 1,
@@ -298,7 +331,7 @@ impl ConsoleCore {
 
     fn close(&mut self, index: usize, device: &mut impl SerialDevice) {
         if self.streams[index].as_ref().is_some_and(|s| s.line_len > 0) {
-            self.flush(index, false, device);
+            self.flush(index, LineEnd::Newline, device);
         }
         self.streams[index] = None;
         self.stats.streams_closed += 1;

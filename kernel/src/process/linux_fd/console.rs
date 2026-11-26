@@ -79,6 +79,14 @@ pub(crate) fn write_console(
     if bytes.is_empty() {
         return Ok(0);
     }
+    // A Linux process holding a console stream capability writes through the console service
+    // (#310), as itself.
+    #[cfg(clean_slate_system_init)]
+    if personality == ExecutionPersonality::LinuxX86_64
+        && crate::service::console_stream::routes(pid)
+    {
+        return crate::service::console_stream::write(pid, bytes);
+    }
     let send_len = core::cmp::min(bytes.len(), IPC_MAX_MESSAGE_BYTES);
     let payload = &bytes[..send_len];
     let resource = ResourceRef::ipc_endpoint(u64::from(sink.endpoint_slot));

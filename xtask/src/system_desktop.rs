@@ -3,7 +3,7 @@
 //! 1. **Desktop.** `opt/clean-slate/desktop=q1` and a modern-only VirtIO-GPU: the kernel declares
 //!    the five base rows and the compositor, desktop shell and app rows, and init launches all
 //!    eight. Each desktop row must hold exactly its manifest grants (the kernel's `[GFX ]`, `[DISP]`,
-//!    `[SEAT]` and, for the app's console stream, `[CONS]` grant lines, then a launch audit that matches the row), report ready from its
+//!    `[SEAT]` and, for the app's and the serial shell's console streams, `[CONS]` grant lines, then a launch audit that matches the row), report ready from its
 //!    launched pid with the bindings the kernel observes, and the compositor must have submitted a
 //!    frame before it reports ready. Init settles with eight rows running and the hooks build
 //!    prints its desktop resource baseline. Then, over COM1 (S6d), the host faults the
@@ -33,7 +33,7 @@ use crate::system_boot::{
     AUDIT_SERVICE, CONSOLE_SERVICE,
 };
 use crate::system_desktop_faults::Step;
-use crate::system_shell::{expected_authority as expected_shell_authority, lines};
+use crate::system_shell::{console_text, expected_authority as expected_shell_authority, lines};
 use crate::{
     run_driven_vm_acceptance, AcceptanceDriver, MarkerSet, MarkerStep, VmLaunchConfig, XtaskError,
 };
@@ -474,7 +474,7 @@ fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopS
         }
         pids[index] = pid;
     }
-    let [_, _, console_service, _, _, compositor, shell, app] = pids;
+    let [_, _, console_service, _, serial_shell, compositor, shell, app] = pids;
     let audit_at = |service: u32| {
         output
             .find(&format!("[SVC ] authority service={service} "))
@@ -520,12 +520,17 @@ fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopS
         audit_at(CONSOLE),
     )?;
     let console_port = format!("{CONSOLE}:{console_port}");
-    let prefix = format!("[CONS] authority granted pid={app} port={console_port} rights=connect");
-    if !grant_line(output, &prefix, "", audit_at(APP))?.is_empty() {
-        return Err(format!(
-            "expected {prefix:?}, got {:?}",
-            only(output, &prefix)?
-        ));
+    // The app's console stream, and the serial shell's, whose console fds go through the
+    // console service.
+    for (pid, service) in [(app, APP), (serial_shell, SHELL)] {
+        let prefix =
+            format!("[CONS] authority granted pid={pid} port={console_port} rights=connect");
+        if !grant_line(output, &prefix, "", audit_at(service))?.is_empty() {
+            return Err(format!(
+                "expected {prefix:?}, got {:?}",
+                only(output, &prefix)?
+            ));
+        }
     }
     for prefix in [
         "[GFX ] authority granted",
@@ -534,10 +539,10 @@ fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopS
         "[CONS] authority granted",
     ] {
         let count = lines(output).filter(|line| line.contains(prefix)).count();
-        let want = if prefix.starts_with("[GFX ]") {
+        // Three graphics grants (the compositor's port and its two clients) and three console
+        // grants (the service's port, the app's stream and the serial shell's).
+        let want = if prefix.starts_with("[GFX ]") || prefix.starts_with("[CONS]") {
             3
-        } else if prefix.starts_with("[CONS]") {
-            2
         } else {
             1
         };
@@ -641,7 +646,10 @@ fn check_desktop_step(
             check_row_fault(segment, before, FAULTED_ROW[step - 1])
         }
         (_, Some(before)) => {
-            if lines(segment).any(|line| line == SHELL_ANSWER) {
+            if lines(segment)
+                .filter_map(console_text)
+                .any(|line| line == SHELL_ANSWER)
+            {
                 Ok(before.clone())
             } else {
                 Err(format!("the serial shell has not printed {SHELL_ANSWER:?}"))
@@ -1130,7 +1138,12 @@ mod tests {
                 "ports=1 port-connections=0 work-sets=1 service-reported detail=0x0",
             ),
             (NETWORK, 3, "", "raw-backend=virtio service-reported link-up=1"),
-            (SHELL, 4, "", "first-console-input-wait"),
+            (
+                SHELL,
+                4,
+                "[CONS] authority granted pid=4 port=22016:9 rights=connect\n",
+                "first-console-input-wait",
+            ),
             (
                 COMPOSITOR,
                 5,

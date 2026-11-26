@@ -1545,6 +1545,23 @@ fn readiness_queries_match_the_operations() {
 }
 
 #[test]
+fn undelivered_requests_count_down_as_the_server_receives_them() {
+    let mut w = World::new(SMALL);
+    let a = w.connect(A);
+    assert_eq!(w.core.undelivered_requests(a.encode()), Ok(0));
+    w.send(A, a, 1).unwrap();
+    w.send(A, a, 2).unwrap();
+    assert_eq!(w.core.undelivered_requests(a.encode()), Ok(2));
+    w.take_effects();
+    w.recv().unwrap();
+    assert_eq!(w.core.undelivered_requests(a.encode()), Ok(1));
+    assert!(w.take_effects().contains(&Effect::WakeSendSpace(w.key)));
+    w.recv().unwrap();
+    assert_eq!(w.core.undelivered_requests(a.encode()), Ok(0));
+    assert_eq!(w.core.undelivered_requests(0), Err(PortError::Invalid));
+}
+
+#[test]
 fn counts_return_to_zero_after_every_role_exits() {
     let mut w = World::new(SMALL);
     let a = w.connect(A);

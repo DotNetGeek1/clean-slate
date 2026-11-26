@@ -405,6 +405,12 @@ pub(crate) fn connection_port_key(connection: ConnectionId) -> Result<PortKey, P
     with_ports(|core, _, _| core.connection_port_key(connection.encode()))
 }
 
+/// The connection's requests its server has not received yet.
+#[cfg(clean_slate_system_init)]
+pub(crate) fn undelivered_requests(connection: ConnectionId) -> Result<u16, PortError> {
+    with_ports(|core, _, _| core.undelivered_requests(connection.encode()))
+}
+
 pub(crate) fn find_handle(
     holder: HolderId,
     class: u64,

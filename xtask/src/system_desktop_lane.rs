@@ -43,7 +43,7 @@ use crate::system_desktop::{
     STORAGE, VIRTIO_GPU_Q1,
 };
 use crate::system_desktop_faults::{desktop_config, Session};
-use crate::system_shell::lines;
+use crate::system_shell::{console_text, lines};
 use crate::{workspace_root, xtask_artifact_root, XtaskError};
 
 const HOOKS_FEATURE: &str = "system-test-hooks";
@@ -530,7 +530,10 @@ fn drive(lane: &mut Lane) -> Result<Vec<Point>, XtaskError> {
     lane.session.type_serial(b"echo hel''lo-desktop\r")?;
     lane.session
         .wait("serial shell", STEP_TIMEOUT, &mut |segment| {
-            if lines(segment).any(|line| line == SHELL_ANSWER) {
+            if lines(segment)
+                .filter_map(console_text)
+                .any(|line| line == SHELL_ANSWER)
+            {
                 Ok(())
             } else {
                 Err(format!("the serial shell has not printed {SHELL_ANSWER:?}"))

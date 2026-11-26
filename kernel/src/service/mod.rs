@@ -10,6 +10,8 @@ pub(crate) mod block_bridge;
 pub(crate) mod capability;
 #[cfg(clean_slate_system_init)]
 pub(crate) mod console_device;
+#[cfg(clean_slate_system_init)]
+pub(crate) mod console_stream;
 pub(crate) mod control;
 #[cfg(clean_slate_desktop)]
 pub(crate) mod desktop_image;

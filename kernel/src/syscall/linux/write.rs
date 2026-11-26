@@ -312,7 +312,7 @@ pub(crate) fn handle_sys_write(
     }
 
     // 2./3./4. bounded copy-in + capability-controlled delivery per chunk.
-    write_chunked(
+    let result = write_chunked(
         count,
         |offset, len, dst| {
             let chunk_ptr = user_ptr.checked_add(offset).ok_or(EFAULT)?;
@@ -330,7 +330,11 @@ pub(crate) fn handle_sys_write(
             crate::service::linux_launch::note_linux_hello_delivered_bytes(sent.min(chunk.len()));
             Ok(sent)
         },
-    )
+    );
+    // A console stream whose queue was full (#310) waits for room.
+    #[cfg(clean_slate_system_init)]
+    let result = crate::service::console_stream::block_if_full(request, ctx, result);
+    result
 }
 
 #[cfg(test)]

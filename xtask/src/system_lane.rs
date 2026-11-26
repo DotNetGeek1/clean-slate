@@ -776,7 +776,9 @@ mod tests {
              {}\n\
              [SVC ] shell process pid={SHELL} gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
              [SVC ] launch service=21504 pid={SHELL} gen=1\n\
-             \n# BusyBox v1.37.0 built-in shell (ash)\n\n\
+             [CON ] pid={SHELL}: \n\
+             [CON ] pid={SHELL}: # BusyBox v1.37.0 built-in shell (ash)\n\
+             [CON ] pid={SHELL}: \n\
              [SVC ] ready service=21504 pid={SHELL} gen=1 source=live-instance kernel-observed first-console-input-wait\n\
              [IPC ] console pid={INIT}: [INIT] service=21504 ready gen=1\n\
              [IPC ] console pid={INIT}: {SETTLED}\n",
@@ -792,15 +794,22 @@ mod tests {
              [PROC] fault rip=0x0000000000000000 cr2=0x0000000000000000 instruction_fetch=1\n\
              [NET ] linux sockets lost count=1 reason=instance-gone\n\
              [CAP ] net client revoked count=2 reason=instance-gone\n\
-             {RESET_ERROR}\n\
+             [CON ] pid=7: {RESET_ERROR}\n\
              [LNX ] exit pid=7 status=1\n\
              [SVC ] reaped service=20992 pid={NET1} residue=0\n\
-             # [IPC ] console pid={INIT}: [SUP ] restart service=20992 attempt=1\n\
+             [CON ] pid={SHELL}: # \n\
+             [IPC ] console pid={INIT}: [SUP ] restart service=20992 attempt=1\n\
              [CAP ] net client reissued holder={SHELL} generation=2\n\
              {}\
              [IPC ] console pid={INIT}: {SETTLED}\n",
             network_instance(NET2, 2)
         )
+    }
+
+    /// The shell's prompt, shown open by the console service and ended by the kernel line
+    /// that follows it.
+    fn prompt_line() -> String {
+        format!("[CON ] pid={SHELL}: # \n")
     }
 
     fn booted() -> State {
@@ -868,7 +877,7 @@ mod tests {
     fn the_blocked_reader_must_wake_with_the_reset_error_and_a_prompt() {
         let error = fault_error(&fault().replace(RESET_ERROR, ""));
         assert!(error.contains("blocked reader was not woken"), "{error}");
-        let error = fault_error(&fault().replace("# [IPC ]", "[IPC ]"));
+        let error = fault_error(&fault().replace(&prompt_line(), ""));
         assert!(error.contains("no prompt"), "{error}");
         let error = fault_error(&format!("{}[LNX ] exit pid={SHELL} status=0\n", fault()));
         assert!(error.contains("shell"), "{error}");
@@ -929,15 +938,20 @@ mod tests {
     #[test]
     fn steps_need_the_fixture_to_have_served_them() {
         let state = booted();
-        let nslookup =
-            "nslookup m7.fixture.test\r\nName:      m7.fixture.test\nAddress 1: 10.77.0.50\n# ";
+        let nslookup = &format!(
+            "nslookup m7.fixture.test\r\n[CON ] pid=7: Name:      m7.fixture.test\n[CON ] pid=7: Address 1: 10.77.0.50\n{}",
+            prompt_line()
+        );
         assert!(check_step(&NSLOOKUP, nslookup, counts(0, 0, 0), counts(1, 0, 0), state).is_ok());
         assert!(
             check_step(&NSLOOKUP, nslookup, counts(1, 0, 0), counts(1, 0, 0), state)
                 .unwrap_err()
                 .contains("fixture peer")
         );
-        let wget = "wget -q -O - http://m7.fixture.test:4001/\r\nM9-FIXTURE-HTTP\n# ";
+        let wget = &format!(
+            "wget -q -O - http://m7.fixture.test:4001/\r\n[CON ] pid=7: M9-FIXTURE-HTTP\n{}",
+            prompt_line()
+        );
         assert!(check_step(&WGET, wget, counts(1, 0, 0), counts(2, 1, 0), state).is_ok());
         assert!(check_step(&WGET, wget, counts(1, 0, 0), counts(2, 0, 0), state).is_err());
         assert!(check_step(&WGET, wget, counts(1, 0, 0), counts(2, 2, 0), state).is_err());
@@ -989,7 +1003,7 @@ mod tests {
         assert!(check_step(held, typed, counts(2, 1, 0), unheard, state)
             .unwrap_err()
             .contains("has not received"));
-        let prompted = format!("{typed}wget: bad address\n# ");
+        let prompted = format!("{typed}[CON ] pid=7: wget: bad address\n{}", prompt_line());
         assert!(
             check_step(held, &prompted, counts(2, 1, 0), counts(3, 1, 1), state)
                 .unwrap_err()
@@ -1010,7 +1024,8 @@ mod tests {
             text += &format!("[IPC ] console pid={AUDIT}: [ADT ] #{seq} {SHELL} noright audit\n");
         }
         text += &format!(
-            "# [IPC ] console pid={AUDIT}: [ADT ] drained through=302 records=40 lost=104\n"
+            "{}[IPC ] console pid={AUDIT}: [ADT ] drained through=302 records=40 lost=104\n",
+            prompt_line()
         );
         text
     }
@@ -1050,8 +1065,11 @@ mod tests {
             "lost first=300 missing=5",
         ] {
             let text = flood().replace(
-                "# [IPC ]",
-                &format!("[IPC ] console pid={AUDIT}: [ADT ] {extra}\n# [IPC ]"),
+                &prompt_line(),
+                &format!(
+                    "[IPC ] console pid={AUDIT}: [ADT ] {extra}\n{}",
+                    prompt_line()
+                ),
             );
             assert!(flood_error(&text).contains("flood's sequences"), "{extra}");
         }
