@@ -63,11 +63,14 @@ pub use pixel::{div255, over, BufferLayout, ColorSpace, PixelFormat};
 pub use protocol::{
     negotiate, DecodeError, DisconnectReason, Event, Features, FrameHeader, ProtocolError,
     ProtocolVersion, Request, Tagged, BODY_BYTES, BODY_OFFSET, FRAME_BYTES, HEADER_BYTES,
-    M10_SERVER_FEATURES, PROTOCOL_MAJOR, PROTOCOL_MINOR, SERVER_VERSION,
+    M10_SERVER_FEATURES, PROTOCOL_MAJOR, PROTOCOL_MINOR, SERVER_VERSION, SHELL_SERVER_FEATURES,
 };
-pub use raw_input::{RawInputDecodeError, RawInputKind, RawInputRecord, RAW_INPUT_RECORD_BYTES};
+pub use raw_input::{
+    scale_abs_to_output, RawInputDecodeError, RawInputKind, RawInputRecord, ABS_POINTER_MAX,
+    RAW_INPUT_RECORD_BYTES,
+};
 pub use role::{Layer, SurfaceRole};
-pub use window::{DecorationMode, ResizeEdges, WindowStates, WindowTitle};
+pub use window::{DecorationMode, ResizeEdges, WindowHandle, WindowStates, WindowTitle};
 
 #[cfg(test)]
 mod integration_tests {

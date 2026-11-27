@@ -117,6 +117,10 @@ pub(crate) struct HeldAuthority {
     pub(crate) console_device: usize,
     /// Every other console-class record (a client's `CONSOLE_CONNECT`).
     pub(crate) console_client: usize,
+    /// Launcher-class records with `LAUNCH_SERVE` (init's launcher port, #237).
+    pub(crate) launcher_serve: usize,
+    /// Every other launcher-class record (the desktop shell's `LAUNCH_CONNECT`).
+    pub(crate) launcher_client: usize,
     /// Capability-space records of any other kind. A console grant also records one IPC
     /// endpoint capability there; those are counted as `console_records`.
     pub(crate) console_records: usize,
@@ -201,7 +205,8 @@ impl fmt::Display for OutsideCapabilitySpace {
 
 #[cfg(clean_slate_system_init)]
 impl HeldAuthority {
-    /// What init must hold: one lifecycle-control and one console capability, nothing else.
+    /// What init must hold: one lifecycle-control and one console capability and the launcher
+    /// port it serves (#237), nothing else.
     pub(crate) const INIT: Self = Self {
         lifecycle_control: 1,
         console: 1,
@@ -220,13 +225,15 @@ impl HeldAuthority {
         console_serve: 0,
         console_device: 0,
         console_client: 0,
+        launcher_serve: 1,
+        launcher_client: 0,
         console_records: 1,
         other: 0,
         revoked_records: 0,
         slot_allowance: 0,
         outside: OutsideCapabilitySpace {
             owned_endpoints: 0,
-            ports_served: 0,
+            ports_served: 1,
             port_connections: 0,
             display_presenter: 0,
             input_consumer: 0,
@@ -273,6 +280,7 @@ impl HeldAuthority {
             console_client: held(Grant::ConsoleClient)
                 + held(Grant::ConsoleSession)
                 + held(Grant::ConsoleFrontEnd),
+            launcher_client: held(Grant::LauncherClient),
             outside: OutsideCapabilitySpace {
                 ports_served: held(Grant::GraphicsPort) + held(Grant::ConsoleService),
                 raw_network_link: held(Grant::NetworkService),
@@ -353,6 +361,10 @@ impl HeldAuthority {
                         &mut held.console_device
                     }
                     ResourceClass::Console => &mut held.console_client,
+                    ResourceClass::Launcher if record.rights.contains(Rights::LAUNCH_SERVE) => {
+                        &mut held.launcher_serve
+                    }
+                    ResourceClass::Launcher => &mut held.launcher_client,
                     _ => &mut held.other,
                 };
                 *count += 1;
@@ -369,7 +381,7 @@ impl fmt::Display for HeldAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "lifecycle-control={} console={} block-device={} object-service={} network={} net-client={} net-client-entitlement={} tmp-objects={} gfx-serve={} gfx-shell={} gfx-client={} display={} input={} audit-read={} con-serve={} con-device={} con-client={} other={} revoked={} allowance={} {}",
+            "lifecycle-control={} console={} block-device={} object-service={} network={} net-client={} net-client-entitlement={} tmp-objects={} gfx-serve={} gfx-shell={} gfx-client={} display={} input={} audit-read={} con-serve={} con-device={} con-client={} launch-serve={} launch-client={} other={} revoked={} allowance={} {}",
             self.lifecycle_control,
             self.console,
             self.block_device,
@@ -387,6 +399,8 @@ impl fmt::Display for HeldAuthority {
             self.console_serve,
             self.console_device,
             self.console_client,
+            self.launcher_serve,
+            self.launcher_client,
             self.other + self.console_records.saturating_sub(self.console),
             self.revoked_records,
             self.slot_allowance,
@@ -535,15 +549,18 @@ pub(crate) fn launch_init(
                 .grant_console_capability_for_pid(pid)?;
             let lifecycle_capability = unsafe { super::service_lifecycle_controller_mut() }
                 .grant_lifecycle_control_capability(pid, manifest.iter().map(|spec| &spec.id))?;
+            let launcher_capability = grant_launcher_serve(pid)?;
             Ok(InitBootstrap {
                 self_pid: pid,
                 console_capability,
                 lifecycle_capability,
                 desktop_mode,
+                launcher_capability,
             })
         })?;
     let pid = spawned.pid;
     INIT_PID.store(pid, Ordering::Release);
+    register_launcher_port(pid)?;
     kernel_log_fmt(format_args!(
         "[KERN] init launched pid={pid} slot={INIT_SCHEDULER_SLOT} declared-services={}\n",
         manifest.len()
@@ -551,11 +568,11 @@ pub(crate) fn launch_init(
     let held = HeldAuthority::of(pid);
     let matches = held == HeldAuthority::INIT;
     kernel_log_fmt(format_args!(
-        "[KERN] init authority pid={pid} {held} expected-only-lifecycle-and-console={}\n",
+        "[KERN] init authority pid={pid} {held} expected-only-lifecycle-console-launcher={}\n",
         u8::from(matches)
     ));
     if !matches {
-        return Err("init holds authority beyond lifecycle control and the console");
+        return Err("init holds authority beyond lifecycle control, the console and the launcher");
     }
     let scope_matches = init_lifecycle_scope_is(pid, manifest);
     kernel_log_fmt(format_args!(
@@ -567,6 +584,41 @@ pub(crate) fn launch_init(
         return Err("init's lifecycle control scope is not its manifest rows");
     }
     Ok(pid)
+}
+
+/// #237: init's `LAUNCH_SERVE` on the launcher port, written into its bootstrap page before
+/// the port is registered: the process is not in the registry yet, and the port needs the
+/// server's instance generation.
+#[cfg(clean_slate_system_init)]
+fn grant_launcher_serve(pid: u64) -> Result<u64, &'static str> {
+    use crate::capability::launcher::{grant_launcher_port, LAUNCHER_SERVE_RIGHTS};
+    use clean_slate_capability::HolderId;
+
+    grant_launcher_port(HolderId(pid), LAUNCHER_SERVE_RIGHTS)
+        .map_err(|_| "init's launcher serve capability was refused")
+}
+
+/// #237: registers the launcher port with init as its server. Runs once init is spawned and
+/// before the scheduler starts, so init never runs without its port. Init's death is fatal,
+/// so the port lives as long as the system does.
+#[cfg(clean_slate_system_init)]
+fn register_launcher_port(pid: u64) -> Result<(), &'static str> {
+    use crate::capability::launcher::LAUNCHER_PORT_PARAMS;
+    use clean_slate_capability::{HolderId, ResourceRef};
+
+    let generation = crate::process::live_instance_generation(pid)
+        .ok_or("init has no instance generation for its launcher port")?;
+    crate::service::port::register_port(
+        ResourceRef::launcher_port(),
+        HolderId(pid),
+        generation,
+        LAUNCHER_PORT_PARAMS,
+    )
+    .map_err(|_| "the launcher port registration was refused")?;
+    kernel_log_fmt(format_args!(
+        "[KERN] launcher port registered for init pid={pid} rights=serve\n"
+    ));
+    Ok(())
 }
 
 /// #220: init's lifecycle-control capability covers exactly its manifest's services.
@@ -584,8 +636,8 @@ fn init_lifecycle_scope_is(
     scope.services().len() == manifest.len() && manifest.iter().all(|spec| scope.covers(spec.id))
 }
 
-/// Idle halts in a row, while init waits in `LIFECYCLE_WAIT` with no deadline, before the
-/// kernel reports that the idle thread runs once boot has settled.
+/// Idle halts in a row, while init waits with no deadline, before the kernel reports that the
+/// idle thread runs once boot has settled.
 #[cfg(clean_slate_system_init)]
 const IDLE_EVIDENCE_HALTS: u64 = 16;
 
@@ -596,14 +648,21 @@ static IDLE_HALTS_WHILE_INIT_WAITS: AtomicU64 = AtomicU64::new(0);
 static INIT_WAITS_WITHOUT_DEADLINE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// Called by every `LIFECYCLE_WAIT` readiness check. Init blocking with no deadline means it
-/// has nothing to do until the kernel has a message for it.
+/// Called by every `LIFECYCLE_WAIT` readiness check.
 #[cfg(clean_slate_system_init)]
 pub(crate) fn observe_lifecycle_wait(caller_pid: u64, deadline_ns: Option<u64>, blocks: bool) {
+    observe_init_wait(caller_pid, deadline_ns.is_none(), blocks);
+}
+
+/// Called by every `LIFECYCLE_WAIT` and `WORK_SET` `WAIT` readiness check (#237: init sleeps
+/// in its work set, which its lifecycle messages and launcher requests both wake). Init
+/// blocking with no deadline means it has nothing to do until one of them arrives.
+#[cfg(clean_slate_system_init)]
+pub(crate) fn observe_init_wait(caller_pid: u64, no_deadline: bool, blocks: bool) {
     if init_pid() != Some(caller_pid) {
         return;
     }
-    let waits = blocks && deadline_ns.is_none();
+    let waits = blocks && no_deadline;
     INIT_WAITS_WITHOUT_DEADLINE.store(waits, Ordering::Relaxed);
     if !waits && IDLE_HALTS_WHILE_INIT_WAITS.load(Ordering::Relaxed) != u64::MAX {
         IDLE_HALTS_WHILE_INIT_WAITS.store(0, Ordering::Relaxed);
@@ -627,7 +686,7 @@ pub(crate) fn on_idle_halt() {
     }
     IDLE_HALTS_WHILE_INIT_WAITS.store(u64::MAX, Ordering::Relaxed);
     kernel_log_fmt(format_args!(
-        "[KERN] idle thread halted {halts} times in a row while init pid={} waited in LIFECYCLE_WAIT with no deadline\n",
+        "[KERN] idle thread halted {halts} times in a row while init pid={} waited with no deadline\n",
         init_pid().unwrap_or(0)
     ));
 }
@@ -840,7 +899,7 @@ mod tests {
         );
         assert_eq!(
             std::format!("{audit}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
         assert_eq!(
             row(STORAGE_SERVICE_ID),
@@ -897,11 +956,11 @@ mod tests {
         );
         assert_eq!(
             std::format!("{shell}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=1 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         assert_eq!(
             std::format!("{without_network}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=1 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         let without_stdin = HeldAuthority::for_grants(
             ServiceImage::LinuxShell,
@@ -951,12 +1010,13 @@ mod tests {
         );
         assert_eq!(
             std::format!("{compositor}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=24 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 audit-read=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=24 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
         assert_eq!(
             row(DESKTOP_SHELL_SERVICE_ID),
             HeldAuthority {
                 graphics_shell: 1,
+                launcher_client: 1,
                 ..console
             }
         );
@@ -1072,10 +1132,10 @@ mod tests {
 
     #[cfg(clean_slate_system_init)]
     #[test]
-    fn init_is_expected_to_hold_lifecycle_control_and_the_console_only() {
+    fn init_is_expected_to_hold_lifecycle_control_the_console_and_the_launcher_only() {
         assert_eq!(
             std::format!("{}", HeldAuthority::INIT),
-            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 launch-serve=1 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
         for held in [
             HeldAuthority {
@@ -1111,7 +1171,7 @@ mod tests {
                 ..HeldAuthority::INIT.outside
             },
             OutsideCapabilitySpace {
-                ports_served: 1,
+                ports_served: 2,
                 ..HeldAuthority::INIT.outside
             },
             OutsideCapabilitySpace {
@@ -1276,6 +1336,8 @@ mod tests {
             console_serve,
             console_device,
             console_client,
+            launcher_serve,
+            launcher_client,
             console_records,
             other,
             revoked_records,
@@ -1344,6 +1406,14 @@ mod tests {
             ),
             (
                 console_client,
+                ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
+            ),
+            (
+                launcher_serve,
+                ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
+            ),
+            (
+                launcher_client,
                 ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
             ),
             (

@@ -12,7 +12,7 @@ use crate::limits::MAX_TITLE_BYTES;
 use crate::mode::{OutputInfo, REFERENCE_MODE};
 use crate::pixel::{BufferLayout, ColorSpace, PixelFormat};
 use crate::role::SurfaceRole;
-use crate::window::{DecorationMode, ResizeEdges, WindowStates, WindowTitle};
+use crate::window::{DecorationMode, ResizeEdges, WindowHandle, WindowStates, WindowTitle};
 
 const TAG: u32 = 0xA5A5_0001;
 
@@ -54,17 +54,18 @@ const _: () = assert!(HEADER_BYTES + BODY_BYTES == FRAME_BYTES);
 const _: () = assert!(16 + DAMAGE_RECTS_PER_FRAME * 8 <= 64);
 const _: () = assert!(16 + REGION_RECTS_PER_FRAME * 16 == 64);
 const _: () = assert!(13 + MAX_TITLE_BYTES <= 64);
-const _: () = assert!(Features::KNOWN == 0x3F);
+const _: () = assert!(Features::KNOWN == 0x7F);
 
 #[test]
 fn feature_bits_are_distinct_powers_of_two_and_or_to_known() {
-    const BITS: [u64; 6] = [
+    const BITS: [u64; 7] = [
         Features::TEXT_INPUT,
         Features::PRESENTATION_DETAIL,
         Features::RELATIVE_POINTER,
         Features::FRACTIONAL_SCALE,
         Features::CLIENT_DECORATIONS,
         Features::SUBSURFACES,
+        Features::WINDOW_LIST,
     ];
     for bit in BITS {
         assert_ne!(bit, 0);
@@ -237,6 +238,9 @@ fn all_requests_round_trip() {
         window: win(1),
         serial: Serial(3),
     });
+    round_trip_request(Request::ActivateWindow {
+        window: WindowHandle(u32::MAX),
+    });
 }
 
 #[test]
@@ -337,6 +341,21 @@ fn all_events_round_trip() {
         usage: KeyUsage(0x2A),
         modifiers: Modifiers::from_bits(Modifiers::CTRL).unwrap(),
     });
+    round_trip_event(Event::WindowAdded {
+        window: WindowHandle(7),
+        pid: u64::MAX,
+    });
+    round_trip_event(Event::WindowTitle {
+        window: WindowHandle(7),
+        title: WindowTitle::from_str_truncating(&"t".repeat(MAX_TITLE_BYTES)),
+    });
+    round_trip_event(Event::WindowRemoved {
+        window: WindowHandle(7),
+    });
+    round_trip_event(Event::WindowFocused {
+        window: Some(WindowHandle(7)),
+    });
+    round_trip_event(Event::WindowFocused { window: None });
 }
 
 /// Hand-derived from §2.3 / §3.3 (surface slot 1 gen 1 → `0x0101`, window slot 2 gen 1 → `0x0102`).
@@ -726,7 +745,7 @@ fn negotiate_matrix() {
         .unwrap()
         .1
         .bits(),
-        0x3F
+        0x7F
     );
     assert!(negotiate(ProtocolVersion { major: 0, minor: 0 }, z, s, z).is_err());
     assert!(negotiate(ProtocolVersion { major: 2, minor: 0 }, z, s, z).is_err());
@@ -949,6 +968,9 @@ fn canonical_request_for_opcode(op: u16) -> [u8; FRAME_BYTES] {
             window: win(1),
             serial: Serial(1),
         },
+        OP_ACTIVATE_WINDOW => Request::ActivateWindow {
+            window: WindowHandle(1),
+        },
         _ => panic!("opcode"),
     };
     req.encode(TAG).unwrap()
@@ -1048,6 +1070,18 @@ fn canonical_event_for_opcode(op: u16) -> [u8; FRAME_BYTES] {
             usage: KeyUsage(0x04),
             modifiers: Modifiers::from_bits(0).unwrap(),
         },
+        OP_WINDOW_ADDED => Event::WindowAdded {
+            window: WindowHandle(1),
+            pid: 0,
+        },
+        OP_WINDOW_TITLE => Event::WindowTitle {
+            window: WindowHandle(1),
+            title: WindowTitle::from_str_truncating(""),
+        },
+        OP_WINDOW_REMOVED => Event::WindowRemoved {
+            window: WindowHandle(1),
+        },
+        OP_WINDOW_FOCUSED => Event::WindowFocused { window: None },
         _ => panic!("opcode"),
     };
     ev.encode(0).unwrap()

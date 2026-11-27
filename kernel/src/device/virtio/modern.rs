@@ -54,8 +54,8 @@ use crate::sched::timeout::{self, CancelOutcome, TimeoutHandle};
 use crate::sched::wait::Deadline;
 use crate::sync::global_cell::GlobalCell;
 
-/// Probe device plus the #114 GPU.
-pub(crate) const MAX_MODERN_DEVICES: usize = 2;
+/// The #114 GPU, the #313 virtio-input keyboard and tablet, and a self-test probe device.
+pub(crate) const MAX_MODERN_DEVICES: usize = 4;
 pub(crate) const MAX_QUEUES_PER_DEVICE: usize = 2;
 /// Bounded read-back of a status-0 write; QEMU resets inside the write.
 const MAX_RESET_READS: usize = 4;
@@ -63,6 +63,9 @@ const MAX_RESET_READS: usize = 4;
 pub(crate) const MAX_CONFIG_GENERATION_ATTEMPTS: u8 = 4;
 /// Every queue shares MSI-X table entry 0; config changes get no vector.
 const MSIX_QUEUE_ENTRY: u16 = 0;
+/// A submit deadline that never times out: for buffers the device holds until it has something
+/// to say, such as a virtio-input event buffer (#313). No W3 timeout is armed for it.
+pub(crate) const NO_DEADLINE: Deadline = Deadline::MonotonicNs(u64::MAX);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct QueueRequest {
@@ -270,7 +273,12 @@ fn slots_mut() -> &'static mut [SlotShared; MAX_MODERN_DEVICES] {
     unsafe { &mut *SLOTS.get() }
 }
 
-const SLOT_HANDLERS: [fn(); MAX_MODERN_DEVICES] = [modern_irq_slot0, modern_irq_slot1];
+const SLOT_HANDLERS: [fn(); MAX_MODERN_DEVICES] = [
+    modern_irq_slot0,
+    modern_irq_slot1,
+    modern_irq_slot2,
+    modern_irq_slot3,
+];
 
 fn modern_irq_slot0() {
     on_device_interrupt(0);
@@ -278,6 +286,14 @@ fn modern_irq_slot0() {
 
 fn modern_irq_slot1() {
     on_device_interrupt(1);
+}
+
+fn modern_irq_slot2() {
+    on_device_interrupt(2);
+}
+
+fn modern_irq_slot3() {
+    on_device_interrupt(3);
 }
 
 /// Interrupt context: count, acknowledge INTx through the ISR, run the sink.
@@ -537,6 +553,22 @@ impl<A: DeviceAccess> ModernTransport<A> {
         }
         self.require_reset(ResetReason::ConfigUnstable);
         Err(TransportError::ConfigUnstable)
+    }
+
+    /// Write one driver-writable config byte (virtio-input `select`/`subsel`, #313), outside
+    /// the generation loop: a device may bump the generation on the write itself (QEMU's
+    /// virtio-input does), so only the reads that follow go through [`Self::read_device_config`].
+    #[cfg(any(test, clean_slate_boot_tail))]
+    pub(crate) fn write_device_config_u8(
+        &mut self,
+        offset: u32,
+        value: u8,
+    ) -> Result<(), TransportError> {
+        self.ensure_ready()?;
+        check_window(self.device_config_length()?, offset, Width::U8).map_err(access_error)?;
+        self.access
+            .write(Window::Device, offset, Width::U8, u32::from(value))
+            .map_err(access_error)
     }
 
     #[cfg(test)]
@@ -880,7 +912,9 @@ impl<A: DeviceAccess> VirtqueueTransport for ModernTransport<A> {
             .check_chain(chain)
             .map_err(queue_error)?;
         let Deadline::MonotonicNs(deadline_ns) = deadline;
-        self.cover_deadline(deadline_ns)?;
+        if deadline != NO_DEADLINE {
+            self.cover_deadline(deadline_ns)?;
+        }
         self.queues[position]
             .submit(chain, deadline_ns)
             .map_err(queue_error)
@@ -958,7 +992,7 @@ impl<A: DeviceAccess> DeviceConfigReader<'_, A> {
             .map_err(access_error)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, clean_slate_boot_tail))]
     pub(crate) fn read_u8(&mut self, offset: u32) -> Result<u8, TransportError> {
         Ok(self.read(offset, Width::U8)? as u8)
     }
@@ -1067,12 +1101,35 @@ impl ModernTransport<MmioAccess> {
     /// record state or wake.
     pub(crate) fn discover(request: &DeviceRequest, sink: fn()) -> Result<Self, TransportError> {
         validate_request(request)?;
-        let device_id = VIRTIO_PCI_MODERN_DEVICE_BASE
-            .checked_add(request.virtio_id)
-            .ok_or(TransportError::InvalidRequest)?;
+        let device_id = modern_device_id(request)?;
         let function = find_single_function(VIRTIO_PCI_VENDOR_ID, device_id)
             .map_err(|_| TransportError::Multiple)?
             .ok_or(TransportError::NotFound)?;
+        Self::discover_function(request, function, sink)
+    }
+
+    /// Every modern-only function for `request.virtio_id` on bus 0, in slot order, for a device
+    /// class a machine can carry several of (virtio-input, #313). Returns how many were stored.
+    #[cfg(any(test, clean_slate_boot_tail))]
+    pub(crate) fn find_functions(
+        request: &DeviceRequest,
+        out: &mut [PciFunction],
+    ) -> Result<usize, TransportError> {
+        let device_id = modern_device_id(request)?;
+        Ok(crate::device::pci::find_functions(
+            VIRTIO_PCI_VENDOR_ID,
+            device_id,
+            out,
+        ))
+    }
+
+    /// [`Self::discover`] for one function found by [`Self::find_functions`].
+    pub(crate) fn discover_function(
+        request: &DeviceRequest,
+        function: PciFunction,
+        sink: fn(),
+    ) -> Result<Self, TransportError> {
+        validate_request(request)?;
         let (vendor, device) = function.vendor_device();
         check_device_identity(vendor, device, revision_id(&function), request.virtio_id)
             .map_err(TransportError::Capability)?;
@@ -1152,6 +1209,12 @@ impl ModernTransport<MmioAccess> {
     pub(crate) fn interrupt_route(&self) -> Option<InterruptRoute> {
         self.pci.as_ref().map(|binding| binding.route)
     }
+}
+
+fn modern_device_id(request: &DeviceRequest) -> Result<u16, TransportError> {
+    VIRTIO_PCI_MODERN_DEVICE_BASE
+        .checked_add(request.virtio_id)
+        .ok_or(TransportError::InvalidRequest)
 }
 
 fn log_layout(function: PciFunction, bars: &Bars, layout: &ModernLayout) {

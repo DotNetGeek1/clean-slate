@@ -246,6 +246,7 @@ mod tests {
                     axis: Axis::Y,
                     value,
                 } => dy += value,
+                InputAction::Abs { .. } => unreachable!("the PS/2 lane sends no absolute motion"),
                 InputAction::Button { button, down } => match button {
                     MouseButton::Left => pressed[0] = down,
                     MouseButton::Right => pressed[1] = down,

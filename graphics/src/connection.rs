@@ -89,8 +89,15 @@ impl ConnectionPhase {
         *self = Self::Closed;
     }
 
-    /// Decodes and gates one raw request frame.
+    /// Decodes and gates one raw request frame, offering [`M10_SERVER_FEATURES`] at `Hello`.
     pub fn admit(&mut self, frame: &[u8]) -> Admission {
+        self.admit_offering(frame, M10_SERVER_FEATURES)
+    }
+
+    /// [`Self::admit`] with the features this connection may negotiate: the compositor offers
+    /// more to a connection whose capability rights allow it (the window list needs
+    /// `GFX_SHELL`).
+    pub fn admit_offering(&mut self, frame: &[u8], offered: Features) -> Admission {
         if self.is_closed() {
             return Admission::Discard;
         }
@@ -119,7 +126,7 @@ impl ConnectionPhase {
         let request = decoded.message;
         match (*self, request) {
             (Self::AwaitingHello, Request::Hello { version, features }) => {
-                match negotiate(version, features, SERVER_VERSION, M10_SERVER_FEATURES) {
+                match negotiate(version, features, SERVER_VERSION, offered) {
                     Ok((version, features)) => {
                         *self = Self::Established { version, features };
                         Admission::Welcome {

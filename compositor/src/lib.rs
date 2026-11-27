@@ -37,6 +37,7 @@ pub mod present;
 pub mod repeat;
 pub mod scene;
 pub mod trace;
+pub mod window_list;
 pub mod wm;
 
 pub use compositor::{

@@ -219,6 +219,22 @@ struct RunOptions {
     bare: bool,
 }
 
+/// #313: QEMU ids of the virtio keyboard and tablet that `run --desktop` and
+/// `test-system-tablet` add (`device_del` and `info qtree` name them).
+pub(crate) const VIRTIO_KEYBOARD_ID: &str = "cs-keyboard";
+pub(crate) const VIRTIO_TABLET_ID: &str = "cs-tablet";
+
+/// A virtio keyboard and tablet. The kernel prefers them to PS/2 for their slots, so the
+/// desktop's pointer follows the host cursor instead of capturing it.
+pub(crate) fn virtio_input_qemu_args() -> Vec<String> {
+    vec![
+        "-device".to_owned(),
+        format!("virtio-keyboard-pci,id={VIRTIO_KEYBOARD_ID}"),
+        "-device".to_owned(),
+        format!("virtio-tablet-pci,id={VIRTIO_TABLET_ID}"),
+    ]
+}
+
 /// The bare desktop's `opt/clean-slate/desktop` (`q0-bare`, `q1-bare`) plus, for Q1, the
 /// VirtIO-GPU device `run --desktop` adds. The desktop lanes that count the compositor, shell and
 /// app rows boot this; [`desktop_qemu_args_with`] gives the default desktop with the terminal.
@@ -292,6 +308,7 @@ fn launch_config(options: RunOptions, disk: PathBuf, fixture_port: Option<u16>) 
             config.vga = Some("std");
         }
         config.extra_args = desktop_qemu_args_with(options.framebuffer, !options.bare);
+        config.extra_args.extend(virtio_input_qemu_args());
     }
     config
 }
@@ -590,7 +607,7 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     check_no_desktop_rows(output, launched)?;
     let authority = only_line(output, "[KERN] init authority pid=")?;
     let expected_authority = format!(
-        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1"
+        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 launch-serve=1 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-console-launcher=1"
     );
     if authority != expected_authority {
         return Err(format!("init authority line {authority:?}"));
@@ -719,7 +736,7 @@ fn check_console_refusal(output: &str, init_pid: u64) -> Result<(), String> {
 /// The audit service's launch audit: `AUDIT_READ` on the log and its console, nothing else.
 pub(crate) fn expected_audit_authority(pid: u64) -> String {
     format!(
-        "[SVC ] authority service={AUDIT_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1"
+        "[SVC ] authority service={AUDIT_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1"
     )
 }
 
@@ -780,7 +797,7 @@ pub(crate) fn check_audit_service(
 /// on the port it registered and `READ` and `WRITE` on the serial console device, nothing else.
 pub(crate) fn expected_console_authority(pid: u64) -> String {
     format!(
-        "[SVC ] authority service={CONSOLE_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=1 con-device=1 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1"
+        "[SVC ] authority service={CONSOLE_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=1 con-device=1 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1"
     )
 }
 
@@ -849,7 +866,7 @@ fn check_shell(
     ready: &str,
 ) -> Result<(), String> {
     let expected_audit = format!(
-        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
+        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=1 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
     );
     if audit != expected_audit {
         return Err(format!("shell authority {audit:?}"));
@@ -898,14 +915,14 @@ mod tests {
              [KERN] serial console input on vector=49\n\
              [KERN] boot profile=base\n\
              [KERN] init launched pid=3 slot=0 declared-services=5\n\
-             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1\n\
+             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 launch-serve=1 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-console-launcher=1\n\
              [IPC ] console pid=3: [INIT] boot profile=base\n\
              [IPC ] console pid=3: [INIT] started pid=3 services=5\n\
              [IPC ] console pid=3: [INIT] SERVICE_READY from init refused: not a service\n\
              [IPC ] console write refused pid=3 handle=0x200000000010000: not the console sink\n\
              [IPC ] console pid=3: [INIT] console write on the lifecycle handle refused: EBADF\n\
              [IPC ] console pid=3: [INIT] starting service=20736\n\
-             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
+             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20736 pid=4 gen=1\n\
              [IPC ] console pid=3: [INIT] starting service=22016\n\
              [CONS] authority granted pid=8 port=22016:8 rights=serve registered=1 device=read|write\n\
@@ -923,12 +940,12 @@ mod tests {
              [SVC ] ready service=20736 pid=4 gen=1 source=live-instance kernel-observed block-write-requests={writes} service-reported formatted={formatted} store-generation=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=20992\n\
-             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
+             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20992 pid=5 gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736,22016 ready; starting service=21504\n\
              [SVC ] shell process pid=6 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
              [CONS] authority granted pid=6 port=22016:8 rights=connect\n\
-             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
+             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=1 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
              [SVC ] launch service=21504 pid=6 gen=1\n\
              [SVC ] ready service=20992 pid=5 gen=1 source=live-instance kernel-observed raw-backend=virtio service-reported link-up=1\n\
              [IPC ] console pid=3: [INIT] service=20992 ready gen=1\n\
@@ -939,7 +956,7 @@ mod tests {
              [SVC ] ready service=21504 pid=6 gen=1 source=live-instance kernel-observed first-console-input-wait\n\
              [IPC ] console pid=3: [INIT] service=21504 ready gen=1\n\
              [IPC ] console pid=3: [INIT] boot settled running=5 down=0; waiting, no deadline\n\
-             [KERN] idle thread halted 16 times in a row while init pid=3 waited in LIFECYCLE_WAIT with no deadline\n",
+             [KERN] idle thread halted 16 times in a row while init pid=3 waited with no deadline\n",
             audit_authority = expected_audit_authority(7),
             console_authority = expected_console_authority(8),
         )
@@ -1243,7 +1260,13 @@ mod tests {
         );
         assert_eq!(virtio.machine_extra, Some("vmport=off"));
         assert_eq!(virtio.vga, None);
-        assert_eq!(virtio.extra_args, desktop_qemu_args_with(false, true));
+        let mut expected = desktop_qemu_args_with(false, true);
+        expected.extend(virtio_input_qemu_args());
+        assert_eq!(virtio.extra_args, expected);
+        assert!(virtio
+            .extra_args
+            .windows(2)
+            .any(|pair| pair == ["-device", "virtio-tablet-pci,id=cs-tablet"]));
         assert!(virtio
             .extra_args
             .windows(2)
@@ -1262,7 +1285,9 @@ mod tests {
             None,
         );
         assert_eq!(framebuffer.vga, Some("std"));
-        assert_eq!(framebuffer.extra_args, desktop_qemu_args_with(true, true));
+        let mut expected = desktop_qemu_args_with(true, true);
+        expected.extend(virtio_input_qemu_args());
+        assert_eq!(framebuffer.extra_args, expected);
         assert!(virtio
             .extra_args
             .iter()
@@ -1274,7 +1299,9 @@ mod tests {
             PathBuf::from("DISK.img"),
             None,
         );
-        assert_eq!(bare.extra_args, desktop_qemu_args(false));
+        let mut expected = desktop_qemu_args(false);
+        expected.extend(virtio_input_qemu_args());
+        assert_eq!(bare.extra_args, expected);
         assert!(bare
             .extra_args
             .iter()

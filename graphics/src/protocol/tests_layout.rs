@@ -63,6 +63,7 @@ fn request_body_layout_tiles_with_spec_fields() {
         (super::OP_BEGIN_MOVE, &[(12, 16)]),
         (super::OP_BEGIN_RESIZE, &[(12, 17)]),
         (super::OP_ACK_CONFIGURE, &[(12, 16)]),
+        (super::OP_ACTIVATE_WINDOW, &[(12, 16)]),
     ];
     for (op, fields) in cases {
         assert_tiles_12_64(fields, &spec_pads(*op, REQUEST_SPECS));
@@ -128,6 +129,11 @@ fn event_body_layout_tiles_with_spec_fields() {
             super::OP_KEY_REPEAT,
             &[(12, 16), (16, 24), (24, 26), (28, 30)],
         ),
+        (super::OP_WINDOW_ADDED, &[(12, 16), (16, 24)]),
+        // WindowTitle: handle, len; the title 24..64 is checked against `len` at decode.
+        (super::OP_WINDOW_TITLE, &[(12, 16), (16, 17), (24, 64)]),
+        (super::OP_WINDOW_REMOVED, &[(12, 16)]),
+        (super::OP_WINDOW_FOCUSED, &[(12, 16)]),
     ];
     for (op, fields) in cases {
         assert_tiles_12_64(fields, &spec_pads(*op, EVENT_SPECS));

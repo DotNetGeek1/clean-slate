@@ -1255,6 +1255,7 @@ version = "0.0.1"
 dependencies = [
  "clean-slate-block",
  "clean-slate-compositor",
+ "clean-slate-desktop-shell",
  "clean-slate-graphics",
  "clean-slate-native-abi",
  "clean-slate-network",

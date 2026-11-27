@@ -1,20 +1,27 @@
 //! #218 S3b userspace init for the default image.
 //!
 //! Starts the services of the manifest the boot profile selects (the kernel declared the same
-//! rows) through [`SystemInit`] and then sleeps in
-//! `LIFECYCLE_WAIT` (21): it wakes only for a lifecycle message or for the next ready deadline
-//! or retry, never on a polling timer. The kernel treats init's death as fatal, so any failure
-//! of the wait or the clock ends in `ud2`.
+//! rows) through [`SystemInit`], and (#237) serves the launcher port the kernel registered for
+//! it. It sleeps in its work set: `LIFECYCLE_WAIT` `BIND_WAKE` sets one bit for each lifecycle
+//! message and the port's wake binding two more for launcher requests and notices, so it wakes
+//! only for one of those or for the next ready deadline or retry, never on a polling timer.
+//! After a wake it drains pending lifecycle messages with non-blocking `LIFECYCLE_WAIT`s, then
+//! the port. The kernel treats init's death as fatal, so any failure of the wait or the clock
+//! ends in `ud2`.
 
 #![no_std]
 #![no_main]
 
 use clean_slate_native_abi::lifecycle::{
-    decode_wait_result, LifecycleWait, LIFECYCLE_WAIT_NO_DEADLINE, SYSCALL_NR_LIFECYCLE_WAIT,
+    decode_wait_result, LifecycleWait, LIFECYCLE_WAIT_OP_BIND_WAKE, LIFECYCLE_WAIT_OP_WAIT,
+    SYSCALL_NR_LIFECYCLE_WAIT,
 };
+use clean_slate_native_abi::port::PORT_FRAME_BYTES;
 use clean_slate_native_abi::service_ready::ServiceReadyResult;
 use clean_slate_native_abi::status::STATUS_EBADF;
+use clean_slate_native_abi::ConnectionId;
 use clean_slate_runtime::console::Console;
+use clean_slate_runtime::port::{Deadline, Server, Wait, WorkSet};
 use clean_slate_runtime::{port, process, Error, Kernel, Syscalls};
 use clean_slate_service_fixtures::init_bootstrap::{
     InitBootstrap, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_TERMINAL,
@@ -25,6 +32,7 @@ const TERMINAL_FRAMEBUFFER: u64 = DESKTOP_MODE_FRAMEBUFFER | DESKTOP_MODE_TERMIN
 const TERMINAL_VIRTIO_GPU: u64 = DESKTOP_MODE_VIRTIO_GPU | DESKTOP_MODE_TERMINAL;
 use clean_slate_service_fixtures::manifest::{manifest_for, SYSTEM_TERMINAL_DESKTOP_MANIFEST};
 use clean_slate_service_lifecycle::ServiceId;
+use clean_slate_supervisor::launcher::{Launcher, LauncherPort, PostRefused};
 use clean_slate_supervisor::{
     DiagnosticSink, SupervisorError, SyscallLifecycleControl, SystemInit, INIT_READY_TIMEOUT_NS,
 };
@@ -35,6 +43,35 @@ const CONSOLE_PROBE: &[u8] = b"[INIT] console probe on a non-console handle\n";
 const SERVICE_SLOTS: usize = 12;
 
 const _: () = assert!(SYSTEM_TERMINAL_DESKTOP_MANIFEST.len() <= SERVICE_SLOTS);
+
+/// Work-set bits: a lifecycle message, a launcher request, a launcher notice.
+const LIFECYCLE_BIT: u32 = 0;
+const LAUNCHER_REQUEST_BIT: u32 = 1;
+const LAUNCHER_NOTICE_BIT: u32 = 2;
+const WAKE_MASK: u32 =
+    (1 << LIFECYCLE_BIT) | (1 << LAUNCHER_REQUEST_BIT) | (1 << LAUNCHER_NOTICE_BIT);
+
+/// Lifecycle messages and launcher records handled per wake at most, so a wake cannot turn
+/// into a loop; anything left keeps its bit set or is found by the next wake.
+const MAX_DRAIN_PER_WAKE: usize = 32;
+
+/// Init's serve handle on the launcher port.
+struct LauncherServer(Server);
+
+impl LauncherPort for LauncherServer {
+    fn post(&mut self, connection: u64, frame: &[u8; PORT_FRAME_BYTES]) -> Result<(), PostRefused> {
+        let connection = ConnectionId::decode(connection).map_err(|_| PostRefused)?;
+        self.0
+            .post(&mut Kernel, connection, frame)
+            .map_err(|_| PostRefused)
+    }
+
+    fn disconnect(&mut self, connection: u64) {
+        if let Ok(connection) = ConnectionId::decode(connection) {
+            let _ = self.0.disconnect(&mut Kernel, connection, 0);
+        }
+    }
+}
 
 struct ConsoleSink {
     console: Console,
@@ -66,24 +103,115 @@ pub extern "C" fn _start() -> ! {
     probe_service_ready_refusal(console);
     probe_console_refusal(console, bootstrap.lifecycle_capability);
 
+    let work_set = WorkSet::create(&mut Kernel)
+        .unwrap_or_else(|_| fail(console, b"[INIT] WORK_SET CREATE failed\n"));
+    bind_lifecycle_wake(console, bootstrap.lifecycle_capability, work_set);
+    let mut server = LauncherServer(Server::from_raw(bootstrap.launcher_capability));
+    if server
+        .0
+        .bind_wake(
+            &mut Kernel,
+            work_set,
+            LAUNCHER_REQUEST_BIT,
+            LAUNCHER_NOTICE_BIT,
+        )
+        .is_err()
+    {
+        fail(console, b"[INIT] launcher port BIND_WAKE failed\n");
+    }
+    let mut launcher = Launcher::new();
+    let _ = console.send(&mut Kernel, b"[INIT] launcher serving\n");
+
     init.boot(now(console));
+    launcher.publish_changes(&init, &mut server);
+    // Set when a drain stopped at its bound with work left: the next wait does not block.
+    let mut more = false;
     loop {
-        let deadline = init
-            .next_deadline()
-            .map_or(LIFECYCLE_WAIT_NO_DEADLINE, |deadline| {
-                // 0 means "no deadline" to the kernel; a due-at-zero deadline is due now anyway.
-                deadline.max(1)
-            });
-        let raw = Kernel.syscall(
-            SYSCALL_NR_LIFECYCLE_WAIT,
-            [bootstrap.lifecycle_capability, deadline, 0, 0, 0, 0],
-        );
-        let pending = match decode_wait_result(raw) {
-            LifecycleWait::Pending { service } => Some(ServiceId(service)),
-            LifecycleWait::TimedOut => None,
-            LifecycleWait::Failed(_) => fail(console, b"[INIT] LIFECYCLE_WAIT failed\n"),
+        let deadline = if more {
+            Deadline::at(1)
+        } else {
+            init.next_deadline().map_or(Deadline::NEVER, Deadline::at)
         };
-        init.on_wake(now(console), pending);
+        more = false;
+        let woke = match work_set.wait(&mut Kernel, WAKE_MASK, Wait::Until(deadline)) {
+            Ok(bits) => bits,
+            // After a bounded drain the leftovers' bits were cleared, so look again anyway.
+            Err(Error::TimedOut) if deadline == Deadline::at(1) => WAKE_MASK,
+            Err(Error::TimedOut) => 0,
+            Err(_) => fail(console, b"[INIT] WORK_SET WAIT failed\n"),
+        };
+        let at = now(console);
+        let mut handled = false;
+        if woke & (1 << LIFECYCLE_BIT) != 0 {
+            more = true;
+            for _ in 0..MAX_DRAIN_PER_WAKE {
+                let Some(service) = pending_lifecycle(console, bootstrap.lifecycle_capability)
+                else {
+                    more = false;
+                    break;
+                };
+                init.on_wake(at, Some(service));
+                handled = true;
+            }
+        }
+        if !handled {
+            init.on_wake(at, None);
+        }
+        if woke & ((1 << LAUNCHER_REQUEST_BIT) | (1 << LAUNCHER_NOTICE_BIT)) != 0 {
+            let mut drained = false;
+            for _ in 0..MAX_DRAIN_PER_WAKE {
+                let record = match server.0.recv(&mut Kernel) {
+                    Ok(Some(record)) => record,
+                    Ok(None) => {
+                        drained = true;
+                        break;
+                    }
+                    Err(_) => fail(console, b"[INIT] launcher port RECV failed\n"),
+                };
+                launcher.on_record(
+                    &mut init,
+                    &mut server,
+                    at,
+                    record.kind,
+                    record.envelope.connection.encode(),
+                    &record.frame,
+                );
+            }
+            more |= !drained;
+        }
+        launcher.publish_changes(&init, &mut server);
+    }
+}
+
+/// From here on each lifecycle message sets [`LIFECYCLE_BIT`].
+fn bind_lifecycle_wake(console: Console, capability: u64, work_set: WorkSet) {
+    let raw = Kernel.syscall(
+        SYSCALL_NR_LIFECYCLE_WAIT,
+        [
+            capability,
+            work_set.raw(),
+            LIFECYCLE_WAIT_OP_BIND_WAKE,
+            u64::from(LIFECYCLE_BIT),
+            0,
+            0,
+        ],
+    );
+    if raw != 0 {
+        fail(console, b"[INIT] LIFECYCLE_WAIT BIND_WAKE failed\n");
+    }
+}
+
+/// A service with a pending lifecycle message, without blocking: a deadline that has passed
+/// makes `LIFECYCLE_WAIT` a check.
+fn pending_lifecycle(console: Console, capability: u64) -> Option<ServiceId> {
+    let raw = Kernel.syscall(
+        SYSCALL_NR_LIFECYCLE_WAIT,
+        [capability, 1, LIFECYCLE_WAIT_OP_WAIT, 0, 0, 0],
+    );
+    match decode_wait_result(raw) {
+        LifecycleWait::Pending { service } => Some(ServiceId(service)),
+        LifecycleWait::TimedOut => None,
+        LifecycleWait::Failed(_) => fail(console, b"[INIT] LIFECYCLE_WAIT failed\n"),
     }
 }
 

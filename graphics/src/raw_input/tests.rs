@@ -1,4 +1,6 @@
-use super::{RawInputDecodeError, RawInputKind, RawInputRecord};
+use super::{
+    scale_abs_to_output, RawInputDecodeError, RawInputKind, RawInputRecord, ABS_POINTER_MAX,
+};
 use crate::ids::InputDeviceId;
 use crate::input::{AxisValue120, KeyState, PointerButton, KEY_A};
 
@@ -72,6 +74,15 @@ fn raw_input_round_trips_all_kinds() {
             device: kb(),
             kind: RawInputKind::Overflow { dropped: u32::MAX },
         },
+        RawInputRecord {
+            seq: 6,
+            time_ns: 5,
+            device: mouse(),
+            kind: RawInputKind::AbsMotion {
+                x: 0,
+                y: ABS_POINTER_MAX,
+            },
+        },
     ];
     for record in cases {
         let bytes = record.encode();
@@ -134,10 +145,10 @@ fn raw_input_decode_matrix() {
         RawInputRecord::decode(&kind0),
         Err(RawInputDecodeError::UnknownKind)
     );
-    let mut kind6 = ok;
-    kind6[20] = 6;
+    let mut kind7 = ok;
+    kind7[20] = 7;
     assert_eq!(
-        RawInputRecord::decode(&kind6),
+        RawInputRecord::decode(&kind7),
         Err(RawInputDecodeError::UnknownKind)
     );
 
@@ -219,4 +230,55 @@ fn raw_input_decode_matrix() {
         RawInputRecord::decode(&opad),
         Err(RawInputDecodeError::ReservedBitsSet)
     );
+}
+
+#[test]
+fn abs_motion_layout_and_range() {
+    let record = RawInputRecord {
+        seq: 7,
+        time_ns: 9,
+        device: mouse(),
+        kind: RawInputKind::AbsMotion {
+            x: 0x1234,
+            y: 0xFFFF,
+        },
+    };
+    let bytes = record.encode();
+    assert_eq!(bytes[20], 6);
+    assert_eq!(&bytes[24..32], &[0x34, 0x12, 0, 0, 0xFF, 0xFF, 0, 0]);
+    assert_eq!(RawInputRecord::decode(&bytes), Ok(record));
+
+    let mut x_over = bytes;
+    x_over[26] = 1;
+    assert_eq!(
+        RawInputRecord::decode(&x_over),
+        Err(RawInputDecodeError::InvalidField)
+    );
+    let mut y_over = bytes;
+    y_over[31] = 0x80;
+    assert_eq!(
+        RawInputRecord::decode(&y_over),
+        Err(RawInputDecodeError::InvalidField)
+    );
+}
+
+#[test]
+fn abs_scaling_maps_the_full_range_onto_the_output_edges() {
+    assert_eq!(scale_abs_to_output(0, 1280), 0);
+    assert_eq!(scale_abs_to_output(ABS_POINTER_MAX, 1280), 1279);
+    assert_eq!(scale_abs_to_output(ABS_POINTER_MAX / 2, 1280), 639);
+    assert_eq!(scale_abs_to_output(ABS_POINTER_MAX / 2 + 1, 800), 400);
+    assert_eq!(scale_abs_to_output(u32::MAX, 800), 799);
+    assert_eq!(scale_abs_to_output(ABS_POINTER_MAX, 1), 0);
+    assert_eq!(scale_abs_to_output(ABS_POINTER_MAX, 0), 0);
+    // Monotonic and onto: every pixel of a small axis is reachable.
+    let mut last = 0;
+    let mut seen = [false; 7];
+    for value in 0..=ABS_POINTER_MAX {
+        let px = scale_abs_to_output(value, 7);
+        assert!(px >= last);
+        last = px;
+        seen[px as usize] = true;
+    }
+    assert!(seen.iter().all(|&s| s));
 }

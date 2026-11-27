@@ -11,6 +11,8 @@ pub mod audit_reader;
 mod control;
 mod convergence;
 mod diagnostics;
+/// #237 init's launcher port.
+pub mod launcher;
 mod registry;
 mod restart_policy;
 mod runtime;

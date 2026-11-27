@@ -9,7 +9,7 @@ use clean_slate_graphics::input::{
     KeyState, KeyUsage, Modifiers, PointerButton, KEY_A, KEY_LEFT_SHIFT,
 };
 use clean_slate_graphics::limits::{MAX_WINDOWS, MAX_WINDOWS_PER_CLIENT};
-use clean_slate_graphics::raw_input::{RawInputKind, RawInputRecord};
+use clean_slate_graphics::raw_input::{RawInputKind, RawInputRecord, ABS_POINTER_MAX};
 use clean_slate_graphics::role::{GFX_CONNECT_BIT, GFX_SHELL_BIT};
 use clean_slate_graphics::window::{ResizeEdges, WindowStates, WindowTitle};
 
@@ -82,6 +82,23 @@ fn pointer_to<P: WindowPolicy>(h: &mut Harness<P>, to: Point) {
         &[RawInputKind::RelMotion {
             dx: to.x - at.x,
             dy: to.y - at.y,
+        }],
+    );
+}
+
+/// The tablet's normalised coordinate that lands on pixel `px` of an `extent`-pixel axis.
+fn abs_for(px: i32, extent: u32) -> u32 {
+    let max = u64::from(ABS_POINTER_MAX);
+    ((px as u64 * max + u64::from(extent - 1) / 2) / u64::from(extent - 1)) as u32
+}
+
+fn pointer_abs<P: WindowPolicy>(h: &mut Harness<P>, to: Point) {
+    feed(
+        h,
+        MOUSE_INDEX,
+        &[RawInputKind::AbsMotion {
+            x: abs_for(to.x, WIDTH),
+            y: abs_for(to.y, HEIGHT),
         }],
     );
 }
@@ -339,6 +356,50 @@ fn map_focuses_and_click_raises_and_focuses() {
 
     click(&mut h, A_ONLY);
     assert_eq!(px(&h, OVERLAP), RED);
+    assert_eq!(h.comp.wm().focus, Some(a.key(sa)));
+}
+
+#[test]
+fn absolute_pointer_clicks_hit_the_window_under_the_cursor() {
+    let Pair {
+        mut h,
+        a,
+        b,
+        sa,
+        sb,
+        ..
+    } = pair();
+    assert_eq!(h.comp.wm().focus, Some(a.key(sa)));
+
+    pointer_abs(&mut h, B_ONLY);
+    assert_eq!(h.comp.seat().pointer(), B_ONLY);
+    button(&mut h, KeyState::Pressed);
+    button(&mut h, KeyState::Released);
+    assert_eq!(
+        h.comp.wm().focus,
+        Some(b.key(sb)),
+        "the tablet click focuses B"
+    );
+    assert_eq!(px(&h, OVERLAP), BLUE, "and raises it");
+    let inbox_b = h.drain(&b);
+    assert_eq!(
+        count(&inbox_b, |e| matches!(e, Event::PointerButton { .. })),
+        2
+    );
+    let local_x = B_ONLY.x - origin(&h, b.key(sb)).x;
+    assert!(
+        inbox_b.events.iter().any(|(_, e)| matches!(
+            e,
+            Event::PointerEnter { x, .. } if x.0 == local_x << 8
+        )),
+        "B saw the pointer enter at x={local_x}: {inbox_b:?}"
+    );
+
+    // Straight back to A with no motion in between.
+    pointer_abs(&mut h, A_ONLY);
+    assert_eq!(h.comp.seat().pointer(), A_ONLY);
+    button(&mut h, KeyState::Pressed);
+    button(&mut h, KeyState::Released);
     assert_eq!(h.comp.wm().focus, Some(a.key(sa)));
 }
 
@@ -1374,3 +1435,4 @@ fn window_tables_are_bounded_per_client_and_globally() {
 }
 
 mod text_input;
+mod window_list;

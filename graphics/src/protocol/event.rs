@@ -5,9 +5,10 @@ use crate::ids::{ClientBufferId, ObjectId, OutputId, Serial, SurfaceId, WindowId
 use crate::input::{
     AxisValue120, KeyState, KeyUsage, Modifiers, PointerButton, TextRun, TEXT_RUN_MAX_BYTES,
 };
+use crate::limits::MAX_TITLE_BYTES;
 use crate::mode::{DisplayMode, OutputInfo};
 use crate::pixel::PixelFormat;
-use crate::window::{DecorationMode, WindowStates};
+use crate::window::{DecorationMode, WindowHandle, WindowStates, WindowTitle};
 
 use super::*;
 
@@ -111,6 +112,22 @@ pub enum Event {
         usage: KeyUsage,
         modifiers: Modifiers,
     },
+    /// `WindowAdded` (0x8700, `WINDOW_LIST`): a toplevel is shown and listed. `pid` is the
+    /// kernel-stamped pid of the window's client, so the shell can match it to a launcher row.
+    /// A `WindowTitle` for the same handle follows.
+    WindowAdded { window: WindowHandle, pid: u64 },
+    /// `WindowTitle` (0x8701, `WINDOW_LIST`): a listed window's title, on listing and on every
+    /// change.
+    WindowTitle {
+        window: WindowHandle,
+        title: WindowTitle,
+    },
+    /// `WindowRemoved` (0x8702, `WINDOW_LIST`): the window was hidden or destroyed, or its
+    /// client left. The handle is never listed again.
+    WindowRemoved { window: WindowHandle },
+    /// `WindowFocused` (0x8703, `WINDOW_LIST`): the listed window with keyboard focus; `None`
+    /// when no listed window has it.
+    WindowFocused { window: Option<WindowHandle> },
 }
 
 impl Event {
@@ -137,6 +154,10 @@ impl Event {
             Self::InputReset => OP_INPUT_RESET,
             Self::Text { .. } => OP_TEXT,
             Self::KeyRepeat { .. } => OP_KEY_REPEAT,
+            Self::WindowAdded { .. } => OP_WINDOW_ADDED,
+            Self::WindowTitle { .. } => OP_WINDOW_TITLE,
+            Self::WindowRemoved { .. } => OP_WINDOW_REMOVED,
+            Self::WindowFocused { .. } => OP_WINDOW_FOCUSED,
         }
     }
 
@@ -276,6 +297,21 @@ impl Event {
                 usage,
                 modifiers,
             } => Self::encode_key_repeat_body(&mut out, serial, time_ns, usage, modifiers)?,
+            Self::WindowAdded { window, pid } => {
+                write_u32_le(&mut out, 12, window.raw());
+                write_u64_le(&mut out, 16, pid);
+            }
+            Self::WindowTitle { window, title } => {
+                write_u32_le(&mut out, 12, window.raw());
+                let (bytes, len) = title.wire_bytes();
+                out[16] = len;
+                out[WINDOW_TITLE_OFFSET..WINDOW_TITLE_OFFSET + MAX_TITLE_BYTES]
+                    .copy_from_slice(&bytes);
+            }
+            Self::WindowRemoved { window } => write_u32_le(&mut out, 12, window.raw()),
+            Self::WindowFocused { window } => {
+                write_u32_le(&mut out, 12, window.map_or(0, WindowHandle::raw));
+            }
         }
         Ok(out)
     }
@@ -376,6 +412,19 @@ impl Event {
             OP_KEY_REPEAT => {
                 Self::decode_key_repeat_body(bytes).map_err(|c| decode_error(c, bytes))?
             }
+            OP_WINDOW_ADDED => Self::WindowAdded {
+                window: required_handle(bytes).map_err(|c| decode_error(c, bytes))?,
+                pid: read_u64_le(bytes, 16),
+            },
+            OP_WINDOW_TITLE => {
+                Self::decode_window_title_body(bytes).map_err(|c| decode_error(c, bytes))?
+            }
+            OP_WINDOW_REMOVED => Self::WindowRemoved {
+                window: required_handle(bytes).map_err(|c| decode_error(c, bytes))?,
+            },
+            OP_WINDOW_FOCUSED => Self::WindowFocused {
+                window: WindowHandle::new(read_u32_le(bytes, 12)),
+            },
             _ => return Err(decode_error(ProtocolError::UnknownOpcode, bytes)),
         };
         Ok(Tagged { tag, message })
@@ -627,8 +676,28 @@ impl Event {
     }
 }
 
+impl Event {
+    fn decode_window_title_body(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let window = required_handle(bytes)?;
+        let mut title = [0u8; MAX_TITLE_BYTES];
+        title.copy_from_slice(&bytes[WINDOW_TITLE_OFFSET..WINDOW_TITLE_OFFSET + MAX_TITLE_BYTES]);
+        Ok(Self::WindowTitle {
+            window,
+            title: WindowTitle::from_wire(bytes[16], &title)?,
+        })
+    }
+}
+
 /// First UTF-8 byte of a `Text` body.
 const TEXT_OFFSET: usize = 28;
+/// First UTF-8 byte of a `WindowTitle` body (`MAX_TITLE_BYTES` to the end of the frame).
+const WINDOW_TITLE_OFFSET: usize = 24;
+const _: () = assert!(WINDOW_TITLE_OFFSET + MAX_TITLE_BYTES == FRAME_BYTES);
+
+/// A window-list handle at body offset 12; 0 is `InvalidObject`.
+fn required_handle(bytes: &[u8]) -> Result<WindowHandle, ProtocolError> {
+    WindowHandle::new(read_u32_le(bytes, 12)).ok_or(ProtocolError::InvalidObject)
+}
 
 fn required_id(raw: u32) -> Result<ObjectId, ProtocolError> {
     decode_object_required(raw)

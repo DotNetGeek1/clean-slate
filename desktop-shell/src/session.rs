@@ -10,6 +10,8 @@
 //! SurfaceCreated   -> rail: AssignRole(ShellPanel), paint both rail buffers, Attach(1), Commit
 //! running          -> rail pointer input -> RailUpdate damage repainted into a free rail buffer
 //!                     and committed with exactly those Damage rects
+//! any phase        -> WindowAdded/Removed/Focused and launcher events -> the rail's apps
+//! rail click       -> ActivateWindow (app has a window) or a launcher START (it is not running)
 //! ```
 //!
 //! The shell is an ordinary compositor client: the background and the rail are surfaces whose
@@ -27,8 +29,11 @@ use clean_slate_graphics::protocol::{
 };
 use clean_slate_graphics::role::SurfaceRole;
 use clean_slate_graphics::{Fixed24_8, Point};
+use clean_slate_native_abi::launcher::{AppName, LauncherEvent};
 use clean_slate_raster::Canvas;
 use clean_slate_ui::shell::{RailInput, Shell, ShellConfig, ShellSurface, ShellSurfaceKind};
+
+use crate::apps::{Action, Apps};
 use clean_slate_ui::surface::{self, Damage};
 use clean_slate_ui::{QualityTier, CLEAN_SLATE_DARK};
 
@@ -129,7 +134,7 @@ pub struct SessionStats {
     pub damage_rects: u64,
     /// Rail commits deferred because both rail buffers were busy.
     pub deferred: u64,
-    /// Rail destinations activated.
+    /// Rail items activated.
     pub activations: u32,
     /// Recoverable protocol errors seen after setup.
     pub protocol_errors: u32,
@@ -146,7 +151,11 @@ pub struct ShellSession {
     pointer_on_rail: bool,
     /// Rail changes not yet committed.
     uncommitted: Damage,
-    activated: Option<usize>,
+    apps: Apps,
+    /// The last rail click's action, for the binary's diagnostic line.
+    acted: Option<Action>,
+    /// A start the binary still has to send to init's launcher.
+    launch: Option<AppName>,
     stats: SessionStats,
 }
 
@@ -183,7 +192,9 @@ impl ShellSession {
             rail: None,
             pointer_on_rail: false,
             uncommitted: Damage::new(),
-            activated: None,
+            apps: Apps::new(),
+            acted: None,
+            launch: None,
             stats: SessionStats {
                 events: 0,
                 commits: 0,
@@ -227,19 +238,30 @@ impl ShellSession {
         [self.slots[1].busy, self.slots[2].busy]
     }
 
-    /// The destination activated since the last call, if any.
-    pub fn take_activation(&mut self) -> Option<usize> {
-        self.activated.take()
+    /// The apps the rail shows.
+    pub fn apps(&self) -> &Apps {
+        &self.apps
     }
 
-    /// Sends `Hello`.
+    /// What the last rail click did, if it has not been reported yet.
+    pub fn take_action(&mut self) -> Option<Action> {
+        self.acted.take()
+    }
+
+    /// The app a rail click asked init to start; the binary sends the launcher's `START`.
+    pub fn take_launch(&mut self) -> Option<AppName> {
+        self.launch.take()
+    }
+
+    /// Sends `Hello`, asking for the window list (#237), which the compositor grants because
+    /// the shell holds `GFX_SHELL`.
     pub fn start(&mut self, host: &mut dyn Host) -> Outcome {
         let hello = Request::Hello {
             version: ProtocolVersion {
                 major: PROTOCOL_MAJOR,
                 minor: PROTOCOL_MINOR,
             },
-            features: Features(0),
+            features: Features(Features::WINDOW_LIST),
         };
         self.phase = Phase::Hello;
         self.send(host, &hello, None)
@@ -248,10 +270,49 @@ impl ShellSession {
     /// Handles one compositor event.
     pub fn handle(&mut self, event: &Event, host: &mut dyn Host) -> Outcome {
         self.stats.events += 1;
+        // The window list starts right after `Welcome`, while setup is still under way.
+        if self.apps.on_window(event) {
+            self.refresh_rail();
+        }
         match self.phase {
             Phase::New | Phase::Done => Outcome::Continue,
             Phase::Running => self.running(event, host),
             _ => self.setup(event, host),
+        }
+    }
+
+    /// Handles one event from init's launcher: the rail follows the rows' states.
+    pub fn handle_launcher(&mut self, event: &LauncherEvent, host: &mut dyn Host) -> Outcome {
+        if !self.apps.on_launcher(event) {
+            return Outcome::Continue;
+        }
+        self.refresh_rail();
+        if self.phase == Phase::Running {
+            self.present_rail(host)
+        } else {
+            Outcome::Continue
+        }
+    }
+
+    /// Hands the apps' current view to the rail; once running, what changed is repainted on
+    /// the next present.
+    fn refresh_rail(&mut self) {
+        let Some(shell) = self.shell.as_mut() else {
+            return;
+        };
+        let update = shell.set_apps(self.apps.rail());
+        if self.phase == Phase::Running {
+            self.mark_rail(&update.damage);
+        }
+    }
+
+    fn mark_rail(&mut self, damage: &Damage) {
+        if damage.is_empty() {
+            return;
+        }
+        self.uncommitted.merge(damage);
+        for slot in RAIL_SLOTS {
+            self.slots[slot.index()].stale.merge(damage);
         }
     }
 
@@ -306,11 +367,12 @@ impl ShellSession {
     }
 
     fn welcome(&mut self, host: &mut dyn Host, size: Size) -> Outcome {
-        let shell = Shell::new(&CLEAN_SLATE_DARK, self.tier, size, ShellConfig::M10);
+        let mut shell = Shell::new(&CLEAN_SLATE_DARK, self.tier, size, ShellConfig::M10);
         if shell.zones().rail.is_empty() || shell.zones().workspace.is_empty() {
             self.phase = Phase::Done;
             return Outcome::Exit(ExitReason::BadOutput);
         }
+        shell.set_apps(self.apps.rail());
         self.shell = Some(shell);
         for slot in BufferSlot::ALL {
             let Some(layout) = self.slot_layout(slot) else {
@@ -474,18 +536,33 @@ impl ShellSession {
         };
         if let (Some(input), Some(shell)) = (input, self.shell.as_mut()) {
             let update = shell.handle_rail_input(input);
+            self.mark_rail(&update.damage);
             if let Some(index) = update.activated {
-                self.activated = Some(index);
                 self.stats.activations += 1;
-            }
-            if !update.damage.is_empty() {
-                self.uncommitted.merge(&update.damage);
-                for slot in RAIL_SLOTS {
-                    self.slots[slot.index()].stale.merge(&update.damage);
+                if let Outcome::Exit(reason) = self.act(index, host) {
+                    return Outcome::Exit(reason);
                 }
             }
         }
         self.present_rail(host)
+    }
+
+    /// A click on rail slot `index`: focus the app's window, or have the binary ask init to
+    /// start it.
+    fn act(&mut self, index: usize, host: &mut dyn Host) -> Outcome {
+        let Some(action) = self.apps.action(index) else {
+            return Outcome::Continue;
+        };
+        self.acted = Some(action);
+        match action {
+            Action::Activate { window, .. } => {
+                self.send(host, &Request::ActivateWindow { window }, None)
+            }
+            Action::Start(name) => {
+                self.launch = Some(name);
+                Outcome::Continue
+            }
+        }
     }
 
     /// Commits pending rail changes into a free rail buffer; waits for a release when none is.

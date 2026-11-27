@@ -18,6 +18,7 @@ use clean_slate_capability::{
     HOLDER_SLOT_QUOTA, MAX_SLOTS, MAX_SLOT_ALLOWANCE, MAX_SLOT_ALLOWANCES,
 };
 use clean_slate_graphics::limits::MAX_REGISTERED_BUFFERS;
+use clean_slate_native_abi::launcher::AppName;
 use clean_slate_native_abi::memory::NATIVE_MEMORY_MAX_BUDGET_PAGES;
 use clean_slate_service_lifecycle::ServiceId;
 
@@ -158,6 +159,20 @@ pub enum Grant {
     /// attach as the console session's front end (#311). Terminal rows only, which must depend
     /// on the `ConsoleService` row.
     ConsoleFrontEnd,
+    /// Root `LAUNCH_CONNECT` on init's launcher port (#237): the instance may ask init to start
+    /// a listed row by name, and list those rows. Init always serves the port, so the grant
+    /// needs no dependency. Desktop-shell rows only.
+    LauncherClient,
+}
+
+/// When init starts a row (#237).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// At boot, once every row in `depends_on` is running.
+    AtBoot,
+    /// Only when a launcher client asks for it by its `launch_name`, and again after each exit
+    /// or fault only when asked again. Such a row restarts `Never`, and no row depends on it.
+    OnRequest,
 }
 
 /// What init does when a started service exits or faults. Init counts ticks in monotonic
@@ -202,6 +217,11 @@ pub struct ServiceSpec {
     /// none; at most `NATIVE_MEMORY_MAX_BUDGET_PAGES`, and only on native images (Linux rows have
     /// their own brk and mmap budget).
     pub memory_pages: u64,
+    /// The name a launcher client lists and starts the row by (#237); `None` keeps the row off
+    /// the launcher. Printable ASCII without spaces, at most `LAUNCHER_NAME_MAX` bytes, and
+    /// unique in the manifest.
+    pub launch_name: Option<&'static str>,
+    pub start: Start,
 }
 
 impl ServiceSpec {
@@ -236,6 +256,8 @@ pub const STORAGE_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     depends_on: &[],
     slot_allowance: None,
     memory_pages: 0,
+    launch_name: None,
+    start: Start::AtBoot,
 };
 
 /// `NETWORK_SERVICE_MODE_ACCEPTANCE` is the network image's request-serving loop. Init starts it
@@ -249,6 +271,8 @@ pub const NETWORK_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     depends_on: &[STORAGE_SERVICE_ID],
     slot_allowance: None,
     memory_pages: 0,
+    launch_name: None,
+    start: Start::AtBoot,
 };
 
 /// Provisional (#218 S5): a shell that exits (`exit`, Ctrl-D) is started again 0.5 s later. At
@@ -279,6 +303,8 @@ pub const SYSTEM_SHELL_SPEC: ServiceSpec = ServiceSpec {
     depends_on: &[STORAGE_SERVICE_ID, CONSOLE_SERVICE_ID],
     slot_allowance: None,
     memory_pages: 0,
+    launch_name: None,
+    start: Start::AtBoot,
 };
 
 /// The capability audit log's reader (#219 stage B). It is a holder of its own, apart from the
@@ -293,6 +319,8 @@ pub const AUDIT_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     depends_on: &[],
     slot_allowance: None,
     memory_pages: 0,
+    launch_name: None,
+    start: Start::AtBoot,
 };
 
 /// The console service (#310): it owns native console streams and writes them, framed per
@@ -307,6 +335,8 @@ pub const CONSOLE_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     depends_on: &[],
     slot_allowance: None,
     memory_pages: 0,
+    launch_name: None,
+    start: Start::AtBoot,
 };
 
 pub const SYSTEM_MANIFEST: &[ServiceSpec] = &[
@@ -339,6 +369,8 @@ pub const COMPOSITOR_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     depends_on: &[],
     slot_allowance: Some(COMPOSITOR_SLOT_ALLOWANCE),
     memory_pages: 0,
+    launch_name: None,
+    start: Start::AtBoot,
 };
 
 /// The compositor's launch grants, one capability record each.
@@ -356,16 +388,23 @@ pub const COMPOSITOR_SLOT_ALLOWANCE: usize =
 
 const _: () = assert!(COMPOSITOR_SERVICE_SPEC.grants.len() == COMPOSITOR_LAUNCH_RECORDS);
 
-/// The panel and background. Ready is both surfaces committed.
+/// The panel and background. Ready is both surfaces committed. It lists and starts the
+/// launchable rows through init's launcher port (#237).
 pub const DESKTOP_SHELL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     id: DESKTOP_SHELL_SERVICE_ID,
     image: ServiceImage::DesktopShell,
     mode: 0,
-    grants: &[Grant::Console, Grant::GraphicsShellRole],
+    grants: &[
+        Grant::Console,
+        Grant::GraphicsShellRole,
+        Grant::LauncherClient,
+    ],
     restart: DESKTOP_RESTART,
     depends_on: &[COMPOSITOR_SERVICE_ID],
     slot_allowance: None,
     memory_pages: 0,
+    launch_name: None,
+    start: Start::AtBoot,
 };
 
 /// The playground app. It depends on the shell so the panel is mapped before the app's first
@@ -384,6 +423,8 @@ pub const PLAYGROUND_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     ],
     slot_allowance: None,
     memory_pages: 0,
+    launch_name: Some("playground"),
+    start: Start::AtBoot,
 };
 
 /// The terminal's shell (#311): the serial shell's image and authority, but its console
@@ -405,6 +446,8 @@ pub const TERMINAL_SHELL_SPEC: ServiceSpec = ServiceSpec {
     depends_on: &[STORAGE_SERVICE_ID, CONSOLE_SERVICE_ID],
     slot_allowance: None,
     memory_pages: 0,
+    launch_name: None,
+    start: Start::AtBoot,
 };
 
 /// The terminal window (#311), the console session's front end. It starts after the
@@ -428,6 +471,8 @@ pub const TERMINAL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     ],
     slot_allowance: None,
     memory_pages: 0,
+    launch_name: Some("terminal"),
+    start: Start::AtBoot,
 };
 
 /// The bare desktop profile (`q0-bare`, `q1-bare`): the five system rows followed by the three
@@ -557,6 +602,22 @@ pub enum ManifestError {
     SlotAllowancesExceedTable {
         row: usize,
     },
+    /// `launch_name` is not a valid launcher name (`AppName`).
+    InvalidLaunchName {
+        row: usize,
+    },
+    /// An earlier row has the same `launch_name`.
+    DuplicateLaunchName {
+        row: usize,
+    },
+    /// A `Start::OnRequest` row has no `launch_name`, or restarts other than `Never`.
+    OnRequestRowMisdeclared {
+        row: usize,
+    },
+    /// `depends_on` names a `Start::OnRequest` row, which may never run.
+    DependsOnRequestRow {
+        row: usize,
+    },
 }
 
 /// Allowances within the table's total also fit the table's allowance entries, since each is
@@ -593,6 +654,25 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
                 return Err(ManifestError::DuplicateServiceId { row });
             }
             earlier += 1;
+        }
+        if let Some(name) = spec.launch_name {
+            if AppName::new(name.as_bytes()).is_none() {
+                return Err(ManifestError::InvalidLaunchName { row });
+            }
+            let mut earlier = 0;
+            while earlier < row {
+                if let Some(other) = manifest[earlier].launch_name {
+                    if bytes_equal(other.as_bytes(), name.as_bytes()) {
+                        return Err(ManifestError::DuplicateLaunchName { row });
+                    }
+                }
+                earlier += 1;
+            }
+        }
+        if matches!(spec.start, Start::OnRequest)
+            && (spec.launch_name.is_none() || !matches!(spec.restart, RestartSpec::Never))
+        {
+            return Err(ManifestError::OnRequestRowMisdeclared { row });
         }
         let mut grant = 0;
         while grant < spec.grants.len() {
@@ -656,6 +736,11 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
             if !found {
                 return Err(ManifestError::DependencyNotEarlier { row });
             }
+            if let Some(depended) = find_service(manifest, spec.depends_on[dependency]) {
+                if matches!(depended.start, Start::OnRequest) {
+                    return Err(ManifestError::DependsOnRequestRow { row });
+                }
+            }
             dependency += 1;
         }
         row += 1;
@@ -693,7 +778,9 @@ const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
         Grant::GraphicsPort | Grant::DisplayPresenter | Grant::InputSeat => {
             matches!(image, ServiceImage::Compositor)
         }
-        Grant::GraphicsShellRole => matches!(image, ServiceImage::DesktopShell),
+        Grant::GraphicsShellRole | Grant::LauncherClient => {
+            matches!(image, ServiceImage::DesktopShell)
+        }
         Grant::GraphicsAppRole => {
             matches!(image, ServiceImage::Playground | ServiceImage::Terminal)
         }
@@ -759,6 +846,27 @@ pub const fn graphics_port_row(manifest: &[ServiceSpec]) -> Option<&ServiceSpec>
     None
 }
 
+const fn bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// The row whose `launch_name` is `name`.
+pub fn find_launchable<'a>(manifest: &'a [ServiceSpec], name: &[u8]) -> Option<&'a ServiceSpec> {
+    manifest
+        .iter()
+        .find(|spec| spec.launch_name.is_some_and(|own| own.as_bytes() == name))
+}
+
 const fn grants_before(grants: &[Grant], end: usize, wanted: Grant) -> bool {
     let mut index = 0;
     while index < end {
@@ -785,6 +893,8 @@ mod tests {
             depends_on: &[],
             slot_allowance: None,
             memory_pages: 0,
+            launch_name: None,
+            start: Start::AtBoot,
         }
     }
 
@@ -1273,7 +1383,14 @@ mod tests {
         );
         assert!(compositor.depends_on.is_empty());
         let shell = find_service(SYSTEM_DESKTOP_MANIFEST, DESKTOP_SHELL_SERVICE_ID).unwrap();
-        assert_eq!(shell.grants, [Grant::Console, Grant::GraphicsShellRole]);
+        assert_eq!(
+            shell.grants,
+            [
+                Grant::Console,
+                Grant::GraphicsShellRole,
+                Grant::LauncherClient
+            ]
+        );
         assert_eq!(shell.depends_on, [COMPOSITOR_SERVICE_ID]);
         let app = find_service(SYSTEM_DESKTOP_MANIFEST, PLAYGROUND_SERVICE_ID).unwrap();
         assert_eq!(
@@ -1500,6 +1617,76 @@ mod tests {
         assert_eq!(
             validate_manifest(&[COMPOSITOR_SERVICE_SPEC, DESKTOP_SHELL_SERVICE_SPEC, app]),
             Err(ManifestError::GraphicsRoleWithoutPortDependency { row: 2 })
+        );
+    }
+
+    #[test]
+    fn launch_names_are_valid_unique_and_found() {
+        assert_eq!(
+            find_launchable(SYSTEM_TERMINAL_DESKTOP_MANIFEST, b"terminal").map(|spec| spec.id),
+            Some(TERMINAL_SERVICE_ID)
+        );
+        assert_eq!(
+            find_launchable(SYSTEM_DESKTOP_MANIFEST, b"playground").map(|spec| spec.id),
+            Some(PLAYGROUND_SERVICE_ID)
+        );
+        assert!(find_launchable(SYSTEM_DESKTOP_MANIFEST, b"terminal").is_none());
+        assert!(find_launchable(SYSTEM_DESKTOP_MANIFEST, b"desktop-shell").is_none());
+        let mut bad = PLAYGROUND_SERVICE_SPEC;
+        bad.launch_name = Some("two words");
+        let manifest = [COMPOSITOR_SERVICE_SPEC, DESKTOP_SHELL_SERVICE_SPEC, bad];
+        let mut with_console = [CONSOLE_SERVICE_SPEC; 4];
+        with_console[1..].copy_from_slice(&manifest);
+        assert_eq!(
+            validate_manifest(&with_console),
+            Err(ManifestError::InvalidLaunchName { row: 3 })
+        );
+        let mut twin = TERMINAL_SERVICE_SPEC;
+        twin.launch_name = Some("playground");
+        let mut rows = SYSTEM_TERMINAL_DESKTOP_MANIFEST.to_vec();
+        rows[9] = twin;
+        assert_eq!(
+            validate_manifest(&rows),
+            Err(ManifestError::DuplicateLaunchName { row: 9 })
+        );
+    }
+
+    #[test]
+    fn on_request_rows_are_named_never_restart_and_are_no_dependency() {
+        let mut rows = SYSTEM_TERMINAL_DESKTOP_MANIFEST.to_vec();
+        rows[9].start = Start::OnRequest;
+        assert_eq!(
+            validate_manifest(&rows),
+            Err(ManifestError::OnRequestRowMisdeclared { row: 9 })
+        );
+        rows[9].restart = RestartSpec::Never;
+        assert_eq!(validate_manifest(&rows), Ok(()));
+        rows[9].launch_name = None;
+        assert_eq!(
+            validate_manifest(&rows),
+            Err(ManifestError::OnRequestRowMisdeclared { row: 9 })
+        );
+        let mut rows = SYSTEM_TERMINAL_DESKTOP_MANIFEST.to_vec();
+        rows[7].start = Start::OnRequest;
+        rows[7].restart = RestartSpec::Never;
+        assert_eq!(
+            validate_manifest(&rows),
+            Err(ManifestError::DependsOnRequestRow { row: 9 }),
+            "the terminal depends on the playground"
+        );
+    }
+
+    #[test]
+    fn only_the_desktop_shell_may_hold_the_launcher_client_grant() {
+        let mut app = PLAYGROUND_SERVICE_SPEC;
+        app.grants = &[
+            Grant::Console,
+            Grant::GraphicsAppRole,
+            Grant::LauncherClient,
+        ];
+        assert_eq!(
+            validate_manifest(&[COMPOSITOR_SERVICE_SPEC, DESKTOP_SHELL_SERVICE_SPEC, app]),
+            Err(ManifestError::GrantNotSupportedByImage { row: 2 })
         );
     }
 }

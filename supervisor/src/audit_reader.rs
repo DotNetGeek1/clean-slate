@@ -324,6 +324,7 @@ const fn class_name(class: ResourceClass) -> &'static str {
         ResourceClass::Display => "display",
         ResourceClass::Input => "input",
         ResourceClass::Console => "console",
+        ResourceClass::Launcher => "launch",
     }
 }
 
