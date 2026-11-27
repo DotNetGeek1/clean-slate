@@ -10,7 +10,13 @@ pub const OBJECT_SUBOP_SUBMIT: u64 = 1;
 /// completion). A pending request whose deadline has passed returns `ETIMEDOUT` and stays
 /// queued, so the caller may poll it again.
 pub const OBJECT_SUBOP_POLL: u64 = 2;
+/// The storage service's next request. `rsi` = service role handle, `rdx` = request frame
+/// output, `r10`/`r8` = the service's staging area and its length: a staged `WRITE_AT`'s
+/// bytes are copied there (#312).
 pub const OBJECT_SUBOP_SERVICE_NEXT: u64 = 3;
+/// Completes a request. `rsi` = service role handle, `rdx` = request id, `r10` = status,
+/// `r8`/`r9` = completion payload: at most [`OBJECT_MAX_PAYLOAD_BYTES`], or for a staged
+/// `READ_AT` up to the request's length, copied into the client's buffer.
 pub const OBJECT_SUBOP_SERVICE_COMPLETE: u64 = 4;
 pub const OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT: u64 = 5;
 /// A native submit of an offset op or a commit (#312). `rsi` = object capability handle,
@@ -82,20 +88,29 @@ pub const OBJECT_EPOCH_UNBOUND: u64 = 0;
 
 pub const OBJECT_SERVICE_ROLE_ID: u64 = u64::MAX;
 
+/// Most bytes one [`OBJECT_SUBOP_SUBMIT_AT`] request moves through a shared buffer (#312):
+/// a 1 MiB object is eight requests.
+pub const OBJECT_MAX_BUFFER_PAYLOAD_BYTES: usize = 128 * 1024;
+
 /// Bytes of an [`ObjectSubmitAt`] descriptor.
 pub const OBJECT_SUBMIT_AT_BYTES: usize = 64;
 
 /// What [`OBJECT_SUBOP_SUBMIT_AT`] submits, little-endian: op@0, object_id@8, offset@16,
 /// len@24, data@32, buffer@40, buffer_offset@48, reserved-zero@56.
 ///
-/// - `READ_AT`: `len` bytes (at most [`OBJECT_MAX_PAYLOAD_BYTES`]) from `offset`; the
-///   completion's payload holds them. `data` is ignored.
-/// - `WRITE_AT`: `len` bytes at `data` (at most [`OBJECT_MAX_PAYLOAD_BYTES`]), staged at
-///   `offset`.
+/// - `READ_AT`: `len` bytes from `offset`. Without a buffer, at most
+///   [`OBJECT_MAX_PAYLOAD_BYTES`], and the poll copies them to its output; `data` is ignored.
+/// - `WRITE_AT`: `len` bytes staged at `offset`. Without a buffer, at most
+///   [`OBJECT_MAX_PAYLOAD_BYTES`] read from `data`.
 /// - `TRUNCATE`: `offset` is the new length; `len` is 0.
 /// - `COMMIT`: `offset` and `len` are 0.
 ///
-/// `buffer` and `buffer_offset` are reserved for payloads in a shared buffer and must be 0.
+/// With `buffer`, a shared-buffer capability handle (0 for none), a `READ_AT` or `WRITE_AT`
+/// moves up to [`OBJECT_MAX_BUFFER_PAYLOAD_BYTES`] between the object and the buffer's bytes
+/// at `buffer_offset`; `data` is then 0. A `WRITE_AT` needs `READ` on the buffer and a
+/// `READ_AT` `WRITE`; the range must lie inside the buffer. The buffer stays pinned until the
+/// request completes, and a buffered `READ_AT`'s poll returns the byte count with nothing
+/// copied to its output.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ObjectSubmitAt {
     pub op: u64,
@@ -117,8 +132,9 @@ pub enum ObjectSubmitAtError {
     /// A length or offset the op does not take, or a payload past
     /// [`OBJECT_MAX_PAYLOAD_BYTES`].
     BadLength,
-    /// A shared buffer payload, not taken yet.
-    BufferUnsupported,
+    /// A buffer on an op that moves no bytes, a buffer offset without a buffer, or both a
+    /// buffer and `data`.
+    BadBuffer,
 }
 
 impl ObjectSubmitAt {
@@ -160,11 +176,21 @@ impl ObjectSubmitAt {
             buffer: field(5),
             buffer_offset: field(6),
         };
-        if submit.buffer != 0 || submit.buffer_offset != 0 {
-            return Err(ObjectSubmitAtError::BufferUnsupported);
+        let moves_bytes = matches!(submit.op, OBJECT_OP_READ_AT | OBJECT_OP_WRITE_AT);
+        if submit.buffer == 0 {
+            if submit.buffer_offset != 0 {
+                return Err(ObjectSubmitAtError::BadBuffer);
+            }
+        } else if !moves_bytes || submit.data != 0 {
+            return Err(ObjectSubmitAtError::BadBuffer);
         }
+        let max = if submit.buffer == 0 {
+            OBJECT_MAX_PAYLOAD_BYTES
+        } else {
+            OBJECT_MAX_BUFFER_PAYLOAD_BYTES
+        };
         let len_ok = match submit.op {
-            OBJECT_OP_READ_AT | OBJECT_OP_WRITE_AT => submit.len <= OBJECT_MAX_PAYLOAD_BYTES as u64,
+            OBJECT_OP_READ_AT | OBJECT_OP_WRITE_AT => submit.len <= max as u64,
             OBJECT_OP_TRUNCATE => submit.len == 0,
             OBJECT_OP_COMMIT => submit.len == 0 && submit.offset == 0,
             _ => return Err(ObjectSubmitAtError::UnsupportedOp),
@@ -175,9 +201,10 @@ impl ObjectSubmitAt {
         Ok(submit)
     }
 
-    /// Bytes the kernel copies from `data` into the request: a write's payload, else none.
+    /// Bytes the kernel copies from `data` into the request: an unbuffered write's payload,
+    /// else none.
     pub fn payload_len(&self) -> usize {
-        if self.op == OBJECT_OP_WRITE_AT {
+        if self.op == OBJECT_OP_WRITE_AT && self.buffer == 0 {
             self.len as usize
         } else {
             0
@@ -253,11 +280,11 @@ mod tests {
             ObjectSubmitAt::decode(&reserved),
             Err(ObjectSubmitAtError::ReservedNonZero)
         );
-        let mut buffered = check_bytes(OBJECT_OP_WRITE_AT);
-        buffered[40] = 3;
+        let mut offset_only = check_bytes(OBJECT_OP_WRITE_AT);
+        offset_only[48] = 3;
         assert_eq!(
-            ObjectSubmitAt::decode(&buffered),
-            Err(ObjectSubmitAtError::BufferUnsupported)
+            ObjectSubmitAt::decode(&offset_only),
+            Err(ObjectSubmitAtError::BadBuffer)
         );
         assert_eq!(
             ObjectSubmitAt {
@@ -288,6 +315,40 @@ mod tests {
             STATUS_ENOSPC
         );
         assert_eq!(object_status_to_native(OBJECT_STATUS_STALE), STATUS_ESTALE);
+    }
+
+    #[test]
+    fn a_buffer_carries_larger_payloads_for_the_ops_that_move_bytes() {
+        let buffered = |op, len, data| {
+            ObjectSubmitAt::decode(
+                &ObjectSubmitAt {
+                    op,
+                    object_id: 7,
+                    len,
+                    data,
+                    buffer: 0x1234,
+                    buffer_offset: 4096,
+                    ..Default::default()
+                }
+                .encode(),
+            )
+        };
+        let max = OBJECT_MAX_BUFFER_PAYLOAD_BYTES as u64;
+        for op in [OBJECT_OP_READ_AT, OBJECT_OP_WRITE_AT] {
+            let submit = buffered(op, max, 0).expect("buffered");
+            assert_eq!(submit.payload_len(), 0);
+            assert_eq!(
+                buffered(op, max + 1, 0),
+                Err(ObjectSubmitAtError::BadLength)
+            );
+            assert_eq!(
+                buffered(op, 16, 0x4000_0000),
+                Err(ObjectSubmitAtError::BadBuffer)
+            );
+        }
+        for op in [OBJECT_OP_TRUNCATE, OBJECT_OP_COMMIT] {
+            assert_eq!(buffered(op, 0, 0), Err(ObjectSubmitAtError::BadBuffer));
+        }
     }
 
     fn check_bytes(op: u64) -> [u8; OBJECT_SUBMIT_AT_BYTES] {

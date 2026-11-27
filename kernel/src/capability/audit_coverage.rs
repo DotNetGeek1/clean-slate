@@ -214,6 +214,7 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
         "attest_for_transfer",
         Records,
     ),
+    ("mm/shared_buffer/object_io.rs", "pin_for_holder", Records),
     (
         "process/domain.rs",
         "lifecycle_capability_count",

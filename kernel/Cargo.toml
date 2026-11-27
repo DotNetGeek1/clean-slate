@@ -29,6 +29,9 @@ m9-fd-core-self-test = ["m3-entry-self-test", "stack-high-water-check"]
 m10-port-self-test = ["m3-entry-self-test", "stack-high-water-check"]
 m10-native-memory-self-test = ["m3-entry-self-test"]
 m10-clock-self-test = ["m3-entry-self-test"]
+# #312: a native app writes, reads back and truncates a 1 MiB directory entry across reboots,
+# through the storage service the object lane launches.
+m10-storage-self-test = ["m3-entry-self-test", "m6-object-self-test", "dep:clean-slate-store"]
 m4-crash-service-self-test = []
 m4-service-lifecycle-self-test = ["m3-entry-self-test"]
 m4-supervisor-self-test = ["m3-entry-self-test"]

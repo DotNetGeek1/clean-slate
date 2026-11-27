@@ -159,6 +159,8 @@ use crate::selftest::m10_input::start_m10_input_self_test;
 use crate::selftest::m10_native_memory::start_m10_native_memory_self_test;
 #[cfg(clean_slate_userspace_selftest = "m10-port")]
 use crate::selftest::m10_port::start_m10_port_self_test;
+#[cfg(clean_slate_userspace_selftest = "m10-storage")]
+use crate::selftest::m10_storage::start_m10_storage_self_test;
 #[cfg(feature = "m10-virtio-gpu-self-test")]
 use crate::selftest::m10_virtio_gpu::run_m10_virtio_gpu_self_test;
 #[cfg(feature = "m10-virtio-modern-self-test")]
@@ -791,6 +793,11 @@ fn run_inner() -> Result<(), &'static str> {
     #[cfg(clean_slate_userspace_selftest = "m10-clock")]
     {
         start_m10_clock_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m10-storage")]
+    {
+        start_m10_storage_self_test(allocator)
     }
 
     #[cfg(clean_slate_userspace_selftest = "m6-revocation")]

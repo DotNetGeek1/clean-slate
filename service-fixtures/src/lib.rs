@@ -25,6 +25,8 @@ pub mod object_capability;
 pub mod object_churn;
 /// #218 `SERVICE_READY` detail words of the system services.
 pub mod ready_detail;
+/// #312 native storage probe bootstrap page and lane checks.
+pub mod storage_probe;
 mod storage_service;
 mod unrelated_workload;
 
@@ -68,9 +70,10 @@ pub use network_transport::{
 };
 pub use object_capability::{
     object_status_to_native, ObjectServiceDecodeError, ObjectServiceRequest, ObjectSubmitAt,
-    ObjectSubmitAtError, OBJECT_EPOCH_UNBOUND, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_COMMIT,
-    OBJECT_OP_DELETE, OBJECT_OP_READ, OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE,
-    OBJECT_OP_WRITE_AT, OBJECT_POLL_NO_DEADLINE, OBJECT_REQUEST_SLOTS,
+    ObjectSubmitAtError, OBJECT_EPOCH_UNBOUND, OBJECT_MAX_BUFFER_PAYLOAD_BYTES,
+    OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_COMMIT, OBJECT_OP_DELETE, OBJECT_OP_READ,
+    OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE, OBJECT_OP_WRITE_AT,
+    OBJECT_POLL_NO_DEADLINE, OBJECT_REQUEST_SLOTS, OBJECT_REQUEST_STAGED,
     OBJECT_SERVICE_REQUEST_BYTES, OBJECT_SERVICE_ROLE_ID, OBJECT_STATUS_NOT_FOUND,
     OBJECT_STATUS_NO_SPACE, OBJECT_STATUS_OK, OBJECT_STATUS_PENDING, OBJECT_STATUS_STALE,
     OBJECT_STATUS_STORE_ERROR, OBJECT_STATUS_TOO_LARGE, OBJECT_SUBMIT_AT_BYTES,

@@ -1,6 +1,6 @@
 //! Persistent writable `/home` backed by storage-service objects (#304).
 //!
-//! `/home` is a flat directory of up to [`super::home_table::HOME_MAX_FILES`] files that survives reboots: the
+//! `/home` is a flat directory of up to [`clean_slate_native_abi::directory::DIRECTORY_MAX_ENTRIES`] files that survives reboots: the
 //! files a Linux Doom port writes (save games, its config, screenshots). It is not a
 //! filesystem. Each file is one object, and the name table ([`HomeTable`]) is one more.
 //!
@@ -36,7 +36,7 @@ use clean_slate_service_fixtures::{
 };
 
 pub(crate) use super::home_table::{
-    home_file_object_id, validate_name, HomeTable, HOME_MAX_FILE_BYTES, HOME_TABLE_BYTES,
+    errno, home_file_object_id, validate_name, HomeTable, HOME_MAX_FILE_BYTES, HOME_TABLE_BYTES,
     HOME_TABLE_OBJECT_ID,
 };
 use crate::capability::object::{
@@ -479,12 +479,14 @@ pub(crate) fn create(
     if let Some(slot) = state.table.find(name) {
         return Ok(Flow::Done(slot));
     }
-    let slot = state.table.free_slot()?;
+    let slot = state.table.free_slot().map_err(errno)?;
     if progress(ctx.pid, request) == 0 {
         step!(truncate_object(request, ctx, slot, 0)?);
         set_progress(ctx.pid, request, 1);
     }
-    step!(commit_with(request, ctx, |table| table.create_at(slot, name))?);
+    step!(commit_with(request, ctx, |table| table
+        .create_at(slot, name)
+        .map_err(errno))?);
     Ok(Flow::Done(slot))
 }
 
@@ -550,7 +552,8 @@ pub(crate) fn rename(
     }
     step!(commit_with(request, ctx, |table| table
         .rename(slot, to)
-        .map(|_| ()))?);
+        .map(|_| ())
+        .map_err(errno))?);
     Ok(Flow::Done((slot, victim)))
 }
 

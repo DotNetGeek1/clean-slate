@@ -58,6 +58,10 @@ impl Rights {
     pub const LAUNCH_CONNECT: Self = Self(1 << 24);
     /// Serve the launcher port (init only).
     pub const LAUNCH_SERVE: Self = Self(1 << 25);
+    /// On a persistent object: the object is a directory's name table, and the capability's
+    /// `READ` and `WRITE` reach the directory's entry objects too (#312,
+    /// `clean_slate_native_abi::directory`).
+    pub const DIRECTORY: Self = Self(1 << 26);
 
     const ALL_KNOWN: u32 = (1 << 0)
         | (1 << 1)
@@ -84,7 +88,8 @@ impl Rights {
         | (1 << 22)
         | (1 << 23)
         | (1 << 24)
-        | (1 << 25);
+        | (1 << 25)
+        | (1 << 26);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -128,7 +133,12 @@ impl Rights {
     pub const fn valid_for(class: ResourceClass) -> Self {
         match class {
             ResourceClass::PersistentObject => Self(
-                Self::READ.0 | Self::WRITE.0 | Self::INSPECT.0 | Self::DELEGATE.0 | Self::REVOKE.0,
+                Self::READ.0
+                    | Self::WRITE.0
+                    | Self::INSPECT.0
+                    | Self::DELEGATE.0
+                    | Self::REVOKE.0
+                    | Self::DIRECTORY.0,
             ),
             ResourceClass::ProcessControl => Self(
                 Self::OBSERVE.0
@@ -218,7 +228,7 @@ impl Rights {
 
     /// Lowercase, pipe-separated names in deterministic bit order.
     pub fn write_names(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        const NAMES: [(&str, u32); 26] = [
+        const NAMES: [(&str, u32); 27] = [
             ("read", 1 << 0),
             ("write", 1 << 1),
             ("inspect", 1 << 2),
@@ -245,6 +255,7 @@ impl Rights {
             ("console_session", 1 << 23),
             ("launch_connect", 1 << 24),
             ("launch_serve", 1 << 25),
+            ("directory", 1 << 26),
         ];
         let mut first = true;
         for (name, bit) in NAMES {

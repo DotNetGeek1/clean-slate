@@ -54,8 +54,9 @@ fn over_budget<D: BlockDevice>(
     live.saturating_add(new_len - current) > budget
 }
 
-/// Serves one request of `len` payload bytes: its completion status and, for a read, the
-/// bytes. A write, delete or commit is committed before it completes, so `OBJECT_STATUS_OK`
+/// Serves one request: its completion status and, for a read, the bytes. `payload` is a
+/// write's bytes: the request frame's, or for a staged request (#312) the service's staging
+/// area. A read asks for `request.len` bytes. A write, delete or commit is committed before it completes, so `OBJECT_STATUS_OK`
 /// means it is durable, and the commit takes every staged offset write and truncate with it.
 /// `WRITE_AT` and `TRUNCATE` only stage: many requests build an object, and one commit makes
 /// it durable. A write that would take the store's live bytes past `budget` is refused with
@@ -63,17 +64,20 @@ fn over_budget<D: BlockDevice>(
 pub fn serve<D: BlockDevice>(
     store: &mut ObjectStore<D>,
     request: &ObjectServiceRequest,
-    len: usize,
+    payload: &[u8],
     budget: u64,
 ) -> (u64, Option<Vec<u8>>) {
     if let Some(status) = stale_status(store, request) {
         return (status, None);
     }
-    if over_budget(store, request, len, budget) {
+    if over_budget(store, request, payload.len(), budget) {
         return (OBJECT_STATUS_NO_SPACE, None);
     }
     let staged = match request.op {
         OBJECT_OP_READ_AT => {
+            let Ok(len) = usize::try_from(request.len) else {
+                return (OBJECT_STATUS_TOO_LARGE, None);
+            };
             let mut out = vec![0u8; len];
             return match store.read_object_at(request.object_id, request.offset, &mut out) {
                 Ok(read) => {
@@ -87,12 +91,7 @@ pub fn serve<D: BlockDevice>(
         OBJECT_OP_WRITE_AT | OBJECT_OP_TRUNCATE => {
             let name = object_name(request.object_id);
             let result = if request.op == OBJECT_OP_WRITE_AT {
-                store.write_object_at(
-                    request.object_id,
-                    &name,
-                    request.offset,
-                    &request.payload[..len],
-                )
+                store.write_object_at(request.object_id, &name, request.offset, payload)
             } else {
                 store.truncate_object(request.object_id, &name, request.offset)
             };
@@ -116,7 +115,7 @@ pub fn serve<D: BlockDevice>(
         }
         OBJECT_OP_WRITE => {
             let name = object_name(request.object_id);
-            store.write_object(request.object_id, &name, &request.payload[..len])
+            store.write_object(request.object_id, &name, payload)
         }
         OBJECT_OP_DELETE => store.delete_object(request.object_id),
         OBJECT_OP_COMMIT => Ok(()),
@@ -181,7 +180,7 @@ mod tests {
         serve(
             store,
             &request(op, object_id, epoch, offset, payload),
-            payload.len(),
+            payload,
             BUDGET,
         )
     }
@@ -194,7 +193,7 @@ mod tests {
     ) -> (u64, Option<Vec<u8>>) {
         let mut request = request(OBJECT_OP_READ_AT, id, OBJECT_EPOCH_UNBOUND, offset, &[]);
         request.len = len as u64;
-        serve(store, &request, len, BUDGET)
+        serve(store, &request, &[], BUDGET)
     }
 
     #[test]
@@ -241,6 +240,32 @@ mod tests {
         assert_eq!(
             read_at(&mut durable, 9, 4096, 512),
             (OBJECT_STATUS_OK, Some(Vec::new()))
+        );
+    }
+
+    #[test]
+    fn a_staged_request_moves_more_than_a_frame() {
+        let mut store = store();
+        let bytes: Vec<u8> = (0..3000u32).map(|n| n as u8).collect();
+        let mut write = request(OBJECT_OP_WRITE_AT, 9, 0, 100, &[]);
+        write.len = bytes.len() as u64;
+        write.flags = clean_slate_service_fixtures::OBJECT_REQUEST_STAGED;
+        assert_eq!(
+            serve(&mut store, &write, &bytes, BUDGET).0,
+            OBJECT_STATUS_OK
+        );
+        let (status, read) = read_at(&mut store, 9, 100, 3000);
+        assert_eq!(
+            (status, read.as_deref()),
+            (OBJECT_STATUS_OK, Some(&bytes[..]))
+        );
+        // The budget counts the staged bytes, not the frame.
+        let mut big = write;
+        big.offset = 0;
+        big.object_id = 10;
+        assert_eq!(
+            serve(&mut store, &big, &bytes, BUDGET).0,
+            OBJECT_STATUS_NO_SPACE
         );
     }
 

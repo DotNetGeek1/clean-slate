@@ -23,6 +23,7 @@ pub const STATUS_EAGAIN: u64 = u64::MAX - 10;
 pub const STATUS_ENOMEM: u64 = u64::MAX - 11;
 pub const STATUS_EEXIST: u64 = u64::MAX - 16;
 pub const STATUS_EFBIG: u64 = u64::MAX - 26;
+pub const STATUS_ENAMETOOLONG: u64 = u64::MAX - 35;
 pub const STATUS_ENODATA: u64 = u64::MAX - 60;
 pub const STATUS_EPIPE: u64 = u64::MAX - 31;
 pub const STATUS_ETIMEDOUT: u64 = u64::MAX - 109;
@@ -51,6 +52,7 @@ mod tests {
             (STATUS_ENOENT, 2_u64),
             (STATUS_EIO, 5),
             (STATUS_EFBIG, 27),
+            (STATUS_ENAMETOOLONG, 36),
             (STATUS_EACCES, 13),
             (STATUS_EINVAL, 22),
             (STATUS_ENOSYS, 38),
@@ -78,6 +80,7 @@ mod tests {
             STATUS_ENOENT,
             STATUS_EIO,
             STATUS_EFBIG,
+            STATUS_ENAMETOOLONG,
             STATUS_EACCES,
             STATUS_EINVAL,
             STATUS_ENOSPC,

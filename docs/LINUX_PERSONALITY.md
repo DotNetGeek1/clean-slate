@@ -253,7 +253,7 @@ screenshots and demos. It is not a filesystem; the object store stays a boot/con
 
 Each file is one storage-service object (`0x4D_0001` + slot), and a 512-byte name table
 (object `0x4D_0000`, magic `CSHOME01`, 15 entries of length + name) lists them. The kernel
-code is `process::linux_fs::home_table` (layout, pure) and `home_backend` (requests).
+code is `process::linux_fs::home_table` (the native directory table, `clean-slate-native-abi::directory`, #312) and `home_backend` (requests). The table object's capability carries `DIRECTORY`, the native directory right that reaches its entry objects.
 
 | Limit | Value |
 |-------|-------|

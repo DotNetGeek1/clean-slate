@@ -10,6 +10,7 @@ use std::vec::Vec;
 
 use clean_slate_capability::{HolderId, Rights};
 use clean_slate_native_abi::desktop::SYSCALL_NR_IPC_SEND;
+use clean_slate_native_abi::directory::is_entry_of;
 use clean_slate_native_abi::object::{
     ObjectSubmitAt, OBJECT_OP_COMMIT, OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE_AT,
     OBJECT_SUBMIT_AT_BYTES, OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT_AT, SYSCALL_NR_CAP_OBJECT,
@@ -53,6 +54,8 @@ struct FakeObject {
 struct FakeObjects {
     /// `(handle, object id, write right)`.
     grants: Vec<(u64, u64, bool)>,
+    /// `(handle, directory id)`: read-write on the table and its entries.
+    directories: Vec<(u64, u64)>,
     objects: Vec<FakeObject>,
     /// Objects whose epoch-bound capability is stale: every request polls `ESTALE`.
     gone: Vec<u64>,
@@ -110,6 +113,13 @@ impl FakeKernel {
         self.objects.grants.push((handle, id, write));
     }
 
+    /// Gives the client `handle` with `READ | WRITE | DIRECTORY` on directory `id`: the table
+    /// and every entry object.
+    pub fn grant_directory(&mut self, handle: u64, id: u64) {
+        self.objects.grants.retain(|grant| grant.0 != handle);
+        self.objects.directories.push((handle, id));
+    }
+
     /// Object `id`'s bytes as staged, if it exists.
     pub fn object_staged(&self, id: u64) -> Option<&[u8]> {
         self.find_object(id)
@@ -130,6 +140,16 @@ impl FakeKernel {
     /// Object `id` was deleted under the client's epoch-bound capability.
     pub fn object_gone(&mut self, id: u64) {
         self.objects.gone.push(id);
+    }
+
+    /// The storage service restarted, or the machine rebooted: everything staged since the
+    /// last commit is forgotten, and buffers and requests are gone with the old process.
+    pub fn restart_storage(&mut self) {
+        for object in &mut self.objects.objects {
+            object.staged = object.committed.clone();
+        }
+        self.objects.done.clear();
+        self.buffers.clear();
     }
 
     /// `(op, object id, offset, len)` of every object request submitted.
@@ -154,15 +174,48 @@ impl FakeKernel {
                 let Ok(submit) = ObjectSubmitAt::decode(bytes) else {
                     return STATUS_EINVAL;
                 };
-                let Some(&(_, id, write)) =
-                    self.objects.grants.iter().find(|grant| grant.0 == args[1])
-                else {
-                    return STATUS_EACCES;
-                };
-                if id != submit.object_id || (submit.op != OBJECT_OP_READ_AT && !write) {
-                    return STATUS_EACCES;
+                let directory = self
+                    .objects
+                    .directories
+                    .iter()
+                    .find(|grant| grant.0 == args[1])
+                    .map(|&(_, directory)| directory);
+                let id = submit.object_id;
+                if let Some(directory) = directory {
+                    if id != directory && !is_entry_of(directory, id) {
+                        return STATUS_EACCES;
+                    }
+                } else {
+                    let Some(&(_, granted, write)) =
+                        self.objects.grants.iter().find(|grant| grant.0 == args[1])
+                    else {
+                        return STATUS_EACCES;
+                    };
+                    if granted != id || (submit.op != OBJECT_OP_READ_AT && !write) {
+                        return STATUS_EACCES;
+                    }
                 }
-                let payload = if submit.op == OBJECT_OP_WRITE_AT {
+                let staged = if submit.buffer == 0 {
+                    None
+                } else {
+                    let Some(index) = self.buffers.iter().position(|b| b.handle == submit.buffer)
+                    else {
+                        return STATUS_EACCES;
+                    };
+                    let start = submit.buffer_offset as usize;
+                    let end = start + submit.len as usize;
+                    if end > self.buffers[index].bytes.len() {
+                        return STATUS_EINVAL;
+                    }
+                    Some((index, start, end))
+                };
+                let payload = if let Some((index, start, end)) = staged {
+                    if submit.op == OBJECT_OP_WRITE_AT {
+                        self.buffers[index].bytes[start..end].to_vec()
+                    } else {
+                        Vec::new()
+                    }
+                } else if submit.op == OBJECT_OP_WRITE_AT {
                     // SAFETY: the client passes `len` live bytes at `data`.
                     unsafe {
                         std::slice::from_raw_parts(submit.data as *const u8, submit.len as usize)
@@ -174,7 +227,16 @@ impl FakeKernel {
                 self.objects
                     .requests
                     .push((submit.op, id, submit.offset, submit.len));
-                let (result, read) = self.serve_object(&submit, &payload);
+                let (mut result, mut read) = self.serve_object(&submit, &payload);
+                if let Some((index, start, _)) = staged {
+                    // The bytes moved through the buffer: the poll returns their count.
+                    if submit.op == OBJECT_OP_READ_AT {
+                        self.buffers[index].bytes[start..start + read.len()].copy_from_slice(&read);
+                    } else if result == 0 {
+                        result = submit.len;
+                    }
+                    read = Vec::new();
+                }
                 self.objects.next_request += 1;
                 let request_id = self.objects.next_request;
                 self.objects.done.push((request_id, result, read));

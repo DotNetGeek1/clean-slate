@@ -104,6 +104,8 @@ const USERSPACE_DISPATCH_ARMS: &[(&str, &[&str])] = &[
     ("m10-port", &["m10-port-self-test"]),
     ("m10-native-memory", &["m10-native-memory-self-test"]),
     ("m10-clock", &["m10-clock-self-test"]),
+    // Before `m6-object`: the storage lane enables the object feature for its storage service.
+    ("m10-storage", &["m10-storage-self-test"]),
     ("m6-revocation", &["m6-revocation-self-test"]),
     ("m6-capabilities", &["m6-capabilities-self-test"]),
     ("m6-object", &["m6-object-self-test"]),
@@ -414,6 +416,13 @@ fn main() {
         "clean-slate-storage-userspace",
         true,
     );
+    if env::var("CARGO_FEATURE_M10_STORAGE_SELF_TEST").is_ok() {
+        embed_userspace_image(
+            "storage_probe_userspace.bin",
+            "clean-slate-storage-probe-userspace",
+            true,
+        );
+    }
     if m6_fixture_self_test {
         embed_userspace_image(
             "m6_fixture_userspace.bin",
@@ -669,6 +678,9 @@ fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
             ("clean-slate-supervisor", "core,compiler_builtins")
         }
         "clean-slate-console-userspace" => ("clean-slate-console", "core,compiler_builtins"),
+        "clean-slate-storage-probe-userspace" => {
+            ("clean-slate-storage-probe", "core,compiler_builtins")
+        }
         "clean-slate-storage-userspace" => ("clean-slate-store", "core,alloc,compiler_builtins"),
         "clean-slate-network-userspace" => {
             ("clean-slate-net-service", "core,alloc,compiler_builtins")
@@ -737,6 +749,10 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
             "audit_userspace.bin" => ("audit_userspace_entry.rs", "AUDIT_USERSPACE"),
             "console_userspace.bin" => ("console_userspace_entry.rs", "CONSOLE_USERSPACE"),
             "storage_userspace.bin" => ("storage_userspace_entry.rs", "STORAGE_USERSPACE"),
+            "storage_probe_userspace.bin" => (
+                "storage_probe_userspace_entry.rs",
+                "STORAGE_PROBE_USERSPACE",
+            ),
             "m6_fixture_userspace.bin" => ("m6_fixture_userspace_entry.rs", "M6_FIXTURE_USERSPACE"),
             "network_userspace.bin" => ("network_userspace_entry.rs", "NETWORK_USERSPACE"),
             "compositor_userspace.bin" => ("compositor_userspace_entry.rs", "COMPOSITOR_USERSPACE"),
