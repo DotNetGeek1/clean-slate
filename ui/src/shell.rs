@@ -163,6 +163,8 @@ pub struct RailApp {
     pub icon: Icon,
     /// The app has a running instance (a dot marks it).
     pub running: bool,
+    /// The app has a minimised window (#357): a bar marks it, and a click restores it.
+    pub minimized: bool,
 }
 
 impl RailApp {
@@ -179,7 +181,13 @@ impl RailApp {
             len: end as u8,
             icon,
             running,
+            minimized: false,
         }
+    }
+
+    /// The same app, marked as having a minimised window or not (#357).
+    pub const fn with_minimized(self, minimized: bool) -> Self {
+        Self { minimized, ..self }
     }
 
     /// Caption.
@@ -579,6 +587,7 @@ impl<'t> Shell<'t> {
                 label: app.label(),
                 selected: self.apps.selected == Some(index),
                 running: app.running,
+                minimized: app.minimized,
             }
             .paint(canvas, style, slot, self.state.widget_state(index));
         }

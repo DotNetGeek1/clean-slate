@@ -188,6 +188,8 @@ pub const OP_WINDOW_TITLE: u16 = 0x8701;
 pub const OP_WINDOW_REMOVED: u16 = 0x8702;
 /// `WindowFocused` (`0x8703`): which listed window has keyboard focus, if any.
 pub const OP_WINDOW_FOCUSED: u16 = 0x8703;
+/// `WindowMinimized` (`0x8704`): a listed window was minimised or restored (#357).
+pub const OP_WINDOW_MINIMIZED: u16 = 0x8704;
 // Output feature events (`Features::OUTPUT_EVENTS`, #314). Sent only on connections that
 // negotiated the feature.
 /// `OutputChanged` (`0x8800`): the output's mode changed.

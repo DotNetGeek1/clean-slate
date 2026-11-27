@@ -50,6 +50,9 @@ pub struct WindowEntry {
     pub min_size: Size,
     pub max_size: Size,
     pub shown: bool,
+    /// Minimised by the window manager (#357): not composited and takes no input, but still
+    /// mapped and listed. Only the window manager sets it; a client `Hide` clears it.
+    pub minimized: bool,
 }
 
 impl WindowEntry {
@@ -68,6 +71,7 @@ impl WindowEntry {
                 height: 0,
             },
             shown: false,
+            minimized: false,
         }
     }
 }

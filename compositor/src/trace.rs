@@ -47,6 +47,7 @@ impl ButtonHit {
             Self::Surface => "surface",
             Self::Content => "content",
             Self::Title => "title",
+            Self::Control(ChromeControl::Minimize) => "minimize",
             Self::Control(ChromeControl::Close) => "close",
             Self::Resize => "resize",
         }

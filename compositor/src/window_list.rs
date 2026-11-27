@@ -2,7 +2,8 @@
 //!
 //! The compositor lists every shown toplevel under a compositor-wide [`WindowHandle`] and tells
 //! connections that negotiated the feature (only the shell: it needs `GFX_SHELL`) when windows
-//! are listed, retitled and removed, and which one has keyboard focus. The list is derived
+//! are listed, retitled, minimised or restored (#357) and removed, and which one has keyboard
+//! focus. A minimised window stays listed: the rail is how it comes back. The list is derived
 //! from the window manager's state after every loop turn ([`WindowList::update`]), so no code
 //! path that shows, hides, destroys or focuses a window has to remember to report it.
 //!
@@ -22,6 +23,8 @@ pub struct Shown {
     /// Kernel-stamped pid of the window's client.
     pub pid: u64,
     pub title: WindowTitle,
+    /// Minimised by the window manager (#357).
+    pub minimized: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,8 +51,9 @@ impl WindowList {
     }
 
     /// Brings the list in line with `shown` (`None` entries are skipped) and `focus`, emitting
-    /// what changed for subscribers already in sync: removals first, then additions
-    /// (`WindowAdded` then `WindowTitle`), retitles, and the focus last.
+    /// what changed for subscribers already in sync: removals first, then per window either
+    /// its addition (`WindowAdded`, `WindowTitle`, and `WindowMinimized` if it is minimised) or
+    /// its retitle and minimise change, and the focus last.
     pub fn update(
         &mut self,
         shown: &[Option<Shown>],
@@ -80,6 +84,12 @@ impl WindowList {
                             title: now.title,
                         });
                     }
+                    if listed.shown.minimized != now.minimized {
+                        emit(Event::WindowMinimized {
+                            window: listed.handle,
+                            minimized: now.minimized,
+                        });
+                    }
                     listed.shown = *now;
                 }
                 None => {
@@ -100,6 +110,12 @@ impl WindowList {
                         window: handle,
                         title: now.title,
                     });
+                    if now.minimized {
+                        emit(Event::WindowMinimized {
+                            window: handle,
+                            minimized: true,
+                        });
+                    }
                 }
             }
         }
@@ -122,6 +138,12 @@ impl WindowList {
                 window: listed.handle,
                 title: listed.shown.title,
             });
+            if listed.shown.minimized {
+                emit(Event::WindowMinimized {
+                    window: listed.handle,
+                    minimized: true,
+                });
+            }
         }
         emit(Event::WindowFocused {
             window: self.focused,
@@ -190,6 +212,7 @@ mod tests {
             key: key(connection, 1),
             pid: 100 + u64::from(connection),
             title: WindowTitle::from_str_truncating(title),
+            minimized: false,
         }
     }
 
@@ -310,6 +333,71 @@ mod tests {
         let mut empty = Vec::new();
         WindowList::new().snapshot(|e| empty.push(e));
         assert_eq!(empty, [Event::WindowFocused { window: None }]);
+    }
+
+    #[test]
+    fn minimising_keeps_the_window_listed_and_reports_the_change() {
+        let mut list = WindowList::new();
+        let (a, b) = (shown(1, "A"), shown(2, "B"));
+        update(&mut list, &[a, b], Some(a.key));
+        let (ha, hb) = (WindowHandle(1), WindowHandle(2));
+        let hidden = Shown {
+            minimized: true,
+            ..a
+        };
+        assert_eq!(
+            update(&mut list, &[hidden, b], Some(b.key)),
+            [
+                Event::WindowMinimized {
+                    window: ha,
+                    minimized: true
+                },
+                Event::WindowFocused { window: Some(hb) },
+            ]
+        );
+        assert_eq!(list.key_of(ha), Some(a.key), "still listed");
+        assert!(update(&mut list, &[hidden, b], Some(b.key)).is_empty());
+
+        // A subscriber that joins now learns it is minimised right after its title.
+        let mut events = Vec::new();
+        list.snapshot(|e| events.push(e));
+        assert_eq!(
+            events[2],
+            Event::WindowMinimized {
+                window: ha,
+                minimized: true
+            }
+        );
+        assert_eq!(events.len(), 6);
+
+        assert_eq!(
+            update(&mut list, &[a, b], Some(a.key)),
+            [
+                Event::WindowMinimized {
+                    window: ha,
+                    minimized: false
+                },
+                Event::WindowFocused { window: Some(ha) },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_first_listed_minimised_says_so_after_its_title() {
+        let mut list = WindowList::new();
+        let a = Shown {
+            minimized: true,
+            ..shown(1, "A")
+        };
+        let events = update(&mut list, &[a], None);
+        assert_eq!(events.len(), 3, "{events:?}");
+        assert_eq!(
+            events[2],
+            Event::WindowMinimized {
+                window: WindowHandle(1),
+                minimized: true
+            }
+        );
     }
 
     #[test]
