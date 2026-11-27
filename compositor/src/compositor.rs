@@ -47,6 +47,7 @@ use crate::wm::{GrabKind, PlaceRequest, Target, WindowPolicy, Wm, WmHit};
 use clean_slate_graphics::window::WindowTitle;
 use clean_slate_ui::chrome::ChromeState;
 
+mod output;
 mod routing;
 
 /// Output damage accumulated between presents; overflow collapses to the bounding box.
@@ -137,6 +138,10 @@ pub struct Stats {
     pub frames_done: u64,
     pub disconnects: u64,
     pub rejected_connections: u64,
+    /// Output size changes re-laid out (#314).
+    pub output_changes: u64,
+    /// The size the start-up `SET_MODE` asked for, when it asked (#314).
+    pub mode_requested: Option<Size>,
 }
 
 /// Per-scene-position scratch for one composite.
@@ -215,6 +220,8 @@ impl<P: WindowPolicy> Compositor<P> {
                 frames_done: 0,
                 disconnects: 0,
                 rejected_connections: 0,
+                output_changes: 0,
+                mode_requested: None,
             },
         }
     }
@@ -400,8 +407,11 @@ impl<P: WindowPolicy> Compositor<P> {
 
     // ---- service loop -----------------------------------------------------------------------
 
-    /// `QUERY_MODE` and schedule the first full-output paint.
+    /// Picks the output mode (#314: `ModeList::choose`, `SET_MODE` when it is not the current
+    /// one), then `QUERY_MODE` and schedule the first full-output paint. A mode change the
+    /// display finishes later arrives as an epoch change and re-lays out the output then.
     pub fn start(&mut self, display: &mut dyn DisplayBackend) -> Result<(), ServiceError> {
+        self.stats.mode_requested = output::pick_mode(display);
         let info = display.query_mode().map_err(ServiceError::Display)?;
         self.present = Some(PresentTracker::new(info));
         self.damage_full_output();
@@ -1126,13 +1136,18 @@ impl<P: WindowPolicy> Compositor<P> {
             return;
         };
         let observation = present.observe(status);
+        let before = present.size();
         if observation.requery {
             if let Ok(info) = io.display.query_mode() {
                 present.requeried(info);
             }
         }
+        let resized = present.size() != before;
         if let Some((seq, ns)) = observation.completed {
             self.fire_frame_done(seq, ns);
+        }
+        if resized {
+            self.output_changed();
         }
         if observation.full_damage {
             self.damage_full_output();

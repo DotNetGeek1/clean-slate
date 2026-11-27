@@ -11,6 +11,7 @@ use clean_slate_graphics::abi::display::{
 };
 use clean_slate_graphics::fake::FakeDisplay;
 use clean_slate_graphics::limits::{MAX_PRESENT_DAMAGE_RECTS, SCANOUT_BUFFER_COUNT};
+use clean_slate_graphics::mode::ModeList;
 use clean_slate_graphics::protocol::DisconnectReason;
 use clean_slate_graphics::raw_input::RawInputRecord;
 use clean_slate_native_abi::status::{STATUS_EAGAIN, STATUS_EPIPE, STATUS_ESTALE};
@@ -73,6 +74,14 @@ impl<const BYTES: usize> DisplayBackend for FakeDisplay<BYTES> {
 
     fn status(&mut self) -> Result<PresentStatus, DisplayError> {
         Ok(FakeDisplay::status(self))
+    }
+
+    fn query_modes(&mut self) -> Result<ModeList, DisplayError> {
+        Ok(FakeDisplay::modes(self))
+    }
+
+    fn set_mode(&mut self, width: u32, height: u32) -> Result<(), DisplayError> {
+        FakeDisplay::set_mode(self, width, height)
     }
 }
 
@@ -142,6 +151,19 @@ impl<const SLOTS: usize, const BYTES: usize> FakeSharedMemory<SLOTS, BYTES> {
         self.backing
             .iter()
             .position(|b| matches!(b, Some(b) if b.buffer_id == buffer_id))
+    }
+
+    /// The client's `RELEASE` of `buffer_id`: frees its backing for reuse. `false`, freeing
+    /// nothing, if it is unknown or the compositor still maps it.
+    pub fn free(&mut self, buffer_id: u64) -> bool {
+        let Some(slot) = self.slot_of(buffer_id) else {
+            return false;
+        };
+        if self.backing[slot].is_some_and(|b| b.mappings > 0) {
+            return false;
+        }
+        self.backing[slot] = None;
+        true
     }
 
     /// The owning client's read-write view.

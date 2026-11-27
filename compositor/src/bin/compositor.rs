@@ -33,17 +33,18 @@ use clean_slate_compositor::backend::{
 use clean_slate_compositor::diag::{self, DiagTracker};
 use clean_slate_compositor::{Compositor, Config, DefaultPolicy, Io};
 use clean_slate_graphics::abi::display::{
-    DisplayError, DisplayModeInfo, PresentRequest, PresentStatus, ScanoutMapping,
-    DISPLAY_ABI_VERSION, DISPLAY_MODE_INFO_BYTES, DISPLAY_SUBOP_BIND_WAKE,
+    DisplayError, DisplayModeInfo, DisplayModeList, PresentRequest, PresentStatus, ScanoutMapping,
+    DISPLAY_ABI_VERSION, DISPLAY_MODE_INFO_BYTES, DISPLAY_MODE_LIST_BYTES, DISPLAY_SUBOP_BIND_WAKE,
     DISPLAY_SUBOP_FIND_HANDLE, DISPLAY_SUBOP_MAP_SCANOUT, DISPLAY_SUBOP_PRESENT,
-    DISPLAY_SUBOP_PRESENT_STATUS, DISPLAY_SUBOP_QUERY_MODE, PRESENT_REQUEST_BYTES,
-    PRESENT_STATUS_BYTES, SCANOUT_MAPPING_BYTES,
+    DISPLAY_SUBOP_PRESENT_STATUS, DISPLAY_SUBOP_QUERY_MODE, DISPLAY_SUBOP_QUERY_MODES,
+    DISPLAY_SUBOP_SET_MODE, PRESENT_REQUEST_BYTES, PRESENT_STATUS_BYTES, SCANOUT_MAPPING_BYTES,
 };
 use clean_slate_graphics::abi::input::{
     INPUT_ABI_VERSION, INPUT_SUBOP_BIND_WAKE, INPUT_SUBOP_FIND_HANDLE, INPUT_SUBOP_READ_BATCH,
     READ_BATCH_MAX_RECORDS,
 };
 use clean_slate_graphics::limits::SCANOUT_BUFFER_COUNT;
+use clean_slate_graphics::mode::ModeList;
 use clean_slate_graphics::protocol::DisconnectReason;
 use clean_slate_graphics::raw_input::{RawInputRecord, RAW_INPUT_RECORD_BYTES};
 use clean_slate_native_abi::desktop::{
@@ -331,6 +332,34 @@ impl DisplayBackend for KernelDisplay {
         );
         checked(raw).map_err(display_failure)?;
         PresentStatus::decode(&out).map_err(|_| DisplayError::ModeUnavailable)
+    }
+
+    fn query_modes(&mut self) -> Result<ModeList, DisplayError> {
+        let mut out = [0u8; DISPLAY_MODE_LIST_BYTES];
+        let raw = syscall(
+            SYSCALL_NR_DISPLAY,
+            DISPLAY_SUBOP_QUERY_MODES,
+            self.handle,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+            0,
+        );
+        checked(raw).map_err(display_failure)?;
+        DisplayModeList::decode(&out)
+            .map(|list| list.modes)
+            .map_err(|_| DisplayError::ModeUnavailable)
+    }
+
+    fn set_mode(&mut self, width: u32, height: u32) -> Result<(), DisplayError> {
+        let raw = syscall(
+            SYSCALL_NR_DISPLAY,
+            DISPLAY_SUBOP_SET_MODE,
+            self.handle,
+            u64::from(width),
+            u64::from(height),
+            0,
+        );
+        checked(raw).map(|_| ()).map_err(display_failure)
     }
 }
 

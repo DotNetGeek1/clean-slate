@@ -9,6 +9,7 @@
 use clean_slate_graphics::abi::display::{
     DisplayError, DisplayModeInfo, PresentRequest, PresentStatus,
 };
+use clean_slate_graphics::mode::ModeList;
 use clean_slate_graphics::protocol::DisconnectReason;
 use clean_slate_graphics::raw_input::RawInputRecord;
 use clean_slate_native_abi::{ConnectionId, PortRecvRecord, TransferredCap};
@@ -102,6 +103,11 @@ pub trait DisplayBackend {
     fn present(&mut self, request: &PresentRequest) -> Result<u64, DisplayError>;
     /// `PRESENT_STATUS`.
     fn status(&mut self) -> Result<PresentStatus, DisplayError>;
+    /// `QUERY_MODES` (#314): the sizes the output offers, with the current one flagged.
+    fn query_modes(&mut self) -> Result<ModeList, DisplayError>;
+    /// `SET_MODE` (#314). `Ok` means accepted: the change takes effect, with an epoch bump, at
+    /// once or later on the device's answer; the core learns it from `PRESENT_STATUS`.
+    fn set_mode(&mut self, width: u32, height: u32) -> Result<(), DisplayError>;
 }
 
 /// Raw input drain (syscall 19, `INPUT_CONSUME`).

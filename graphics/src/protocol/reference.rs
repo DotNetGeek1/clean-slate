@@ -275,5 +275,13 @@
 //! | 12 | 4 | `window` `WindowHandle` u32 (`WindowFocused`: 0 = none) |
 //! | 16..64 | — | static padding |
 //!
+//! ## `OutputChanged` (`0x8800`, `OUTPUT_EVENTS`, object must be 0)
+//!
+//! | Off | W | Field |
+//! |---|---|---|
+//! | 12..24 | — | static padding |
+//! | 24..56 | — | `output`, laid out as in `Welcome` |
+//! | 56..64 | — | static padding |
+//!
 //! Empty-body events (`BufferRegistered`, `BufferReleased`, `BufferUnregistered`, `SurfaceCreated`,
 //! `WindowCreated`, `CloseRequested`, `KeyboardFocus`, `InputReset`): 12..64 static padding; see §3.1 for object rules.

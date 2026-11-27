@@ -36,12 +36,12 @@
 use crate::geometry::{BufferRect, Scale120};
 use crate::ids::OutputId;
 use crate::limits::{MAX_PRESENT_DAMAGE_RECTS, SCANOUT_BUFFER_COUNT};
-use crate::mode::DisplayMode;
+use crate::mode::{mode_size_in_bounds, DisplayMode, ModeFlags, ModeList, MAX_OFFERED_MODES};
 use crate::pixel::PixelFormat;
 
 use super::status::{
     STATUS_EACCES, STATUS_EAGAIN, STATUS_EBADF, STATUS_EIO, STATUS_ENODEV, STATUS_ENOTRECOVERABLE,
-    STATUS_ERANGE, STATUS_ESTALE, STATUS_ETIMEDOUT,
+    STATUS_EOPNOTSUPP, STATUS_ERANGE, STATUS_ESTALE, STATUS_ETIMEDOUT,
 };
 use super::wire::{
     check_range_zero, read_u16_le, read_u32_le, read_u64_le, write_u16_le, write_u32_le,
@@ -57,6 +57,10 @@ pub const DISPLAY_SUBOP_MAP_SCANOUT: u64 = 3;
 pub const DISPLAY_SUBOP_PRESENT: u64 = 4;
 pub const DISPLAY_SUBOP_PRESENT_STATUS: u64 = 5;
 pub const DISPLAY_SUBOP_BIND_WAKE: u64 = 6;
+/// `SET_MODE` (#314): `rdx` = width, `r10` = height of a settable offered mode.
+pub const DISPLAY_SUBOP_SET_MODE: u64 = 7;
+/// `QUERY_MODES` (#314): out ptr, len [`DISPLAY_MODE_LIST_BYTES`].
+pub const DISPLAY_SUBOP_QUERY_MODES: u64 = 8;
 
 /// At most one in-flight present per backend (§8.2).
 pub const MAX_PRESENTS_IN_FLIGHT: usize = 1;
@@ -65,6 +69,8 @@ pub const DISPLAY_MODE_INFO_BYTES: usize = 32;
 pub const SCANOUT_MAPPING_BYTES: usize = 32;
 pub const PRESENT_REQUEST_BYTES: usize = 136;
 pub const PRESENT_STATUS_BYTES: usize = 40;
+pub const DISPLAY_MODE_ENTRY_BYTES: usize = 8;
+pub const DISPLAY_MODE_LIST_BYTES: usize = 8 + MAX_OFFERED_MODES * DISPLAY_MODE_ENTRY_BYTES;
 
 const _: () = assert!(PRESENT_REQUEST_BYTES == 8 + MAX_PRESENT_DAMAGE_RECTS * 8);
 
@@ -81,6 +87,9 @@ pub enum DisplayError {
     DeviceTimeout = 7,
     ResetRequired = 8,
     Poisoned = 9,
+    /// `SET_MODE` named a size the output does not offer as settable, or one its scanout buffers
+    /// cannot hold (#314).
+    UnsupportedMode = 10,
 }
 
 impl DisplayError {
@@ -99,6 +108,7 @@ impl DisplayError {
             7 => Some(Self::DeviceTimeout),
             8 => Some(Self::ResetRequired),
             9 => Some(Self::Poisoned),
+            10 => Some(Self::UnsupportedMode),
             _ => None,
         }
     }
@@ -114,6 +124,7 @@ impl DisplayError {
             Self::DeviceTimeout => STATUS_ETIMEDOUT,
             Self::ResetRequired => STATUS_EIO,
             Self::Poisoned => STATUS_ENOTRECOVERABLE,
+            Self::UnsupportedMode => STATUS_EOPNOTSUPP,
         }
     }
 
@@ -129,6 +140,7 @@ impl DisplayError {
             STATUS_ETIMEDOUT => Some(Self::DeviceTimeout),
             STATUS_EIO => Some(Self::ResetRequired),
             STATUS_ENOTRECOVERABLE => Some(Self::Poisoned),
+            STATUS_EOPNOTSUPP => Some(Self::UnsupportedMode),
             _ => None,
         }
     }
@@ -190,6 +202,86 @@ impl DisplayModeInfo {
             scanout_buffer_count: bytes[24],
             max_present_damage_rects: bytes[25],
         })
+    }
+}
+
+/// Output of `QUERY_MODES` (#314): the current `OutputId` and every mode the output offers.
+///
+/// Layout: `output` u32 at 0, entry count u8 at 4, zero at 5..8, then
+/// [`MAX_OFFERED_MODES`] entries of [`DISPLAY_MODE_ENTRY_BYTES`] at 8: width u16, height u16,
+/// flags u8 ([`ModeFlags`]), zero at 5..8. Unused entries are zero. A valid list has every size
+/// inside [`mode_size_in_bounds`], no size twice, exactly one `CURRENT` entry and it settable, and
+/// at most one `PREFERRED`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayModeList {
+    pub output: OutputId,
+    pub modes: ModeList,
+}
+
+impl DisplayModeList {
+    pub fn encode(&self) -> [u8; DISPLAY_MODE_LIST_BYTES] {
+        let mut out = [0u8; DISPLAY_MODE_LIST_BYTES];
+        write_u32_le(&mut out, 0, self.output.encode());
+        let entries = self.modes.as_slice();
+        out[4] = entries.len() as u8;
+        for (i, entry) in entries.iter().enumerate() {
+            let base = 8 + DISPLAY_MODE_ENTRY_BYTES * i;
+            write_u16_le(&mut out, base, entry.width_px as u16);
+            write_u16_le(&mut out, base + 2, entry.height_px as u16);
+            out[base + 4] = entry.flags.0;
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DisplayWireError> {
+        if bytes.len() != DISPLAY_MODE_LIST_BYTES || !check_range_zero(bytes, 5, 8) {
+            return Err(DisplayWireError::Malformed);
+        }
+        let output =
+            OutputId::decode(read_u32_le(bytes, 0)).map_err(|_| DisplayWireError::Malformed)?;
+        let count = usize::from(bytes[4]);
+        if count > MAX_OFFERED_MODES {
+            return Err(DisplayWireError::Malformed);
+        }
+        let mut modes = ModeList::new();
+        let (mut current, mut preferred) = (0, 0);
+        for i in 0..MAX_OFFERED_MODES {
+            let base = 8 + DISPLAY_MODE_ENTRY_BYTES * i;
+            if i >= count {
+                if !check_range_zero(bytes, base, base + DISPLAY_MODE_ENTRY_BYTES) {
+                    return Err(DisplayWireError::Malformed);
+                }
+                continue;
+            }
+            if !check_range_zero(bytes, base + 5, base + DISPLAY_MODE_ENTRY_BYTES) {
+                return Err(DisplayWireError::Malformed);
+            }
+            let width = u32::from(read_u16_le(bytes, base));
+            let height = u32::from(read_u16_le(bytes, base + 2));
+            let flags = ModeFlags(bytes[base + 4]);
+            if flags.0 & !ModeFlags::KNOWN.0 != 0
+                || !mode_size_in_bounds(width, height)
+                || modes.find(width, height).is_some()
+            {
+                return Err(DisplayWireError::Malformed);
+            }
+            if flags.contains(ModeFlags::CURRENT) {
+                if !flags.contains(ModeFlags::SETTABLE) {
+                    return Err(DisplayWireError::Malformed);
+                }
+                current += 1;
+            }
+            if flags.contains(ModeFlags::PREFERRED) {
+                preferred += 1;
+            }
+            modes
+                .offer(width, height, flags)
+                .map_err(|_| DisplayWireError::Malformed)?;
+        }
+        if current != 1 || preferred > 1 {
+            return Err(DisplayWireError::Malformed);
+        }
+        Ok(Self { output, modes })
     }
 }
 

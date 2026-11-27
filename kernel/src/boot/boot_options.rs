@@ -284,6 +284,109 @@ fn file_name_is(field: &[u8], expected: &[u8]) -> bool {
     &field[..end] == expected
 }
 
+// ---- #314: the display size option -------------------------------------------------------------
+
+const DISPLAY_FILE_NAME: &[u8] = b"opt/clean-slate/display";
+/// `1920x1080` is nine bytes; anything past this is not a size.
+const MAX_DISPLAY_OPTION_BYTES: usize = 11;
+
+/// The size `opt/clean-slate/display` asks for, read once before `ExitBootServices` (GOP sets its
+/// mode there) and remembered for the VirtIO-GPU bring-up. 0 = not read yet, 1 = no size, else
+/// `width << 32 | height`.
+static DISPLAY_SIZE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The configured display size, `WIDTHxHEIGHT` in decimal, nothing else. A missing file, an
+/// unreadable directory, a malformed value or no hypervisor is no size; the backends then fall
+/// back on their own default. Bounds are the backends' business: a size out of bounds is offered
+/// by neither.
+pub(crate) fn configured_display_size() -> Option<(u32, u32)> {
+    use core::sync::atomic::Ordering;
+
+    let cached = DISPLAY_SIZE.load(Ordering::Acquire);
+    let raw = if cached != 0 {
+        cached
+    } else {
+        let size = read_display_size_now();
+        let raw = size.map_or(1, |(width, height)| {
+            (u64::from(width) << 32) | u64::from(height)
+        });
+        DISPLAY_SIZE.store(raw, Ordering::Release);
+        raw
+    };
+    (raw != 1).then_some(((raw >> 32) as u32, raw as u32))
+}
+
+fn read_display_size_now() -> Option<(u32, u32)> {
+    #[cfg(not(test))]
+    {
+        let feature_ecx =
+            unsafe { core::arch::x86_64::__cpuid(crate::arch::x86_64::CPUID_FEATURES_LEAF).ecx };
+        if !crate::arch::x86_64::hypervisor_present_from_cpuid(feature_ecx) {
+            return None;
+        }
+        read_display_size(&mut LegacyPorts)
+    }
+    #[cfg(test)]
+    {
+        None
+    }
+}
+
+fn read_display_size(io: &mut impl FwCfgIo) -> Option<(u32, u32)> {
+    let mut payload = [0u8; MAX_DISPLAY_OPTION_BYTES];
+    let len = read_named_file(io, DISPLAY_FILE_NAME, &mut payload)?;
+    parse_display_size(&payload[..len])
+}
+
+/// Finds `name` in the file directory and reads it whole into `out`; `None` when the device,
+/// the directory or the file is missing or unreadable, or the file is longer than `out`.
+fn read_named_file(io: &mut impl FwCfgIo, name: &[u8], out: &mut [u8]) -> Option<usize> {
+    io.select(SIGNATURE_KEY);
+    let mut signature = [0u8; 4];
+    read_bounded(io, &mut signature).ok()?;
+    if signature != *SIGNATURE {
+        return None;
+    }
+    io.select(FILE_DIR_KEY);
+    let mut count_bytes = [0u8; 4];
+    read_bounded(io, &mut count_bytes).ok()?;
+    let count = u32::from_be_bytes(count_bytes);
+    if count > MAX_DIRECTORY_FILES {
+        return None;
+    }
+    let mut found = None;
+    for _ in 0..count {
+        let mut entry = [0u8; FILE_ENTRY_BYTES];
+        read_bounded(io, &mut entry).ok()?;
+        if found.is_none() && file_name_is(&entry[8..8 + FILE_NAME_BYTES], name) {
+            let size = u32::from_be_bytes([entry[0], entry[1], entry[2], entry[3]]);
+            let select = u16::from_be_bytes([entry[4], entry[5]]);
+            found = Some((select, size));
+        }
+    }
+    let (select, size) = found?;
+    let len = usize::try_from(size).ok().filter(|len| *len <= out.len())?;
+    io.select(select);
+    read_bounded(io, &mut out[..len]).ok()?;
+    Some(len)
+}
+
+/// `WIDTHxHEIGHT`: one to four decimal digits each, no sign, space or leading zero.
+fn parse_display_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let split = bytes.iter().position(|byte| *byte == b'x')?;
+    let number = |digits: &[u8]| -> Option<u32> {
+        if digits.is_empty() || digits.len() > 4 || digits[0] == b'0' {
+            return None;
+        }
+        digits.iter().try_fold(0u32, |value, digit| {
+            digit
+                .is_ascii_digit()
+                .then(|| value * 10 + u32::from(digit - b'0'))
+        })
+    };
+    Some((number(&bytes[..split])?, number(&bytes[split + 1..])?))
+}
+
 #[cfg(not(test))]
 struct LegacyPorts;
 
@@ -373,6 +476,43 @@ mod tests {
             items.push((*select, payload.to_vec()));
         }
         Fake::new(items)
+    }
+
+    #[test]
+    fn display_size_parses_only_width_x_height() {
+        assert_eq!(parse_display_size(b"1024x768"), Some((1024, 768)));
+        assert_eq!(parse_display_size(b"1920x1080"), Some((1920, 1080)));
+        for bad in [
+            &b""[..],
+            b"1024",
+            b"x768",
+            b"1024x",
+            b"1024X768",
+            b"01024x768",
+            b"1024x0768",
+            b"1024 x768",
+            b"1024x768\n",
+            b"1024x768x2",
+            b"-1x768",
+            b"10240x768",
+        ] {
+            assert_eq!(parse_display_size(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn display_size_reads_its_own_file_and_ignores_the_desktop_one() {
+        let desktop = entry(2, 0x21, "opt/clean-slate/desktop");
+        let display = entry(8, 0x22, "opt/clean-slate/display");
+        let mut io = device(&[desktop, display], &[(0x21, b"q1"), (0x22, b"1024x768")]);
+        assert_eq!(read_display_size(&mut io), Some((1024, 768)));
+        let mut io = device(&[desktop], &[(0x21, b"q1")]);
+        assert_eq!(read_display_size(&mut io), None, "no file");
+        let long = entry(12, 0x22, "opt/clean-slate/display");
+        let mut io = device(&[long], &[(0x22, b"1024x768    ")]);
+        assert_eq!(read_display_size(&mut io), None, "longer than any size");
+        let mut io = Fake::new(vec![(SIGNATURE_KEY, b"NOPE".to_vec())]);
+        assert_eq!(read_display_size(&mut io), None, "no fw_cfg device");
     }
 
     #[test]

@@ -25,6 +25,8 @@ pub const STATUS_ERANGE: u64 = u64::MAX - 33;
 pub const STATUS_ETIMEDOUT: u64 = u64::MAX - 109;
 /// Display/input `ENOTRECOVERABLE` sentinel (§8.1).
 pub const STATUS_ENOTRECOVERABLE: u64 = u64::MAX - 130;
+/// Display `EOPNOTSUPP` sentinel: `SET_MODE` of a size the output does not offer as settable (#314).
+pub const STATUS_EOPNOTSUPP: u64 = u64::MAX - 95;
 
 /// Every status sentinel is `>= STATUS_RANGE_START` (§8.1).
 pub const STATUS_RANGE_START: u64 = u64::MAX - 4095;

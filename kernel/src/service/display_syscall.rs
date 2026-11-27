@@ -6,10 +6,11 @@
 use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL};
 use clean_slate_capability::{CapabilityError, HolderId};
 use clean_slate_graphics::display::{
-    DisplayError, PresentRequest, ScanoutMapping, DISPLAY_ABI_VERSION, DISPLAY_MODE_INFO_BYTES,
-    DISPLAY_SUBOP_BIND_WAKE, DISPLAY_SUBOP_FIND_HANDLE, DISPLAY_SUBOP_MAP_SCANOUT,
-    DISPLAY_SUBOP_PRESENT, DISPLAY_SUBOP_PRESENT_STATUS, DISPLAY_SUBOP_QUERY_MODE,
-    PRESENT_REQUEST_BYTES, PRESENT_STATUS_BYTES, SCANOUT_MAPPING_BYTES,
+    DisplayError, DisplayModeList, PresentRequest, ScanoutMapping, DISPLAY_ABI_VERSION,
+    DISPLAY_MODE_INFO_BYTES, DISPLAY_MODE_LIST_BYTES, DISPLAY_SUBOP_BIND_WAKE,
+    DISPLAY_SUBOP_FIND_HANDLE, DISPLAY_SUBOP_MAP_SCANOUT, DISPLAY_SUBOP_PRESENT,
+    DISPLAY_SUBOP_PRESENT_STATUS, DISPLAY_SUBOP_QUERY_MODE, DISPLAY_SUBOP_QUERY_MODES,
+    DISPLAY_SUBOP_SET_MODE, PRESENT_REQUEST_BYTES, PRESENT_STATUS_BYTES, SCANOUT_MAPPING_BYTES,
 };
 use clean_slate_native_abi::SharedBufferAccess;
 
@@ -17,7 +18,6 @@ use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::display::{
     authorize_display_present, authorize_display_query, find_display_handle,
 };
-use crate::device::display::engine::DisplayState;
 use crate::device::display::{with_active_display, ActiveDisplay, PRIMARY_OUTPUT_INDEX};
 use crate::mm::shared_buffer::kernel_owned::map_kernel_owned_into;
 use crate::mm::user_access::{copy_from_user, copy_to_user};
@@ -52,15 +52,25 @@ pub(crate) fn handle_syscall_display(frame: &mut SyscallContext) {
             backend_present,
         ),
         DISPLAY_SUBOP_QUERY_MODE => {
-            copy_out::<DISPLAY_MODE_INFO_BYTES>(frame.rsi, frame.rdx, frame.r10, |state| {
-                state.mode_info().encode()
+            copy_out::<DISPLAY_MODE_INFO_BYTES>(frame.rsi, frame.rdx, frame.r10, |display| {
+                display.state().mode_info().encode()
             })
         }
         DISPLAY_SUBOP_PRESENT_STATUS => {
-            copy_out::<PRESENT_STATUS_BYTES>(frame.rsi, frame.rdx, frame.r10, |state| {
-                state.status().encode()
+            copy_out::<PRESENT_STATUS_BYTES>(frame.rsi, frame.rdx, frame.r10, |display| {
+                display.state().status().encode()
             })
         }
+        DISPLAY_SUBOP_QUERY_MODES => {
+            copy_out::<DISPLAY_MODE_LIST_BYTES>(frame.rsi, frame.rdx, frame.r10, |display| {
+                DisplayModeList {
+                    output: display.state().output(),
+                    modes: display.modes(),
+                }
+                .encode()
+            })
+        }
+        DISPLAY_SUBOP_SET_MODE => handle_set_mode(frame.rsi, frame.rdx, frame.r10),
         DISPLAY_SUBOP_MAP_SCANOUT => handle_map_scanout(frame.rsi, frame.rdx, frame.r10, frame.r8),
         DISPLAY_SUBOP_PRESENT => handle_present(frame.rsi, frame.rdx, frame.r10),
         DISPLAY_SUBOP_BIND_WAKE => handle_bind_wake(frame.rsi, frame.rdx, frame.r10),
@@ -182,6 +192,45 @@ fn handle_bind_wake(raw_handle: u64, raw_work_set: u64, raw_bit: u64) -> u64 {
     )
 }
 
+fn handle_set_mode(raw_handle: u64, raw_width: u64, raw_height: u64) -> u64 {
+    set_mode(
+        raw_width,
+        raw_height,
+        current_holder,
+        |holder| authorize_present(holder, raw_handle),
+        |holder, width, height| {
+            with_active_display(|display| {
+                display.map(|display| display.set_mode(holder, width, height))
+            })
+        },
+    )
+}
+
+/// `SET_MODE` (#314): both sizes fit in `u32` (`EINVAL`) → caller → `DISPLAY_PRESENT` → backend →
+/// state → presenter → a settable offered size (`EOPNOTSUPP`) → in flight (`EAGAIN`) → accept
+/// (0). A size that is already current is accepted and changes nothing.
+fn set_mode(
+    raw_width: u64,
+    raw_height: u64,
+    holder: impl FnOnce() -> Result<HolderId, u64>,
+    authorize: impl FnOnce(HolderId) -> Result<(), CapabilityError>,
+    apply: impl FnOnce(HolderId, u32, u32) -> Option<Result<(), DisplayError>>,
+) -> u64 {
+    let status = (|| {
+        let width = u32::try_from(raw_width).map_err(|_| SYSCALL_EINVAL)?;
+        let height = u32::try_from(raw_height).map_err(|_| SYSCALL_EINVAL)?;
+        let holder = holder()?;
+        authorize(holder).map_err(CapabilityError::syscall_status)?;
+        apply(holder, width, height)
+            .ok_or(DisplayError::ModeUnavailable.status())?
+            .map_err(DisplayError::status)
+    })();
+    match status {
+        Ok(()) => 0,
+        Err(status) => status,
+    }
+}
+
 /// `MAP_SCANOUT`: exact length and pointer → caller → `DISPLAY_PRESENT` → backend → presenter →
 /// index (`EBADF`) → allocate, pin and bind on first use → map read-write into the caller.
 fn map_scanout(
@@ -247,14 +296,14 @@ fn copy_out<const N: usize>(
     raw_handle: u64,
     out_ptr: u64,
     out_len: u64,
-    encode: impl FnOnce(&DisplayState) -> [u8; N],
+    encode: impl FnOnce(&mut ActiveDisplay) -> [u8; N],
 ) -> u64 {
     let bytes = query(
         out_len,
         || validate_user_writable_pointer_range(out_ptr, out_len).is_ok(),
         current_holder,
         |holder| authorize_query(holder, raw_handle),
-        || with_active_display(|display| display.map(|display| encode(display.state()))),
+        || with_active_display(|display| display.map(encode)),
     );
     match bytes {
         Ok(bytes) => match copy_to_user(out_ptr, &bytes) {
@@ -308,11 +357,12 @@ fn query<const N: usize>(
 
 #[cfg(test)]
 mod tests {
+    use crate::device::display::engine::DisplayState;
     use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ESTALE};
     use clean_slate_capability::{
         CapabilityError, CapabilityTable, HolderId, Provenance, ResourceClass, ResourceRef, Rights,
     };
-    use clean_slate_graphics::abi_status::STATUS_ENODEV;
+    use clean_slate_graphics::abi_status::{STATUS_ENODEV, STATUS_EOPNOTSUPP};
     use clean_slate_graphics::display::{
         DisplayError, DisplayModeInfo, PresentRequest, PresentState, PresentStatus, ScanoutMapping,
         DISPLAY_MODE_INFO_BYTES, PRESENT_REQUEST_BYTES, PRESENT_STATUS_BYTES,
@@ -324,11 +374,12 @@ mod tests {
 
     use core::cell::RefCell;
 
-    use super::{authorize_then_reset, bind_wake, find_handle, map_scanout, present, query};
+    use super::{
+        authorize_then_reset, bind_wake, find_handle, map_scanout, present, query, set_mode,
+    };
     use crate::capability::display::{
         authorize_display_present_in, authorize_display_query_in, find_display_handle_in,
     };
-    use crate::device::display::engine::DisplayState;
     use crate::device::display::{reset_pending_for_test, ActiveDisplay};
     use crate::mm::shared_buffer::ArenaFrames;
 
@@ -744,6 +795,86 @@ mod tests {
             bind_wake(31, caller, present_auth(&table, handle), |_, _| Some(
                 Ok(())
             )),
+            0
+        );
+    }
+
+    #[test]
+    fn set_mode_checks_sizes_caller_capability_then_backend() {
+        let (table, handle) = table_with(Some(Rights::DISPLAY_PRESENT));
+        let (inspect, inspect_handle) = table_with(Some(Rights::INSPECT));
+        assert_eq!(
+            set_mode(
+                1 << 32,
+                768,
+                unreachable_caller,
+                |_| unreachable!(),
+                |_, _, _| unreachable!()
+            ),
+            SYSCALL_EINVAL
+        );
+        assert_eq!(
+            set_mode(
+                1024,
+                u64::MAX,
+                unreachable_caller,
+                |_| unreachable!(),
+                |_, _, _| unreachable!()
+            ),
+            SYSCALL_EINVAL
+        );
+        assert_eq!(
+            set_mode(
+                1024,
+                768,
+                no_caller,
+                |_| unreachable!(),
+                |_, _, _| unreachable!()
+            ),
+            SYSCALL_EACCES
+        );
+        assert_eq!(
+            set_mode(
+                1024,
+                768,
+                caller,
+                present_auth(&inspect, inspect_handle),
+                |_, _, _| unreachable!()
+            ),
+            SYSCALL_EACCES,
+            "INSPECT alone cannot change the mode"
+        );
+        assert_eq!(
+            set_mode(
+                1024,
+                768,
+                caller,
+                present_auth(&table, handle),
+                |_, _, _| None
+            ),
+            STATUS_ENODEV
+        );
+        assert_eq!(
+            set_mode(
+                1024,
+                768,
+                caller,
+                present_auth(&table, handle),
+                |_, _, _| { Some(Err(DisplayError::UnsupportedMode)) }
+            ),
+            STATUS_EOPNOTSUPP
+        );
+        assert_eq!(
+            set_mode(
+                1024,
+                768,
+                caller,
+                present_auth(&table, handle),
+                |holder, w, h| {
+                    assert_eq!((holder, w, h), (CALLER, 1024, 768));
+                    Some(Ok(()))
+                }
+            ),
             0
         );
     }

@@ -7,9 +7,7 @@
 
 use clean_slate_capability::HolderId;
 use clean_slate_graphics::display::DisplayError;
-use clean_slate_graphics::{
-    BufferLayout, REFERENCE_FRAME_BYTES, REFERENCE_MODE, SCANOUT_BUFFER_COUNT,
-};
+use clean_slate_graphics::{BufferLayout, DisplayMode, SCANOUT_BUFFER_COUNT};
 use clean_slate_native_abi::{SharedBufferId, MAX_EXTENTS_PER_BUFFER};
 
 use super::source::{FrameSource, FrameSourceId, FrameSourceKind, PhysExtent, SourceError};
@@ -19,9 +17,11 @@ use crate::mm::shared_buffer::{BufferFrames, ShareError};
 use crate::mm::PAGE_SIZE;
 use crate::sched::work_set::{self, WorkSetBinding};
 
-/// One kernel-owned scanout buffer in the reference layout, pinned while it exists.
+/// One kernel-owned scanout buffer, pinned while it exists. It holds `capacity` bytes and is laid
+/// out for the output's current mode, which a mode change replaces in place (#314).
 pub(crate) struct ScanoutBuffer {
     id: SharedBufferId,
+    capacity: u64,
     layout: BufferLayout,
     extents: [PhysExtent; MAX_EXTENTS_PER_BUFFER],
     extent_count: usize,
@@ -29,16 +29,15 @@ pub(crate) struct ScanoutBuffer {
 }
 
 impl ScanoutBuffer {
-    /// A zeroed, pinned reference-mode buffer; nothing is left allocated on failure.
-    pub(crate) fn allocate(frames: &mut impl BufferFrames) -> Result<Self, ShareError> {
-        let layout = BufferLayout::new(
-            REFERENCE_MODE.width_px,
-            REFERENCE_MODE.height_px,
-            REFERENCE_MODE.stride_bytes,
-            REFERENCE_MODE.format,
-        )
-        .map_err(|_| ShareError::Invalid)?;
-        let id = kernel_owned::allocate_kernel_owned(REFERENCE_FRAME_BYTES as u64, frames)?;
+    /// A zeroed, pinned buffer of `capacity` bytes laid out for `mode`; nothing is left allocated
+    /// on failure.
+    pub(crate) fn allocate(
+        frames: &mut impl BufferFrames,
+        capacity: u64,
+        mode: DisplayMode,
+    ) -> Result<Self, ShareError> {
+        let layout = mode_layout(mode, capacity).ok_or(ShareError::Invalid)?;
+        let id = kernel_owned::allocate_kernel_owned(capacity, frames)?;
         let pin = match kernel_owned::pin(id) {
             Ok(pin) => pin,
             Err(error) => {
@@ -56,6 +55,7 @@ impl ScanoutBuffer {
         }
         Ok(Self {
             id,
+            capacity,
             layout,
             extents,
             extent_count: list.as_slice().len(),
@@ -67,10 +67,23 @@ impl ScanoutBuffer {
         self.id
     }
 
+    /// Bytes the buffer holds and the presenter maps.
+    pub(crate) fn capacity(&self) -> u64 {
+        self.capacity
+    }
+
+    /// Lays the buffer out for `mode`; a mode whose frame would not fit keeps the old layout,
+    /// which every later present then fails to match.
+    pub(crate) fn relayout(&mut self, mode: DisplayMode) {
+        if let Some(layout) = mode_layout(mode, self.capacity) {
+            self.layout = layout;
+        }
+    }
+
     /// Overwrites the whole frame from `src` (boot-context self-test).
     #[cfg(feature = "m10-virtio-gpu-self-test")]
     pub(crate) fn write_frame(&self, src: &[u8]) -> Result<(), ShareError> {
-        if src.len() != REFERENCE_FRAME_BYTES {
+        if src.len() as u64 > self.capacity {
             return Err(ShareError::Invalid);
         }
         kernel_owned::with_kernel_bytes_mut(&self.pin, 0, src.len() as u64, |offset, chunk| {
@@ -84,6 +97,17 @@ impl ScanoutBuffer {
         kernel_owned::unpin(self.pin, frames);
         let _ = kernel_owned::release_kernel_owned(self.id, frames);
     }
+}
+
+fn mode_layout(mode: DisplayMode, capacity: u64) -> Option<BufferLayout> {
+    let layout = BufferLayout::new(
+        mode.width_px,
+        mode.height_px,
+        mode.stride_bytes,
+        mode.format,
+    )
+    .ok()?;
+    layout.fits_in(capacity).then_some(layout)
 }
 
 impl FrameSource for ScanoutBuffer {
@@ -102,7 +126,7 @@ impl FrameSource for ScanoutBuffer {
         visit: &mut dyn FnMut(&[u8]),
     ) -> Result<(), SourceError> {
         let end = offset.checked_add(len).ok_or(SourceError::OutOfRange)?;
-        if end > REFERENCE_FRAME_BYTES {
+        if end as u64 > self.capacity {
             return Err(SourceError::OutOfRange);
         }
         let mut extent_start = 0usize;
@@ -210,11 +234,14 @@ impl Presenter {
 mod tests {
     use super::*;
     use crate::mm::shared_buffer::ArenaFrames;
+    use clean_slate_graphics::{REFERENCE_FRAME_BYTES, REFERENCE_MODE};
 
     #[test]
     fn scanout_buffer_spans_cover_exactly_the_reference_frame() {
         let mut frames = ArenaFrames::new(1100);
-        let buffer = ScanoutBuffer::allocate(&mut frames).expect("allocate");
+        let buffer =
+            ScanoutBuffer::allocate(&mut frames, REFERENCE_FRAME_BYTES as u64, REFERENCE_MODE)
+                .expect("allocate");
         let pages: u32 = buffer
             .phys_extents()
             .iter()
@@ -256,7 +283,10 @@ mod tests {
     fn allocation_failure_leaves_nothing_behind() {
         let mut frames = ArenaFrames::new(16);
         let before = frames.live_frames();
-        assert!(ScanoutBuffer::allocate(&mut frames).is_err());
+        assert!(
+            ScanoutBuffer::allocate(&mut frames, REFERENCE_FRAME_BYTES as u64, REFERENCE_MODE)
+                .is_err()
+        );
         assert_eq!(frames.live_frames(), before);
     }
 

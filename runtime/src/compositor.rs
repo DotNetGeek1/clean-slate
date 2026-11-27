@@ -58,6 +58,13 @@ impl<S: Syscalls, const N: usize> CompositorClient<S, N> {
         Ok(())
     }
 
+    /// Unmaps and releases buffer `slot`, if there is one.
+    pub fn release(&mut self, slot: usize) {
+        if let Some(old) = self.buffers.get_mut(slot).and_then(Option::take) {
+            let _ = old.release(&mut self.sys);
+        }
+    }
+
     /// Sends `request`. `transfer` names the buffer whose capability travels with it
     /// (`RegisterBuffer`); waits as long as the queue is full.
     pub fn send(&mut self, request: &Request, transfer: Option<usize>) -> Result<(), Error> {
@@ -163,6 +170,21 @@ mod tests {
         );
         assert!(client.pixels(1).is_none());
         assert!(client.pixels(2).is_none());
+    }
+
+    #[test]
+    fn a_released_slot_has_no_buffer_and_can_be_allocated_again() {
+        let mut client = connect();
+        client.allocate(0, 4096).expect("allocate");
+        client.allocate(1, 4096).expect("allocate");
+        assert_eq!(client.sys().live_buffers(), 2);
+        client.release(0);
+        client.release(0);
+        assert_eq!(client.sys().live_buffers(), 1);
+        assert!(client.pixels(0).is_none());
+        assert!(client.pixels(1).is_some());
+        client.allocate(0, 8192).expect("allocate again");
+        assert_eq!(client.sys().live_buffers(), 2);
     }
 
     #[test]

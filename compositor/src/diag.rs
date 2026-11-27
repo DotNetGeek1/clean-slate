@@ -28,6 +28,7 @@ pub struct DiagTracker {
     windows: [Option<(SurfaceKey, Point)>; MAX_WINDOWS],
     focus: Option<SurfaceKey>,
     rows: Option<Rows>,
+    output_changes: u64,
 }
 
 impl Default for DiagTracker {
@@ -41,6 +42,14 @@ pub fn started_line(width: u32, height: u32, opaque: bool) -> ConsoleLine {
     ConsoleLine::format(format_args!(
         "[COMP] started output={width}x{height} tier={}",
         if opaque { "Q0" } else { "Q1" }
+    ))
+}
+
+/// `[COMP] output changed output=1024x768`: the output now runs another size (#314) and the
+/// shell and windows were re-laid out for it.
+pub fn output_line(width: u32, height: u32) -> ConsoleLine {
+    ConsoleLine::format(format_args!(
+        "[COMP] output changed output={width}x{height}"
     ))
 }
 
@@ -107,6 +116,7 @@ impl DiagTracker {
             windows: [None; MAX_WINDOWS],
             focus: None,
             rows: None,
+            output_changes: 0,
         }
     }
 
@@ -125,6 +135,14 @@ impl DiagTracker {
         compositor: &Compositor<P>,
         emit: &mut dyn FnMut(ConsoleLine),
     ) {
+        let changes = compositor.stats().output_changes;
+        if changes != self.output_changes {
+            self.output_changes = changes;
+            if let Some(present) = compositor.present() {
+                let size = present.size();
+                emit(output_line(size.width, size.height));
+            }
+        }
         let wm = compositor.wm();
         let scene = compositor.scene();
         let toplevel_origin = |key: SurfaceKey| {
@@ -213,6 +231,7 @@ mod tests {
             "[WIN ] created x=1 y=2 windows=1",
             "[WIN ] closed windows=0",
             "[COMP] rows clients=1 surfaces=2 windows=1",
+            "[COMP] output changed output=1024x768",
         ];
         for line in per_input {
             assert!(is_per_input_line(line), "{line}");

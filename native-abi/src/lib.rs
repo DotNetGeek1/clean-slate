@@ -64,8 +64,9 @@ mod graphics_status_mirrors_capability_syscall_abi {
         STATUS_EACCES as GFX_EACCES, STATUS_EAGAIN as GFX_EAGAIN, STATUS_EBADF as GFX_EBADF,
         STATUS_EINVAL as GFX_EINVAL, STATUS_EIO as GFX_EIO, STATUS_ENODEV as GFX_ENODEV,
         STATUS_ENOSPC as GFX_ENOSPC, STATUS_ENOSYS as GFX_ENOSYS,
-        STATUS_ENOTRECOVERABLE as GFX_ENOTRECOVERABLE, STATUS_ERANGE as GFX_ERANGE,
-        STATUS_ESTALE as GFX_ESTALE, STATUS_ETIMEDOUT as GFX_ETIMEDOUT,
+        STATUS_ENOTRECOVERABLE as GFX_ENOTRECOVERABLE, STATUS_EOPNOTSUPP as GFX_EOPNOTSUPP,
+        STATUS_ERANGE as GFX_ERANGE, STATUS_ESTALE as GFX_ESTALE,
+        STATUS_ETIMEDOUT as GFX_ETIMEDOUT,
     };
 
     use clean_slate_graphics::abi::display::DisplayError;
@@ -138,6 +139,7 @@ mod graphics_status_mirrors_capability_syscall_abi {
             ("graphics.ERANGE", GFX_ERANGE),
             ("graphics.ETIMEDOUT", GFX_ETIMEDOUT),
             ("graphics.ENOTRECOVERABLE", GFX_ENOTRECOVERABLE),
+            ("graphics.EOPNOTSUPP", GFX_EOPNOTSUPP),
             ("display.EACCES", DisplayError::NotPresenter.status()),
             ("display.ESTALE", DisplayError::StaleEpoch.status()),
             ("display.EBADF", DisplayError::InvalidBuffer.status()),
@@ -147,6 +149,7 @@ mod graphics_status_mirrors_capability_syscall_abi {
             ("display.ETIMEDOUT", DisplayError::DeviceTimeout.status()),
             ("display.EIO", DisplayError::ResetRequired.status()),
             ("display.ENOTRECOVERABLE", DisplayError::Poisoned.status()),
+            ("display.EOPNOTSUPP", DisplayError::UnsupportedMode.status()),
         ];
 
         for (name, value) in entries {

@@ -5,7 +5,7 @@
 use clean_slate_graphics::geometry::{Fixed24_8, Point, Rect, Size};
 use clean_slate_graphics::ids::{Serial, WindowId};
 use clean_slate_graphics::input::{KeyState, KeyUsage, Modifiers, PointerButton, TextRun};
-use clean_slate_graphics::limits::{MAX_SURFACES, MAX_SURFACES_PER_CLIENT, MAX_SURFACE_EXTENT};
+use clean_slate_graphics::limits::{MAX_SURFACES, MAX_SURFACES_PER_CLIENT};
 use clean_slate_graphics::protocol::{Event, Features, ProtocolError};
 use clean_slate_graphics::role::SurfaceRole;
 use clean_slate_graphics::window::{WindowConfig, WindowStates};
@@ -869,14 +869,6 @@ impl<P: WindowPolicy> Compositor<P> {
                 },
             }),
         };
-    }
-
-    fn bounds(&self) -> Size {
-        let output = self.output_size();
-        Size {
-            width: output.width.min(MAX_SURFACE_EXTENT),
-            height: output.height.min(MAX_SURFACE_EXTENT),
-        }
     }
 
     /// Move: reposition the existing surface (no client repaint). Resize: ask the client for

@@ -54,11 +54,11 @@ const _: () = assert!(HEADER_BYTES + BODY_BYTES == FRAME_BYTES);
 const _: () = assert!(16 + DAMAGE_RECTS_PER_FRAME * 8 <= 64);
 const _: () = assert!(16 + REGION_RECTS_PER_FRAME * 16 == 64);
 const _: () = assert!(13 + MAX_TITLE_BYTES <= 64);
-const _: () = assert!(Features::KNOWN == 0x7F);
+const _: () = assert!(Features::KNOWN == 0xFF);
 
 #[test]
 fn feature_bits_are_distinct_powers_of_two_and_or_to_known() {
-    const BITS: [u64; 7] = [
+    const BITS: [u64; 8] = [
         Features::TEXT_INPUT,
         Features::PRESENTATION_DETAIL,
         Features::RELATIVE_POINTER,
@@ -66,6 +66,7 @@ fn feature_bits_are_distinct_powers_of_two_and_or_to_known() {
         Features::CLIENT_DECORATIONS,
         Features::SUBSURFACES,
         Features::WINDOW_LIST,
+        Features::OUTPUT_EVENTS,
     ];
     for bit in BITS {
         assert_ne!(bit, 0);
@@ -258,6 +259,7 @@ fn all_events_round_trip() {
         features: Features(0),
         output,
     });
+    round_trip_event(Event::OutputChanged { output });
     round_trip_event(Event::Error {
         object: 0xFFFF_FFFF,
         request_opcode: 0x7ABC,
@@ -745,7 +747,7 @@ fn negotiate_matrix() {
         .unwrap()
         .1
         .bits(),
-        0x7F
+        0xFF
     );
     assert!(negotiate(ProtocolVersion { major: 0, minor: 0 }, z, s, z).is_err());
     assert!(negotiate(ProtocolVersion { major: 2, minor: 0 }, z, s, z).is_err());
@@ -1082,6 +1084,16 @@ fn canonical_event_for_opcode(op: u16) -> [u8; FRAME_BYTES] {
             window: WindowHandle(1),
         },
         OP_WINDOW_FOCUSED => Event::WindowFocused { window: None },
+        OP_OUTPUT_CHANGED => Event::OutputChanged {
+            output: OutputInfo {
+                id: OutputId::new(0, 1).unwrap(),
+                mode: REFERENCE_MODE,
+                logical_size: Size {
+                    width: 1280,
+                    height: 800,
+                },
+            },
+        },
         _ => panic!("opcode"),
     };
     ev.encode(0).unwrap()

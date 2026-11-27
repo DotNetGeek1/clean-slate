@@ -79,7 +79,8 @@ fn welcome_offers_text_input_when_asked() {
     assert!(
         matches!(
             inbox.events.as_slice(),
-            [(_, Event::Welcome { features, .. })] if *features == TEXT
+            [(_, Event::Welcome { features, .. })]
+                if *features == Features(TEXT.0 | Features::OUTPUT_EVENTS)
         ),
         "{inbox:?}"
     );

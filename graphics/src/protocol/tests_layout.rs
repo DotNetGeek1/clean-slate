@@ -134,6 +134,20 @@ fn event_body_layout_tiles_with_spec_fields() {
         (super::OP_WINDOW_TITLE, &[(12, 16), (16, 17), (24, 64)]),
         (super::OP_WINDOW_REMOVED, &[(12, 16)]),
         (super::OP_WINDOW_FOCUSED, &[(12, 16)]),
+        (
+            super::OP_OUTPUT_CHANGED,
+            &[
+                (24, 28),
+                (28, 32),
+                (32, 36),
+                (36, 40),
+                (40, 41),
+                (42, 44),
+                (44, 48),
+                (48, 52),
+                (52, 56),
+            ],
+        ),
     ];
     for (op, fields) in cases {
         assert_tiles_12_64(fields, &spec_pads(*op, EVENT_SPECS));

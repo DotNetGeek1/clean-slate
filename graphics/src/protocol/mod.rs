@@ -27,8 +27,8 @@ pub const PROTOCOL_MAJOR: u16 = 1;
 /// Negotiated minor version (§1.1).
 pub const PROTOCOL_MINOR: u16 = 0;
 
-/// Server feature set (§1.1): text input since #309.
-pub const M10_SERVER_FEATURES: Features = Features(Features::TEXT_INPUT);
+/// Server feature set (§1.1): text input since #309, output events since #314.
+pub const M10_SERVER_FEATURES: Features = Features(Features::TEXT_INPUT | Features::OUTPUT_EVENTS);
 /// What the compositor offers a connection holding `GFX_SHELL`: the M10 set plus the window
 /// list (#237).
 pub const SHELL_SERVER_FEATURES: Features = Features(M10_SERVER_FEATURES.0 | Features::WINDOW_LIST);
@@ -92,6 +92,9 @@ impl Features {
     /// `0x8700..=0x87FF`. Granted only to a connection whose `Graphics` capability carries
     /// `GFX_SHELL`; the compositor drops the bit for anyone else.
     pub const WINDOW_LIST: u64 = 1 << 6;
+    /// Output changes (#314): events `0x8800..=0x88FF`. A connection that asks for it learns a
+    /// new output mode from `OutputChanged`; any client may ask.
+    pub const OUTPUT_EVENTS: u64 = 1 << 7;
 
     /// Bits assigned in protocol 1.x (§5.2).
     pub const KNOWN: u64 = Self::TEXT_INPUT
@@ -100,7 +103,8 @@ impl Features {
         | Self::FRACTIONAL_SCALE
         | Self::CLIENT_DECORATIONS
         | Self::SUBSURFACES
-        | Self::WINDOW_LIST;
+        | Self::WINDOW_LIST
+        | Self::OUTPUT_EVENTS;
 
     pub const fn bits(self) -> u64 {
         self.0
@@ -184,6 +188,10 @@ pub const OP_WINDOW_TITLE: u16 = 0x8701;
 pub const OP_WINDOW_REMOVED: u16 = 0x8702;
 /// `WindowFocused` (`0x8703`): which listed window has keyboard focus, if any.
 pub const OP_WINDOW_FOCUSED: u16 = 0x8703;
+// Output feature events (`Features::OUTPUT_EVENTS`, #314). Sent only on connections that
+// negotiated the feature.
+/// `OutputChanged` (`0x8800`): the output's mode changed.
+pub const OP_OUTPUT_CHANGED: u16 = 0x8800;
 
 /// Version and feature negotiation (§4).
 pub fn negotiate(

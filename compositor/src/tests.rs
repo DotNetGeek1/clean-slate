@@ -3,6 +3,7 @@
 mod composition;
 mod lifecycle;
 mod limits;
+mod modes;
 mod protocol;
 mod service_loop;
 mod units;
@@ -18,7 +19,7 @@ use clean_slate_graphics::abi::display::{
 use clean_slate_graphics::fake::FakeDisplay;
 use clean_slate_graphics::geometry::{BufferRect, Point, Scale120};
 use clean_slate_graphics::ids::{ClientBufferId, Serial, SurfaceId, WindowId};
-use clean_slate_graphics::mode::DisplayMode;
+use clean_slate_graphics::mode::{DisplayMode, ModeList};
 use clean_slate_graphics::pixel::{BufferLayout, ColorSpace, PixelFormat};
 use clean_slate_graphics::protocol::{
     Event, Features, ProtocolError, ProtocolVersion, Request, PROTOCOL_MAJOR, PROTOCOL_MINOR,
@@ -185,6 +186,8 @@ pub(crate) fn test_mode() -> DisplayMode {
 pub(crate) struct RecordingDisplay {
     pub inner: Box<FakeDisplay<FRAME>>,
     pub presents: Vec<PresentRequest>,
+    /// Every `SET_MODE` the compositor issued.
+    pub mode_sets: Vec<(u32, u32)>,
 }
 
 impl DisplayBackend for RecordingDisplay {
@@ -204,6 +207,15 @@ impl DisplayBackend for RecordingDisplay {
 
     fn status(&mut self) -> Result<PresentStatus, DisplayError> {
         Ok(self.inner.status())
+    }
+
+    fn query_modes(&mut self) -> Result<ModeList, DisplayError> {
+        Ok(self.inner.modes())
+    }
+
+    fn set_mode(&mut self, width: u32, height: u32) -> Result<(), DisplayError> {
+        self.mode_sets.push((width, height));
+        self.inner.set_mode(width, height)
     }
 }
 
@@ -306,6 +318,7 @@ impl<P: WindowPolicy> Harness<P> {
         let mut display = RecordingDisplay {
             inner: Box::new(FakeDisplay::new(test_mode()).unwrap()),
             presents: Vec::new(),
+            mode_sets: Vec::new(),
         };
         comp.start(&mut display).unwrap();
         let mut port = FakePort::new(params).unwrap();

@@ -315,7 +315,7 @@ Acceptance: `cargo xtask test-m10-nxe` and `cargo xtask test-m10-shared-buffer` 
 
 ## Reference mode
 
-`graphics::mode::REFERENCE_MODE` is the single M10 output geometry. Lanes must not choose their own.
+`graphics::mode::REFERENCE_MODE` is the M10 boot geometry and the one every lane is pinned to. A lane that tests another size asks for it through the display boot option (see [Display modes](#display-modes-314)); it must not pick one any other way.
 
 | Field | Value |
 |---|---|
@@ -330,8 +330,22 @@ Why: 1280×800 is QEMU `virtio-gpu`'s default and is in OVMF's bochs/stdvga mode
 
 Pinning (planned, per lane):
 
-- **GOP lane (#111):** `-vga std`. Before `ExitBootServices` the kernel iterates GOP modes and calls `SetMode` for exactly 1280×800, and fails closed if the mode is absent. `PixelBlueGreenRedReserved8BitPerColor` copies unchanged; `PixelRedGreenBlueReserved8BitPerColor` is converted at present-copy time; `PixelBitMask` and `PixelBltOnly` are rejected. The aperture stride is backend-private; the compositor always sees 5120.
-- **VirtIO lane (#114):** `-vga none -device virtio-gpu-pci,xres=1280,yres=800`. `GET_DISPLAY_INFO` must report an enabled 1280×800 scanout 0, otherwise the backend fails closed. OVMF's VirtIO-GPU GOP is blit-only, so this lane must not require GOP capture.
+- **GOP lane (#111):** `-vga std`. Before `ExitBootServices` the kernel iterates GOP modes and calls `SetMode` for 1280×800 (unless the display option names another offered size, #314), and fails closed if no usable mode is offered. `PixelBlueGreenRedReserved8BitPerColor` copies unchanged; `PixelRedGreenBlueReserved8BitPerColor` is converted at present-copy time; `PixelBitMask` and `PixelBltOnly` are rejected. The aperture stride is backend-private; the compositor always sees the packed stride (5120 at 1280×800).
+- **VirtIO lane (#114):** `-vga none -device virtio-gpu-pci,xres=1280,yres=800`. `GET_DISPLAY_INFO` must report an enabled scanout 0, otherwise the backend fails closed; its size is the host's preferred mode (#314), and the boot resource is 1280×800 whatever it says. OVMF's VirtIO-GPU GOP is blit-only, so this lane must not require GOP capture.
+
+### Display modes (#314)
+
+Authoritative: `graphics::mode` (`ModeList`, `ModeFlags`, `mode_size_in_bounds`, `STANDARD_MODE_SIZES`), `graphics::abi::display` (`DisplayModeList`, subops 7 and 8). Kernel: `kernel/src/boot/gop.rs`, `kernel/src/device/display/{mod.rs, engine.rs, virtio_gpu.rs}`.
+
+- **Bounds.** Every mode an output offers is packed `Xrgb8888` at scale 1 (`DisplayMode::packed`: stride = width × 4), each side between 640×480 and `MAX_SURFACE_EXTENT`, and one frame within `MAX_MODE_FRAME_BYTES` = `MAX_BUFFER_BYTES` (8 MiB). 1920×1080 (8,294,400 bytes) is the largest standard size that fits; 1920×1200 does not.
+- **Flags.** `CURRENT` (exactly one entry: what scans out now), `PREFERRED` (at most one: the configured size, else the host's own size on a backend that reports one), `SETTABLE` (`SET_MODE` accepts it). The current mode is always settable.
+- **Configuration.** QEMU fw_cfg file `opt/clean-slate/display`, `WIDTHxHEIGHT` in decimal and nothing else (`1024x768`). The default image reads it once before `ExitBootServices` and keeps it for the VirtIO-GPU bring-up; self-test kernels never read it. A missing, malformed or out-of-bounds value is no configuration.
+- **GOP.** The boot sets the configured size if the firmware offers it, else 1280×800, else the largest usable size (the wider of equal areas), each with B,G,R,X over R,G,B,X. GOP cannot change mode after `ExitBootServices`, so `QUERY_MODES` lists every usable firmware size (at most 16) but only the boot mode is settable.
+- **VirtIO-GPU.** The device scans out a resource of any size, so every listed size is settable: the current one, the host's size from `GET_DISPLAY_INFO`, each `STANDARD_MODE_SIZES` entry no larger than it in either axis, and the configured size. A change is one batch: `RESOURCE_DETACH_BACKING` (when a buffer is attached), `RESOURCE_UNREF`, `RESOURCE_CREATE_2D` at the new size. The next present attaches its buffer and links the scanout (`SET_SCANOUT` with the full new mode), exactly as after a bring-up, and must carry full-frame damage. A failed change needs a reset, and the reset brings the device up in the mode that was asked for.
+- **Scanout buffers.** Each is allocated on its first `MAP_SCANOUT` with room for the largest frame among the current and the settable modes, in whole pages; `ScanoutMapping.byte_len` is that capacity. A mode change re-lays the buffers out in place, so mappings never move and stay valid across it. Once buffers exist, a listed size whose frame would not fit them loses `SETTABLE`.
+- **Epoch.** A mode change bumps the `OutputId` epoch when it takes effect (at once on a synchronous backend, at the device's answer on VirtIO-GPU) and signals the wake bit. Until then the old mode is `CURRENT`, and `PRESENT`, `MAP_SCANOUT` of a new index and another `SET_MODE` are `BufferBusy`. Every request on the old epoch is `StaleEpoch`; the compositor re-queries the mode as after a reset.
+- **Choice.** `ModeList::choose` is the compositor's start-up policy: the preferred entry if it is settable, else the largest settable entry (the wider of equal areas), else the current one. `Compositor::start` issues `SET_MODE` for it when it is not the current mode (`Stats::mode_requested`); a refusal keeps the current mode. With the reference launch flags the choice is 1280×800 on both backends: GOP sets only its boot mode, and QEMU's VirtIO-GPU reports `xres`×`yres` as its preferred size.
+- **Re-layout.** When a `QUERY_MODE` after an epoch change reports another size (`compositor/src/compositor/output.rs`), the compositor moves every placed toplevel the least distance that puts its whole frame on the output (`wm::fit_inside`), sends each window a `Configure` with the new bounds and, if its frame is still larger than the output, a size that fits (`wm::fit_size`), clamps the pointer, posts `OutputChanged` to every `OUTPUT_EVENTS` connection, repaints the whole output and logs `[COMP] output changed output=WxH`. The desktop shell lays itself out again for the new size with a second buffer set: it registers the new background and rail buffers while the old ones stay on screen, commits both surfaces at once, then unregisters each old buffer when the compositor releases it and releases its memory once that is confirmed; a further change waits until the old set is gone.
 
 ## Pixels, alpha and colour
 
@@ -615,6 +629,7 @@ Protocol version `1.0` (`PROTOCOL_MAJOR`, `PROTOCOL_MINOR`); `M10_SERVER_FEATURE
 | seat | — | `InputReset` 0x8060 |
 | text input (`TEXT_INPUT`) | — | `Text` 0x8100, `KeyRepeat` 0x8101 (0x8102 reserved for preedit) |
 | window list (`WINDOW_LIST`, shell only) | `ActivateWindow` 0x0700 | `WindowAdded` 0x8700, `WindowTitle` 0x8701, `WindowRemoved` 0x8702, `WindowFocused` 0x8703 |
+| output events (`OUTPUT_EVENTS`) | — | `OutputChanged` 0x8800 |
 
 Per-frame limits: `Damage` carries at most `DAMAGE_RECTS_PER_FRAME` (5) `BufferRect`s and the region requests at most `REGION_RECTS_PER_FRAME` (3) `Rect`s; larger sets use several requests before one `Commit`. `SetTitle` carries a `WindowTitle` of at most `MAX_TITLE_BYTES` (40) bytes of UTF-8, truncated on a character boundary by the encoder. `Commit` carries `request_frame`, `color_space` and an optional configure `ack`.
 
@@ -634,6 +649,10 @@ Per-frame limits: `Damage` carries at most `DAMAGE_RECTS_PER_FRAME` (5) `BufferR
 - `WindowTitle` (0x8701): `window` @12, `len` u8 @16 (0..=40), 17..24 zero, UTF-8 @24..64 (`len` bytes, the rest zero).
 - `WindowRemoved` (0x8702): `window` @12. The window was hidden or destroyed, or its client left.
 - `WindowFocused` (0x8703): `window` @12, 0 when no listed window has focus (a shell surface or nothing does).
+
+**Output events (#314).** A client whose surfaces are sized to the output sets `Features::OUTPUT_EVENTS` in `Hello`; the compositor offers it to everyone (`M10_SERVER_FEATURES`), and the desktop shell asks for it. Toplevels need no event: a mode change reaches them as a `Configure` ([Display modes](#display-modes-314)).
+
+- `OutputChanged` (0x8800): object 0, 12..24 zero, the new `OutputInfo` @24..56 laid out as in `Welcome`, 56..64 zero. Sent once per change, after the new mode took effect.
 
 **Negotiation.** `Hello { version, features }` must be the first request; `Welcome` replies with the negotiated version and features and the output (`OutputInfo`: id, mode, logical size). `negotiate`:
 
@@ -655,16 +674,19 @@ Register convention (matches the network syscall, `SYSCALL_NR_NETWORK_CAPABILITY
 | 4 | `PRESENT` | in ptr, len 136 (`PresentRequest`) | `DISPLAY_PRESENT` + bound presenter | `present_seq` ≥ 1 |
 | 5 | `PRESENT_STATUS` | out ptr, len 40 (`PresentStatus`) | `INSPECT` or `DISPLAY_PRESENT` | 0 |
 | 6 | `BIND_WAKE` | work-set handle, bit 0..=31 | `DISPLAY_PRESENT` + bound presenter | 0 |
-| 0, 7.. | reserved | — | — | `EINVAL` |
+| 7 | `SET_MODE` | `rdx` = width, `r10` = height (#314) | `DISPLAY_PRESENT` + bound presenter, or none bound yet | 0 |
+| 8 | `QUERY_MODES` | out ptr, len 136 (`DisplayModeList`, #314) | `INSPECT` or `DISPLAY_PRESENT` | 0 |
+| 0, 9.. | reserved | — | — | `EINVAL` |
 
 Kernel wiring: `kernel/src/service/display_syscall.rs` (order and status mapping) over `device::display::ActiveDisplay` (presenter, buffers, engine).
 
 - **`MAP_SCANOUT` evaluation order:** length or pointer (`EINVAL`) → capability (`DISPLAY_PRESENT`) → no backend (`ENODEV`) → presenter (`EACCES`) → index ≥ 2 (`EBADF`) → first map of that index allocates, pins and binds its buffer (a `ShareError` status such as `NoSpace` when the global limits are exhausted; `EIO` / `ENOTRECOVERABLE` if the output needs a reset or is poisoned) → map into the caller (`ShareError` statuses). The presenter binds only when the mapping succeeds.
 - **Buffer lifetime.** Each scanout buffer is allocated on the first `MAP_SCANOUT` of its index (global shared-buffer limits; no per-owner quota), pinned, and bound to the output for the rest of the boot. Presenter exit unmaps them from that process only; a successor presenter maps the same buffers (contents are not cleared).
+- **`SET_MODE` evaluation order:** width or height above `u32::MAX` (`EINVAL`) → capability (`DISPLAY_PRESENT`) → no backend (`ENODEV`) → `Poisoned` (`ENOTRECOVERABLE`), `ResetRequired` (`EIO`) → presenter (`EACCES`; a caller may set the mode before it maps, while none is bound, and that does not bind it) → not a settable listed size (`EOPNOTSUPP`) → a present or mode change in flight (`EAGAIN`) → accept. The current size is accepted and changes nothing. See [Display modes](#display-modes-314).
 - **`BIND_WAKE` evaluation order:** bit ∉ 0..=31 (`EINVAL`) → capability (`DISPLAY_PRESENT`) → no backend (`ENODEV`) → presenter (`EACCES`, also when no presenter is bound yet) → work-set handle (#200 `work_set::bind` statuses). A later `BIND_WAKE` replaces the binding; teardown drops it.
 
 - **Presenter.** The first successful `MAP_SCANOUT` binds the caller's holder. `MAP_SCANOUT`, `PRESENT` and `BIND_WAKE` from any other holder → `NotPresenter`. Only process teardown releases the binding. `MAP_SCANOUT` is idempotent per index. Mappings are user read-write and NX, and persist across epoch bumps.
-- **Scanout buffers.** `SCANOUT_BUFFER_COUNT` (2) kernel-owned buffers of the reference mode (stride 5120, `byte_len` 4,096,000). The compositor renders into the one that is not in flight.
+- **Scanout buffers.** `SCANOUT_BUFFER_COUNT` (2) kernel-owned buffers, each sized for the largest settable mode and laid out for the current one (#314; at the reference mode alone, stride 5120 and `byte_len` 4,096,000). The compositor renders into the one that is not in flight.
 - **`PRESENT` evaluation order** (the first failure wins): length or pointer (`EINVAL`) → capability authorisation (`EINVAL` / `ESTALE` / `EACCES`) → `PresentRequest::decode` (`EINVAL`) → no backend (`ENODEV`), `Poisoned` (`ENOTRECOVERABLE`), `ResetRequired` (`EIO`) → presenter binding (`EACCES`) → `PresentRequest::validate` (output ≠ current → `ESTALE`; index ≥ 2 → `EBADF`; `damage_count` ∉ `1..=16` or a zero-area or out-of-mode rect → `ERANGE`) → index not mapped (`EBADF`) → a present in flight (`EAGAIN`, `MAX_PRESENTS_IN_FLIGHT` = 1) → accept, `present_seq += 1`.
 - **Damage** is exact and in bounds; the kernel does not clip.
 - **Copy semantics (R8).** On every backend, the kernel copies only the damaged rects of the named buffer to scanout; pixels outside the damage keep their previously presented content. No backend may flip a whole buffer and expose stale undamaged content.
@@ -681,6 +703,7 @@ Kernel wiring: `kernel/src/service/display_syscall.rs` (order and status mapping
 | `DeviceTimeout` | 7 | `ETIMEDOUT` | only in `PresentStatus.last_error`; never a syscall return |
 | `ResetRequired` | 8 | `EIO` | backend timed out and is resetting |
 | `Poisoned` | 9 | `ENOTRECOVERABLE` | reset failed; permanent for this boot |
+| `UnsupportedMode` | 10 | `EOPNOTSUPP` | `SET_MODE` of a size that is not a settable listed mode (#314) |
 
 `DisplayError::from_status` is lossy for `EACCES` and `ESTALE`, which capability failures share.
 
@@ -688,8 +711,8 @@ Kernel wiring: `kernel/src/service/display_syscall.rs` (order and status mapping
 
 Production boot claims the modern-only `virtio-gpu-pci` function (#196 transport, MSI-X or INTx; no legacy I/O path exists) only when GOP capture left no display. Interrupts and the W3 timeout path are already live at that point.
 
-- **One host resource.** Resource 1 (`B8G8R8X8_UNORM`, the reference mode) is scanout 0 for the boot. Bring-up is one batch: `GET_DISPLAY_INFO` (scanout 0 must be enabled at 1280×800, otherwise the backend fails closed) and `RESOURCE_CREATE_2D`. It completes asynchronously. `SET_SCANOUT` waits for the first present after a bring-up, right after that present's `RESOURCE_ATTACH_BACKING`: the virtio 1.2 GPU sequence (§5.7.6.2) links a framebuffer to a scanout only once its backing is attached, and QEMU 6.1 and later answer `SET_SCANOUT` on a resource without backing with `ERR_UNSPEC` (#226). A `PRESENT` accepted before it finishes queues behind it on the in-order control queue. A failed bring-up moves the output to `ResetRequired`.
-- **Present.** If the named buffer is not the attached backing, the present detaches the old backing and attaches the buffer's pinned extents (`RESOURCE_ATTACH_BACKING`, ≤ 16 page-aligned extents covering exactly 4,096,000 bytes). When nothing was attached since the bring-up, there is nothing to detach and `SET_SCANOUT` (scanout 0, resource 1, the full mode) follows the attach; a later buffer switch keeps the scanout linked. It then sends one `TRANSFER_TO_HOST_2D` per damage rect (offset `y·5120 + x·4`) and one `RESOURCE_FLUSH` of the damage bounding box. Host pixels outside the damage keep their content (R8). The whole present is one batch behind one notify, and every command carries the `DISPLAY_COMMAND_TIMEOUT_NS` W3 deadline.
+- **One host resource.** Resource 1 (`B8G8R8X8_UNORM`, the current mode, 1280×800 at boot) is scanout 0. Bring-up is one batch: `GET_DISPLAY_INFO` (scanout 0 must be enabled, otherwise the backend fails closed; its size is recorded as the host's preferred mode) and `RESOURCE_CREATE_2D`. A mode change recreates the resource ([Display modes](#display-modes-314)). It completes asynchronously. `SET_SCANOUT` waits for the first present after a bring-up, right after that present's `RESOURCE_ATTACH_BACKING`: the virtio 1.2 GPU sequence (§5.7.6.2) links a framebuffer to a scanout only once its backing is attached, and QEMU 6.1 and later answer `SET_SCANOUT` on a resource without backing with `ERR_UNSPEC` (#226). A `PRESENT` accepted before it finishes queues behind it on the in-order control queue. A failed bring-up moves the output to `ResetRequired`.
+- **Present.** If the named buffer is not the attached backing, the present detaches the old backing and attaches the buffer's pinned extents (`RESOURCE_ATTACH_BACKING`, ≤ 16 page-aligned extents covering at least the current frame: the whole buffer). When nothing was attached since the bring-up, there is nothing to detach and `SET_SCANOUT` (scanout 0, resource 1, the full mode) follows the attach; a later buffer switch keeps the scanout linked. It then sends one `TRANSFER_TO_HOST_2D` per damage rect (offset `y·stride + x·4`) and one `RESOURCE_FLUSH` of the damage bounding box. Host pixels outside the damage keep their content (R8). The whole present is one batch behind one notify, and every command carries the `DISPLAY_COMMAND_TIMEOUT_NS` W3 deadline.
 - **Completion is interrupt driven.** The transport's queue interrupt and W3 expiry both call the backend sink. The sink harvests completions into the engine (`ActiveDisplay::service`) and signals the wake bit. It never resets. A timeout, transport failure, unknown token or any response other than `OK_NODATA` / `OK_DISPLAY_INFO` ends the present with `DeviceTimeout` or `ResetRequired`, exactly once.
 - **Reset.** Every syscall-18 entry harvests completions; the reset itself starts only inside a subop, after that subop's capability check passes, and only for a caller whose handle carries `DISPLAY_PRESENT` and that is the bound presenter (or could bind, none being bound). Unauthorised and query-only callers get their normal status and leave the reset pending (`unprivileged_callers_get_their_status_and_leave_the_reset_pending`, `presenter_starts_the_pending_reset`). The reset is a device reset under a new transport generation, which strands every earlier token, forgets the attached backing, then repeats the bring-up batch. Success bumps the epoch. Failure, or a second bring-up failure, poisons the output. **After an epoch bump the host resource is blank** and nothing is attached, so the compositor's first present on the new epoch must carry full-frame damage. It is redrawing everything anyway.
 - **Memory.** Descriptors name only 24 static 1 KiB command slots (request at 0, response at 512) and the extents of a bound, pinned scanout buffer. A batch is refused, never partially queued, when the slots are short.
@@ -839,8 +862,8 @@ None collides with `NETWORK_STATUS_PENDING` (`u64::MAX - 15`). Capability failur
 ## Versioning and extension points
 
 - **Version.** `ProtocolVersion { major, minor }`, 1.0 in M10. A major bump is incompatible and rejected at `Hello`. A minor bump may only add opcodes inside the reserved ranges below, and the server may use them only when the negotiated minor allows it.
-- **Opcodes.** In 1.0 every reserved or unassigned opcode decodes to `UnknownOpcode` (recoverable). Core growth: requests `0x0002..=0x000F` and unused holes in `0x0010..=0x00FF`; events `0x8003..=0x800F` (`0x8003` is earmarked for `OutputChanged` when `MAX_OUTPUTS > 1`) and unused holes in `0x8010..=0x80FF`. Unassigned: `0x0800..=0x7FFF` and `0x8800..=0xFFFF`.
-- **Features.** `Features(u64)`; `Features::KNOWN` = `0x7F` (the OR of `Features::TEXT_INPUT` … `Features::WINDOW_LIST`). The compositor offers `TEXT_INPUT` (#309) to everyone and `WINDOW_LIST` (#237) to `GFX_SHELL` holders, so every other feature below is negotiated off. Opcodes of a feature not negotiated are never sent. The bit assignments and opcode ranges are frozen in `graphics::protocol`.
+- **Opcodes.** In 1.0 every reserved or unassigned opcode decodes to `UnknownOpcode` (recoverable). Core growth: requests `0x0002..=0x000F` and unused holes in `0x0010..=0x00FF`; events `0x8003..=0x800F` (`0x8003` is earmarked for output hotplug when `MAX_OUTPUTS > 1`; a mode change of the one output is `OutputChanged` 0x8800, #314) and unused holes in `0x8010..=0x80FF`. Unassigned: `0x0900..=0x7FFF` and `0x8900..=0xFFFF`.
+- **Features.** `Features(u64)`; `Features::KNOWN` = `0xFF` (the OR of `Features::TEXT_INPUT` … `Features::OUTPUT_EVENTS`). The compositor offers `TEXT_INPUT` (#309) and `OUTPUT_EVENTS` (#314) to everyone and `WINDOW_LIST` (#237) to `GFX_SHELL` holders, so every other feature below is negotiated off. Opcodes of a feature not negotiated are never sent. The bit assignments and opcode ranges are frozen in `graphics::protocol`.
 
 | Bit | Feature | Opcodes (request / event) | Future content |
 |---|---|---|---|
@@ -851,8 +874,9 @@ None collides with `NETWORK_STATUS_PENDING` (`u64::MAX - 15`). Capability failur
 | `1 << 4` | client decorations | `0x0500..=0x05FF` / `0x8500..=0x85FF` | decoration negotiation (`DecorationMode::Client`) |
 | `1 << 5` | subsurfaces | `0x0600..=0x06FF` / `0x8600..=0x86FF` | `SurfaceRole::Subsurface`, position and stacking |
 | `1 << 6` | window list | `0x0700..=0x07FF` / `0x8700..=0x87FF` | `ActivateWindow`; `WindowAdded`, `WindowTitle`, `WindowRemoved`, `WindowFocused` (#237; `GFX_SHELL` only) |
+| `1 << 7` | output events | `0x0800..=0x08FF` / `0x8800..=0x88FF` | `OutputChanged` 0x8800 (#314) |
 
-Other reserved vocabulary: `SurfaceRole::Cursor` (client cursors), `Layer::Cursor`, `WindowStates` bits other than `ACTIVATED`, `ColorSpace` values other than `Srgb`, display subops 7 and above (`SET_MODE`, `RELEASE_PRESENTER`), `OutputChanged`.
+Other reserved vocabulary: `SurfaceRole::Cursor` (client cursors), `Layer::Cursor`, `WindowStates` bits other than `ACTIVATED`, `ColorSpace` values other than `Srgb`, display subops 9 and above (`RELEASE_PRESENTER`), output hotplug.
 
 **Compatibility shims.** The contract leaves room for Linux (M11: DRM/KMS subset, evdev) and Windows (M13) guest surfaces without adopting their semantics. Shims translate into this protocol as ordinary clients; for example the evdev shim negates `vertical` for `REL_WHEEL`. Nothing in the protocol is a Wayland, X11, DRM or GDI object.
 

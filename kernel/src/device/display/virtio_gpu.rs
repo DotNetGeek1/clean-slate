@@ -1,7 +1,10 @@
 //! VirtIO-GPU 2D scanout backend (#114) over the #196 modern PCI transport.
 //!
-//! One host resource (`RESOURCE_ID`, `B8G8R8X8`, the reference mode) is scanout 0 for the boot.
-//! Bring-up reads the display info and creates the resource. A present attaches the named
+//! One host resource (`RESOURCE_ID`, `B8G8R8X8`, the current mode) is scanout 0. Bring-up reads
+//! the display info (scanout 0 must be enabled; its size is the host's preferred mode) and creates
+//! the resource, in the reference mode at boot. A mode change (#314) detaches the backing,
+//! unreferences the resource and creates it again at the new size; the next present attaches and
+//! links it as after a bring-up. A present attaches the named
 //! kernel-owned buffer as the resource's backing when it is not the one attached already (detach,
 //! then attach its pinned extents), transfers exactly the damaged rects into the host resource and
 //! flushes their bounding box. The first attach after a bring-up is followed by `SET_SCANOUT`:
@@ -18,9 +21,10 @@
 //! batch again) clears it. No descriptor names anything but the static command slots and the
 //! extents of a bound, pinned scanout buffer.
 
+use clean_slate_graphics::mode::STANDARD_MODE_SIZES;
 use clean_slate_graphics::{
-    BufferRect, DisplayMode, DISPLAY_COMMAND_TIMEOUT_NS, MAX_PRESENT_DAMAGE_RECTS,
-    REFERENCE_FRAME_BYTES, REFERENCE_MODE, SCANOUT_BUFFER_COUNT,
+    mode_size_in_bounds, BufferRect, DisplayMode, ModeFlags, ModeList, DISPLAY_COMMAND_TIMEOUT_NS,
+    MAX_PRESENT_DAMAGE_RECTS, REFERENCE_MODE, SCANOUT_BUFFER_COUNT,
 };
 use clean_slate_native_abi::MAX_EXTENTS_PER_BUFFER;
 
@@ -149,12 +153,12 @@ impl Command {
 
 const BRING_UP: [Command; 2] = [Command::GetDisplayInfo, Command::Create2d];
 
-fn full_mode_rect() -> BufferRect {
+fn full_mode_rect(mode: &DisplayMode) -> BufferRect {
     BufferRect {
         x: 0,
         y: 0,
-        width: REFERENCE_MODE.width_px as u16,
-        height: REFERENCE_MODE.height_px as u16,
+        width: mode.width_px as u16,
+        height: mode.height_px as u16,
     }
 }
 
@@ -165,15 +169,16 @@ fn put_rect(out: &mut [u8], offset: usize, rect: BufferRect) {
     wire::put_u32(out, offset + 12, u32::from(rect.height));
 }
 
-/// Byte offset of `rect`'s first pixel in a reference-mode backing.
-fn transfer_offset(rect: BufferRect) -> u64 {
-    u64::from(rect.y) * u64::from(REFERENCE_MODE.stride_bytes) + u64::from(rect.x) * 4
+/// Byte offset of `rect`'s first pixel in a backing laid out for `mode`.
+fn transfer_offset(mode: &DisplayMode, rect: BufferRect) -> u64 {
+    u64::from(rect.y) * u64::from(mode.stride_bytes) + u64::from(rect.x) * 4
 }
 
 /// Encodes `command` into `out`; returns the request length.
 fn encode(
     command: Command,
     backings: &[Option<Backing>; SCANOUT_BUFFER_COUNT],
+    mode: &DisplayMode,
     out: &mut [u8; REQUEST_CAPACITY],
 ) -> Result<usize, BackendError> {
     out.fill(0);
@@ -182,8 +187,8 @@ fn encode(
         Command::Create2d => {
             wire::put_u32(out, 24, RESOURCE_ID);
             wire::put_u32(out, 28, wire::FORMAT_B8G8R8X8_UNORM);
-            wire::put_u32(out, 32, REFERENCE_MODE.width_px);
-            wire::put_u32(out, 36, REFERENCE_MODE.height_px);
+            wire::put_u32(out, 32, mode.width_px);
+            wire::put_u32(out, 36, mode.height_px);
             (wire::CMD_RESOURCE_CREATE_2D, 40)
         }
         Command::Unref => {
@@ -191,7 +196,7 @@ fn encode(
             (wire::CMD_RESOURCE_UNREF, 32)
         }
         Command::SetScanout => {
-            put_rect(out, 24, full_mode_rect());
+            put_rect(out, 24, full_mode_rect(mode));
             wire::put_u32(out, 40, SCANOUT_ID);
             wire::put_u32(out, 44, RESOURCE_ID);
             (wire::CMD_SET_SCANOUT, 48)
@@ -203,7 +208,7 @@ fn encode(
         }
         Command::Transfer(rect) => {
             put_rect(out, 24, rect);
-            wire::put_u64(out, 40, transfer_offset(rect));
+            wire::put_u64(out, 40, transfer_offset(mode, rect));
             wire::put_u32(out, 48, RESOURCE_ID);
             (wire::CMD_TRANSFER_TO_HOST_2D, 56)
         }
@@ -235,13 +240,13 @@ fn encode(
     Ok(len)
 }
 
-/// Scanout 0 must be enabled at exactly the reference geometry.
-fn display_info_matches(response: &[u8]) -> bool {
+/// Scanout 0's size, if it is enabled: the host's preferred mode.
+fn display_info_size(response: &[u8]) -> Option<(u32, u32)> {
     let first = wire::HEADER_BYTES;
     let width = wire::get_u32(response, first + 8);
     let height = wire::get_u32(response, first + 12);
     let enabled = wire::get_u32(response, first + 16);
-    enabled != 0 && width == REFERENCE_MODE.width_px && height == REFERENCE_MODE.height_px
+    (enabled != 0).then_some((width, height))
 }
 
 fn bounding_rect(damage: &[BufferRect]) -> BufferRect {
@@ -257,7 +262,8 @@ fn bounding_rect(damage: &[BufferRect]) -> BufferRect {
     }
 }
 
-/// A bound buffer's validated backing: page-aligned extents covering exactly one reference frame.
+/// A bound buffer's validated backing: page-aligned extents covering at least its laid-out frame
+/// (the whole buffer, sized for the largest settable mode).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Backing {
     source: FrameSourceId,
@@ -285,7 +291,7 @@ impl Backing {
             total += bytes;
             *slot = *extent;
         }
-        if total != REFERENCE_FRAME_BYTES as u64 {
+        if total < source.layout().byte_len() as u64 {
             return Err(BackendError::SourceRejected);
         }
         Ok(Self {
@@ -347,6 +353,12 @@ pub(crate) struct VirtioGpuBackend<T: VirtqueueTransport> {
     outstanding: [Option<Outstanding>; COMMAND_SLOTS],
     backings: [Option<Backing>; SCANOUT_BUFFER_COUNT],
     attached: Option<(u8, FrameSourceId)>,
+    /// The resource's size: the reference mode at boot, then whatever `set_mode` last asked for.
+    mode: DisplayMode,
+    /// Scanout 0's size from the last display info.
+    host_size: Option<(u32, u32)>,
+    /// The boot option's size (`opt/clean-slate/display`), offered and preferred if in bounds.
+    configured: Option<(u32, u32)>,
     /// A submitted batch whose outcome `poll` has not reported yet.
     batch_open: bool,
     batch_error: Option<BackendError>,
@@ -370,6 +382,9 @@ impl<T: VirtqueueTransport> VirtioGpuBackend<T> {
             outstanding: [None; COMMAND_SLOTS],
             backings: [None; SCANOUT_BUFFER_COUNT],
             attached: None,
+            mode: REFERENCE_MODE,
+            host_size: None,
+            configured: None,
             batch_open: false,
             batch_error: None,
             needs_reset: false,
@@ -383,6 +398,11 @@ impl<T: VirtqueueTransport> VirtioGpuBackend<T> {
             #[cfg(any(test, feature = "m10-virtio-gpu-self-test"))]
             last_fault: None,
         }
+    }
+
+    /// Offers (and prefers) the configured size from here on.
+    pub(crate) fn set_configured_size(&mut self, size: Option<(u32, u32)>) {
+        self.configured = size;
     }
 
     /// `GET_DISPLAY_INFO`, `RESOURCE_CREATE_2D`: the first `poll` outcome.
@@ -416,7 +436,7 @@ impl<T: VirtqueueTransport> VirtioGpuBackend<T> {
                 .position(Option::is_none)
                 .ok_or(BackendError::Failed)?;
             let mut request = [0u8; REQUEST_CAPACITY];
-            let len = encode(*command, &self.backings, &mut request)?;
+            let len = encode(*command, &self.backings, &self.mode, &mut request)?;
             let region = &mut self.slots[slot];
             let chain = region
                 .copy_in(0, &request[..len])
@@ -482,10 +502,13 @@ impl<T: VirtqueueTransport> VirtioGpuBackend<T> {
         let mut response = [0u8; wire::DISPLAY_INFO_BYTES];
         let response = &mut response[..command.response_len()];
         let read = self.slots[slot].copy_out(RESPONSE_OFFSET, response);
-        let ok = read.is_ok()
+        let mut ok = read.is_ok()
             && written_len as usize >= response.len()
-            && wire::get_u32(response, 0) == command.expected_response()
-            && (command != Command::GetDisplayInfo || display_info_matches(response));
+            && wire::get_u32(response, 0) == command.expected_response();
+        if ok && command == Command::GetDisplayInfo {
+            self.host_size = display_info_size(response);
+            ok = self.host_size.is_some();
+        }
         #[cfg(any(test, feature = "m10-virtio-gpu-self-test"))]
         if !ok && self.batch_error.is_none() {
             self.last_fault = Some(ResponseFault {
@@ -550,7 +573,53 @@ impl<T: VirtqueueTransport> VirtioGpuBackend<T> {
 
 impl<T: VirtqueueTransport> ScanoutBackend for VirtioGpuBackend<T> {
     fn mode(&self) -> DisplayMode {
-        REFERENCE_MODE
+        self.mode
+    }
+
+    /// The current size; the host's size and every standard size up to it; the configured size.
+    /// The configured size is preferred, else the host's. All of them are settable: the device
+    /// scans out a resource of any size.
+    fn modes(&self) -> ModeList {
+        let settable = ModeFlags::SETTABLE;
+        let mut list = ModeList::new();
+        let _ = list.offer(
+            self.mode.width_px,
+            self.mode.height_px,
+            settable.union(ModeFlags::CURRENT),
+        );
+        let in_bounds = |size: &(u32, u32)| mode_size_in_bounds(size.0, size.1);
+        let host = self.host_size.filter(in_bounds);
+        let configured = self.configured.filter(in_bounds);
+        if let Some((width, height)) = host {
+            for (w, h) in STANDARD_MODE_SIZES {
+                if w <= width && h <= height {
+                    let _ = list.offer(w, h, settable);
+                }
+            }
+            let flag = if configured.is_none() {
+                ModeFlags::PREFERRED
+            } else {
+                ModeFlags(0)
+            };
+            let _ = list.offer(width, height, settable.union(flag));
+        }
+        if let Some((width, height)) = configured {
+            let _ = list.offer(width, height, settable.union(ModeFlags::PREFERRED));
+        }
+        list
+    }
+
+    /// Detach (if attached), unreference and create the resource again at `mode`'s size. The next
+    /// present attaches a buffer and links the scanout, exactly as after a bring-up.
+    fn set_mode(&mut self, mode: DisplayMode) -> Result<Submitted, BackendError> {
+        if self.needs_reset {
+            return Err(BackendError::Failed);
+        }
+        let detach = self.attached.take().is_some();
+        self.mode = mode;
+        let commands = [Command::DetachBacking, Command::Unref, Command::Create2d];
+        self.submit_batch(if detach { &commands } else { &commands[1..] })?;
+        Ok(Submitted::Pending)
     }
 
     fn bind(&mut self, index: u8, source: &dyn FrameSource) -> Result<(), BackendError> {
