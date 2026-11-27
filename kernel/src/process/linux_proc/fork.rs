@@ -168,6 +168,7 @@ pub(crate) fn linux_fork(
         abort_fork_child(child_pid, &cleanup, allocator);
         return Err(EAGAIN);
     }
+    crate::service::net_app::inherit(parent_pid, child_pid);
 
     if table_mut()
         .register(

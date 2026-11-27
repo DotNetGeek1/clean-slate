@@ -30,6 +30,9 @@
 //! 6. Ctrl-X faults the console service (#310); init restarts it, and the shell's console
 //!    client capability is re-issued for generation 2's port ([`check_console_fault`]).
 //! 7. A typed `echo` reaches the same shell through console generation 2, which says so.
+//! 8. `nslookup` asking a server other than the system resolver is refused by the shell's
+//!    network policy (#221 stage E): nothing reaches the fixture, the shell prompts again, and
+//!    the audit service prints the refusal with its destination ([`check_refused`]).
 //!
 //! Each `wget` step proves a full exchange both ways: the fixture answers port 4001 only after
 //! receiving the complete request, and the step requires it to have answered exactly one
@@ -120,6 +123,9 @@ enum Expect {
     /// The console service's fault, its restart, and the shell's client capability moved to
     /// the new instance (see [`check_console_fault`]).
     ConsoleFault,
+    /// The shell's network policy refused this destination: the audit service printed the
+    /// refusal, the fixture peer answered nothing, and the shell prompted again.
+    Refused { destination: &'static str },
     /// These whole lines and a prompt, the typed line having reached the shell through the
     /// restarted console service, which says so.
     ConsoleInput(&'static [&'static str]),
@@ -151,7 +157,17 @@ const WGET: Step = Step {
     },
 };
 
-const STEPS: [Step; 10] = [
+/// The shells may send datagrams only to the system resolver (10.77.0.1:53 on the lab network),
+/// so a query to the fixture peer itself is refused before it leaves.
+const REFUSED_NSLOOKUP: Step = Step {
+    name: "nslookup to another server",
+    send: b"nslookup m7.fixture.test 10.77.0.50\r",
+    expect: Expect::Refused {
+        destination: "10.77.0.50:53/udp",
+    },
+};
+
+const STEPS: [Step; 11] = [
     Step {
         name: "audit flood",
         send: &AUDIT_FLOOD_SEND,
@@ -192,6 +208,7 @@ const STEPS: [Step; 10] = [
         send: b"echo hel''lo-again\r",
         expect: Expect::ConsoleInput(&["hello-again"]),
     },
+    REFUSED_NSLOOKUP,
 ];
 
 /// The live network service instance.
@@ -797,7 +814,45 @@ fn check_step(
         Expect::AuditFault => check_audit_fault(segment, state),
         Expect::ConsoleFault => check_console_fault(segment, state),
         Expect::ConsoleInput(want) => check_console_input(segment, want, state),
+        Expect::Refused { destination } => check_refused(segment, destination, before, now, state),
     }
+}
+
+/// The refusal record, printed by the audit service, for a holder other than the shell itself
+/// (its `nslookup` child, which inherited the shell's app); then a prompt, with nothing having
+/// reached the fixture.
+fn check_refused(
+    segment: &str,
+    destination: &str,
+    before: FixtureCounts,
+    now: FixtureCounts,
+    state: State,
+) -> Result<State, String> {
+    let prefix = format!("[IPC ] console pid={}: [ADT ] #", state.audit_pid);
+    let suffix = format!(" dest net {destination}");
+    let record = kernel_lines(segment, &prefix)
+        .find(|line| line.ends_with(&suffix))
+        .ok_or_else(|| format!("waiting for the audit service to print {suffix:?}"))?;
+    let holder = record[prefix.len()..]
+        .split(' ')
+        .nth(1)
+        .and_then(|holder| holder.parse::<u64>().ok())
+        .ok_or_else(|| format!("no holder in {record:?}"))?;
+    if holder == state.shell.pid {
+        return Err(format!("the refusal names the shell itself: {record:?}"));
+    }
+    if prompt_after(segment, 0).is_none() {
+        return Err("no prompt after the refused nslookup".to_owned());
+    }
+    let answers = now
+        .fixture_a_answers
+        .saturating_sub(before.fixture_a_answers);
+    if answers != 0 {
+        return Err(format!(
+            "the fixture peer sent {answers} A answers to a refused query"
+        ));
+    }
+    Ok(state)
 }
 
 /// Whole-run checks once every step has passed.
@@ -1601,6 +1656,41 @@ mod tests {
         for step in &STEPS[1..] {
             assert!(!step.send.iter().any(|byte| [0x01, 0x02].contains(byte)));
         }
+    }
+
+    fn refused() -> String {
+        format!(
+            "nslookup m7.fixture.test 10.77.0.50\r\n\
+             [CON ] pid=12: nslookup: write to '10.77.0.50': Permission denied\n\
+             [LNX ] exit pid=12 status=1\n\
+             [IPC ] console pid={AUDIT2}: [ADT ] #77 12 dest net 10.77.0.50:53/udp\n\
+             [CON ] pid={SHELL}: # "
+        )
+    }
+
+    #[test]
+    fn a_refused_destination_is_audited_with_nothing_sent_and_the_shell_prompts() {
+        let state = State {
+            audit_pid: AUDIT2,
+            ..booted()
+        };
+        let quiet = counts(3, 0, 0);
+        let check = |segment: &str, now| check_step(&REFUSED_NSLOOKUP, segment, quiet, now, state);
+        assert!(check(&refused(), quiet).is_ok());
+        let answered = counts(4, 0, 0);
+        assert!(check(&refused(), answered)
+            .unwrap_err()
+            .contains("1 A answers"));
+        let unaudited = refused().replace("dest net", "noright net");
+        assert!(check(&unaudited, quiet).unwrap_err().contains("waiting"));
+        let by_the_shell = refused().replace("#77 12 ", &format!("#77 {SHELL} "));
+        assert!(check(&by_the_shell, quiet)
+            .unwrap_err()
+            .contains("shell itself"));
+        let no_prompt = refused().replace(&format!("[CON ] pid={SHELL}: # "), "");
+        assert!(check(&no_prompt, quiet).unwrap_err().contains("no prompt"));
+        let old_reader = refused().replace(&format!("pid={AUDIT2}:"), &format!("pid={AUDIT}:"));
+        assert!(check(&old_reader, quiet).is_err());
     }
 
     #[test]

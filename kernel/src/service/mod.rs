@@ -22,6 +22,7 @@ pub(crate) mod instance_generation;
 pub(crate) mod lifecycle_wait;
 #[cfg(feature = "m8-linux-image")]
 pub(crate) mod linux_launch;
+pub(crate) mod net_app;
 pub(crate) mod net_bridge;
 #[cfg(not(any(
     feature = "m1-self-test",

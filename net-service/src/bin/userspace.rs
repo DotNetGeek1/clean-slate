@@ -8,6 +8,7 @@ use alloc::boxed::Box;
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_ESTALE, SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
 };
+use clean_slate_capability::{NetDestination, NetTransport, Rights};
 use clean_slate_native_abi::clock::{
     decode_wall, CLOCK_SUBOP_WALL, NANOS_PER_SECOND, SYSCALL_NR_CLOCK,
 };
@@ -35,16 +36,18 @@ use clean_slate_network::tls::{
 };
 use clean_slate_service_fixtures::ready_detail::NetworkReadyDetail;
 use clean_slate_service_fixtures::{
-    AllowAllAuthorizer, NetworkProbe, NetworkService, NetworkServiceBootstrap,
-    NetworkServiceLaunch, NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
-    NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_AUX_BAD_LAUNCH, NETWORK_SERVICE_AUX_NO_ENTROPY,
-    NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_LAUNCH_ADDRESS,
-    NETWORK_SERVICE_MODE_ACCEPTANCE, NETWORK_SERVICE_MODE_CAPACITY_LOOP,
-    NETWORK_SERVICE_MODE_CLIENT, NETWORK_SERVICE_MODE_CONVERGED_CLIENT,
-    NETWORK_SERVICE_MODE_INFLIGHT_ARM, NETWORK_SERVICE_MODE_STALE_CLOSE,
-    NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, NETWORK_SERVICE_NEXT_METADATA_BYTES,
-    NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_SERVICE_RESULT_ERROR, NETWORK_SERVICE_RESULT_OK,
-    NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
+    audit_destination, AppPolicyAuthorizer, NetworkProbe, NetworkRefusal, NetworkService,
+    NetworkServiceBootstrap, NetworkServiceLaunch, NetworkTarget, RefusalReports,
+    NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
+    NETWORK_MAX_PAYLOAD_BYTES, NETWORK_POLICIES, NETWORK_SERVICE_AUX_BAD_LAUNCH,
+    NETWORK_SERVICE_AUX_NO_ENTROPY, NETWORK_SERVICE_BOOTSTRAP_ADDRESS,
+    NETWORK_SERVICE_LAUNCH_ADDRESS, NETWORK_SERVICE_MODE_ACCEPTANCE,
+    NETWORK_SERVICE_MODE_CAPACITY_LOOP, NETWORK_SERVICE_MODE_CLIENT,
+    NETWORK_SERVICE_MODE_CONVERGED_CLIENT, NETWORK_SERVICE_MODE_INFLIGHT_ARM,
+    NETWORK_SERVICE_MODE_STALE_CLOSE, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
+    NETWORK_SERVICE_NEXT_METADATA_BYTES, NETWORK_SERVICE_NEXT_WIRE_BYTES,
+    NETWORK_SERVICE_RESULT_ERROR, NETWORK_SERVICE_RESULT_OK, NETWORK_STATUS_PENDING,
+    NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_AUDIT_REFUSAL, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
     NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
     NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
@@ -650,7 +653,7 @@ impl NetworkLink for DemuxLink {
 }
 
 type ServiceLink = DemuxLink;
-type ServiceState = NetworkService<ServiceLink, AllowAllAuthorizer>;
+type ServiceState = NetworkService<ServiceLink, AppPolicyAuthorizer>;
 
 static mut SERVICE_STATE: MaybeUninit<ServiceState> = MaybeUninit::uninit();
 static SERVICE_STATE_READY: AtomicBool = AtomicBool::new(false);
@@ -943,13 +946,20 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     if init_tick_period().is_err() {
         finish();
     }
+    unsafe {
+        *core::ptr::addr_of_mut!(REFUSAL_REPORTS) =
+            RefusalReports::new(ms_to_irq_ticks(REFUSAL_REPORT_INTERVAL_MS));
+    }
     bootstrap.net_role_handle = raw_handle;
     let generation = SessionGeneration::new(bootstrap.service_generation);
     nic_ingress_init(raw_handle);
     let raw_link = DemuxLink::raw_geometry();
     let raw_mac = raw_link.mac;
     unsafe {
-        NetworkService::init_in_place(service_state_ptr(), generation, AllowAllAuthorizer);
+        // #221 stage E: each caller reaches what its app's policy names, judged against the
+        // launch configuration's resolver.
+        let authorizer = AppPolicyAuthorizer::new(NETWORK_POLICIES, network.resolver);
+        NetworkService::init_in_place(service_state_ptr(), generation, authorizer);
         (*service_state_ptr()).attach_backend(DemuxLink::for_udp());
         SERVICE_STATE_READY.store(true, Ordering::Release);
         *service_dns_resolver_slot() = Some(DnsResolver::alloc_boxed(
@@ -1766,6 +1776,14 @@ fn handle_service_request<F: Future<Output = TlsJobOutput>>(
     {
         return None;
     }
+    // #221 stage E: one policy decision per request, before any handler sees it, so a path
+    // that bypasses `NetworkService::handle_request` (resolve, TLS send, plain TCP connect)
+    // is judged the same way.
+    if let Err(refusal) = ctx.service.authorize_request(&caller, &request) {
+        report_refusal(ctx, caller, &request, refusal);
+        let code = NetworkError::Denied(refusal.reason).code();
+        return Some((NetworkResponse::Error { code }, 0));
+    }
     match handle_linux_socket_data_plane(ctx, request_id, caller, request, payload) {
         LinuxSocketDispatch::Done(response, out_len) => return Some((response, out_len)),
         LinuxSocketDispatch::Deferred => return None,
@@ -1801,6 +1819,69 @@ fn handle_service_request<F: Future<Output = TlsJobOutput>>(
             )
         }
     }
+}
+
+/// A retried refusal is reported at most once per this many milliseconds.
+const REFUSAL_REPORT_INTERVAL_MS: u64 = 10_000;
+
+static mut REFUSAL_REPORTS: RefusalReports = RefusalReports::new(0);
+
+fn refusal_reports() -> &'static mut RefusalReports {
+    unsafe { &mut *core::ptr::addr_of_mut!(REFUSAL_REPORTS) }
+}
+
+/// Sends a policy refusal to the audit log (`NET_SUBOP_AUDIT_REFUSAL`). Allowed decisions are
+/// not sent: the kernel already records each client's use of its capability, and the audit
+/// store keeps every refusal, so only refusals, and a retried one only once per interval, cost
+/// a disk write. A failed report changes nothing for the caller, who is refused either way.
+fn report_refusal(
+    ctx: &ServiceContext<'_>,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    request: &NetworkRequest,
+    refusal: NetworkRefusal,
+) {
+    let target = refusal.target.or(match *request {
+        NetworkRequest::Resolve { .. } => Some(NetworkTarget::Resolve),
+        NetworkRequest::Connect { session, dest } => {
+            let transport = match ctx.service.session_kind(caller, session) {
+                Ok(SocketKind::Udp | SocketKind::LinuxUdp) => NetTransport::Udp,
+                _ => NetTransport::Tcp,
+            };
+            Some(NetworkTarget::Destination { transport, dest })
+        }
+        _ => None,
+    });
+    let destination = match (target, *request) {
+        (Some(target), _) => audit_destination(target),
+        (None, NetworkRequest::Open { kind }) => NetDestination {
+            transport: match kind {
+                SocketKind::Udp | SocketKind::LinuxUdp => NetTransport::Udp,
+                SocketKind::Tcp | SocketKind::LinuxTcp => NetTransport::Tcp,
+            },
+            addr: [0; 4],
+            port: 0,
+        },
+        (None, _) => return,
+    };
+    let requested = match request {
+        NetworkRequest::Resolve { .. } => Rights::NET_RESOLVE,
+        _ => Rights::NET_CONNECT,
+    };
+    let Ok(now) = monotonic_ticks() else {
+        return;
+    };
+    let reports = refusal_reports();
+    if !reports.should_report(caller, destination.encode(), now) {
+        return;
+    }
+    let _ = net_request([
+        NET_SUBOP_AUDIT_REFUSAL,
+        ctx.raw_handle,
+        caller.pid,
+        caller.instance_generation,
+        destination.encode(),
+        u64::from(requested.bits()),
+    ]);
 }
 
 fn resolve_response(
@@ -2055,6 +2136,7 @@ fn drain_holder_exits<F>(ctx: &mut ServiceContext<'_>, tls: &mut TlsJob<'_, F>) 
         }
         forget_linux_udp_endpoints_for_caller(caller);
         close_linux_tcp_connections_for_caller(ctx.service_generation, caller);
+        refusal_reports().forget(caller);
         let (sessions, pending) = ctx.service.on_holder_exit(caller);
         let ack = net_request([
             NET_SUBOP_ACK_HOLDER_EXIT,

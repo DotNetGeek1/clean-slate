@@ -529,6 +529,16 @@ impl NetBridge {
         Ok(())
     }
 
+    /// Whether the service holds state for the caller `(pid, instance_generation)`: a live
+    /// holder, or one whose exit the service has not acknowledged yet.
+    pub fn serves_holder(&self, pid: u64, instance_generation: u64) -> bool {
+        self.holders.iter().any(|entry| {
+            entry.state != HolderState::Free
+                && entry.caller.pid == pid
+                && entry.caller.instance_generation == instance_generation
+        })
+    }
+
     /// Marks every live entry of `pid` exited. Needs no allocation, so it cannot fail.
     pub fn mark_holder_exit(&mut self, pid: u64) -> usize {
         let mut marked = 0usize;
@@ -1203,6 +1213,20 @@ mod tests {
             bridge.pop_holder_exit(),
             Some(TrustedCaller::new(20, 20, 7))
         );
+    }
+
+    #[test]
+    fn the_service_serves_a_holder_until_it_acknowledges_the_exit() {
+        let mut bridge = NetBridge::new();
+        bridge.register_service_instance(10, 1, 3);
+        assert!(!bridge.serves_holder(20, 7));
+        bridge.submit(20, 20, 7, &open_wire(), &[]).unwrap();
+        assert!(bridge.serves_holder(20, 7));
+        assert!(!bridge.serves_holder(20, 8), "another instance of the pid");
+        assert_eq!(bridge.mark_holder_exit(20), 1);
+        assert!(bridge.serves_holder(20, 7), "exit not yet taken");
+        assert_eq!(drain_exits(&mut bridge, 10).len(), 1);
+        assert!(!bridge.serves_holder(20, 7));
     }
 
     #[test]

@@ -73,6 +73,10 @@ pub enum PolicyRefusal {
     Unavailable = 5,
     /// The capability is in use (a live delegated child, a live mapping) and must stay.
     Busy = 6,
+    /// The network service's per-app policy (#221 stage E) does not let the holder reach the
+    /// destination. The record's class is `Network` and its `resource_id` is a
+    /// [`NetDestination`] encoding.
+    DestinationDenied = 7,
 }
 
 impl PolicyRefusal {
@@ -85,6 +89,7 @@ impl PolicyRefusal {
             4 => Some(Self::AuthorityMismatch),
             5 => Some(Self::Unavailable),
             6 => Some(Self::Busy),
+            7 => Some(Self::DestinationDenied),
             _ => None,
         }
     }
@@ -98,7 +103,94 @@ impl PolicyRefusal {
             Self::AuthorityMismatch => "authority-mismatch",
             Self::Unavailable => "unavailable",
             Self::Busy => "busy",
+            Self::DestinationDenied => "destination-denied",
         }
+    }
+}
+
+/// How a refused network destination sits in a record's `resource_id` (#221 stage E): the
+/// port in bits 0..16, the IPv4 address (network order, first octet highest) in bits 16..48,
+/// and the [`NetTransport`] in bits 48..56. A refused name resolution has no address: transport
+/// [`NetTransport::Resolve`], address and port 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetDestination {
+    pub transport: NetTransport,
+    pub addr: [u8; 4],
+    pub port: u16,
+}
+
+/// What a refused network request was for.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetTransport {
+    Resolve = 0,
+    Tcp = 1,
+    Udp = 2,
+}
+
+impl NetTransport {
+    pub const fn from_u8(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Resolve),
+            1 => Some(Self::Tcp),
+            2 => Some(Self::Udp),
+            _ => None,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Resolve => "resolve",
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+}
+
+impl NetDestination {
+    pub const RESOLVE: Self = Self {
+        transport: NetTransport::Resolve,
+        addr: [0; 4],
+        port: 0,
+    };
+
+    pub const fn encode(self) -> u64 {
+        (self.port as u64)
+            | ((u32::from_be_bytes(self.addr) as u64) << 16)
+            | ((self.transport as u64) << 48)
+    }
+
+    /// `None` for bits above the transport, or an unknown transport.
+    pub const fn decode(raw: u64) -> Option<Self> {
+        if raw >> 56 != 0 {
+            return None;
+        }
+        let Some(transport) = NetTransport::from_u8((raw >> 48) as u8) else {
+            return None;
+        };
+        Some(Self {
+            transport,
+            addr: ((raw >> 16) as u32).to_be_bytes(),
+            port: raw as u16,
+        })
+    }
+
+    /// `a.b.c.d:port/tcp`, `a.b.c.d:port/udp`, or `resolve`.
+    pub fn write_to(self, f: &mut impl core::fmt::Write) -> core::fmt::Result {
+        if self.transport == NetTransport::Resolve {
+            return f.write_str("resolve");
+        }
+        let [a, b, c, d] = self.addr;
+        write!(f, "{a}.{b}.{c}.{d}:{}/{}", self.port, self.transport.name())
+    }
+
+    /// The destination a refused-destination record names, if `event` is one.
+    pub fn of_refusal(event: &AuditEvent) -> Option<Self> {
+        let refused = AuditOutcome::refused(PolicyRefusal::DestinationDenied);
+        if event.class != ResourceClass::Network || event.outcome != refused {
+            return None;
+        }
+        Self::decode(event.resource_id)
     }
 }
 
@@ -347,8 +439,16 @@ pub fn format_audit_line(event: &AuditEvent, f: &mut impl core::fmt::Write) -> c
     write_u64(event.actor.0, f)?;
     f.write_str(" class=")?;
     f.write_str(event.class.name())?;
-    f.write_str(" resource=")?;
-    write_u64(event.resource_id, f)?;
+    match NetDestination::of_refusal(event) {
+        Some(destination) => {
+            f.write_str(" to=")?;
+            destination.write_to(f)?;
+        }
+        None => {
+            f.write_str(" resource=")?;
+            write_u64(event.resource_id, f)?;
+        }
+    }
     f.write_str(" op=")?;
     if event.requested.bits() == 0 {
         f.write_str("none")?;

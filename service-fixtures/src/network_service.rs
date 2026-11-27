@@ -1,5 +1,6 @@
 //! M7.3 userspace network service state machine (host-testable, `no_std`-friendly).
 
+use clean_slate_capability::NetTransport;
 use clean_slate_network::addr::SocketAddrV4;
 use clean_slate_network::device::{LinkProperties, NetworkLink};
 use clean_slate_network::error::{DenialReason, NetworkError};
@@ -23,14 +24,51 @@ pub enum NetworkOp {
     RawDevice,
 }
 
-pub trait NetworkAuthorizer {
-    fn authorize(&self, caller: &TrustedCaller, op: NetworkOp) -> Result<(), DenialReason>;
+/// What a request reaches beyond the service itself, for destination policy (#221 stage E).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkTarget {
+    /// A name resolution through the service's resolver.
+    Resolve,
+    /// A peer a session is connected to.
+    Destination {
+        transport: NetTransport,
+        dest: SocketAddrV4,
+    },
 }
 
+pub trait NetworkAuthorizer {
+    fn authorize(&self, caller: &TrustedCaller, op: NetworkOp) -> Result<(), DenialReason>;
+
+    /// Whether `caller` may reach `target`, after [`Self::authorize`] allowed the operation.
+    fn authorize_target(
+        &self,
+        caller: &TrustedCaller,
+        target: NetworkTarget,
+    ) -> Result<(), DenialReason>;
+}
+
+/// A refused request: why, and what it would have reached (none for an operation refused
+/// before any target is known, such as `Open`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetworkRefusal {
+    pub reason: DenialReason,
+    pub target: Option<NetworkTarget>,
+}
+
+/// Self-tests of the service state machine only; the network image uses
+/// [`crate::network_policy::AppPolicyAuthorizer`].
 pub struct AllowAllAuthorizer;
 
 impl NetworkAuthorizer for AllowAllAuthorizer {
     fn authorize(&self, _caller: &TrustedCaller, _op: NetworkOp) -> Result<(), DenialReason> {
+        Ok(())
+    }
+
+    fn authorize_target(
+        &self,
+        _caller: &TrustedCaller,
+        _target: NetworkTarget,
+    ) -> Result<(), DenialReason> {
         Ok(())
     }
 }
@@ -39,6 +77,14 @@ pub struct DenyAllAuthorizer;
 
 impl NetworkAuthorizer for DenyAllAuthorizer {
     fn authorize(&self, _caller: &TrustedCaller, _op: NetworkOp) -> Result<(), DenialReason> {
+        Err(DenialReason::NoCapability)
+    }
+
+    fn authorize_target(
+        &self,
+        _caller: &TrustedCaller,
+        _target: NetworkTarget,
+    ) -> Result<(), DenialReason> {
         Err(DenialReason::NoCapability)
     }
 }
@@ -348,6 +394,43 @@ where
         Ok(Some(len as u32))
     }
 
+    /// The policy decision for `request` from `caller`: its operation, then what it reaches. A
+    /// `Connect` on a session the caller does not hold is left to the session checks, which
+    /// refuse it. Decides only; the network image reports refusals to the audit log.
+    pub fn authorize_request(
+        &self,
+        caller: &TrustedCaller,
+        request: &NetworkRequest,
+    ) -> Result<(), NetworkRefusal> {
+        let op = Self::op_for_request(request);
+        self.authorizer
+            .authorize(caller, op)
+            .map_err(|reason| NetworkRefusal {
+                reason,
+                target: None,
+            })?;
+        let target = match *request {
+            NetworkRequest::Resolve { .. } => NetworkTarget::Resolve,
+            NetworkRequest::Connect { session, dest } => {
+                let Ok(index) = self.validate_session(caller, session) else {
+                    return Ok(());
+                };
+                let transport = match self.sessions[index].kind {
+                    SocketKind::Udp | SocketKind::LinuxUdp => NetTransport::Udp,
+                    SocketKind::Tcp | SocketKind::LinuxTcp => NetTransport::Tcp,
+                };
+                NetworkTarget::Destination { transport, dest }
+            }
+            _ => return Ok(()),
+        };
+        self.authorizer
+            .authorize_target(caller, target)
+            .map_err(|reason| NetworkRefusal {
+                reason,
+                target: Some(target),
+            })
+    }
+
     pub fn handle_request(
         &mut self,
         caller: TrustedCaller,
@@ -358,9 +441,11 @@ where
     where
         L: NetworkLink,
     {
-        let op = Self::op_for_request(&request);
-        if let Err(reason) = self.authorizer.authorize(&caller, op) {
-            return (Self::error_response(NetworkError::Denied(reason)), 0);
+        if let Err(refusal) = self.authorize_request(&caller, &request) {
+            return (
+                Self::error_response(NetworkError::Denied(refusal.reason)),
+                0,
+            );
         }
 
         match request {
@@ -535,6 +620,93 @@ mod tests {
 
     fn mut_buf() -> [u8; MAX_APPLICATION_PAYLOAD_BYTES] {
         [0u8; MAX_APPLICATION_PAYLOAD_BYTES]
+    }
+
+    #[test]
+    fn app_policy_refuses_a_destination_before_the_session_takes_it() {
+        use crate::network_policy::AppPolicyAuthorizer;
+        use crate::{NETWORK_POLICIES, SYSTEM_SHELL_SERVICE_ID};
+        use clean_slate_network::addr::Ipv4Addr;
+
+        let resolver = SocketAddrV4::new(Ipv4Addr::new([10, 77, 0, 1]), 53);
+        let mut service = NetworkService::<FakeLink, _>::new(
+            SessionGeneration::new(1),
+            AppPolicyAuthorizer::new(NETWORK_POLICIES, Some(resolver)),
+        );
+        service.attach_backend(FakeLink::new(test_mac(), true));
+        let shell = TrustedCaller::new(30, u64::from(SYSTEM_SHELL_SERVICE_ID.0), 1);
+        let mut out = mut_buf();
+        let open = |service: &mut NetworkService<FakeLink, _>, caller, kind| {
+            let mut out = mut_buf();
+            match service.handle_request(caller, NetworkRequest::Open { kind }, &[], &mut out) {
+                (NetworkResponse::Open { session }, _) => session,
+                other => panic!("open: {other:?}"),
+            }
+        };
+        let udp = open(&mut service, shell, SocketKind::LinuxUdp);
+        let elsewhere = SocketAddrV4::new(Ipv4Addr::new([10, 77, 0, 50]), 53);
+        let connect = NetworkRequest::Connect {
+            session: udp,
+            dest: elsewhere,
+        };
+        assert_eq!(
+            service.authorize_request(&shell, &connect),
+            Err(NetworkRefusal {
+                reason: DenialReason::Destination,
+                target: Some(NetworkTarget::Destination {
+                    transport: NetTransport::Udp,
+                    dest: elsewhere,
+                }),
+            })
+        );
+        let (response, _) = service.handle_request(shell, connect, &[], &mut out);
+        assert_eq!(
+            response,
+            NetworkResponse::Error {
+                code: NetworkError::Denied(DenialReason::Destination).code()
+            }
+        );
+        assert_eq!(service.connected_dest(shell, udp), Ok(None));
+        let to_resolver = NetworkRequest::Connect {
+            session: udp,
+            dest: resolver,
+        };
+        let (response, _) = service.handle_request(shell, to_resolver, &[], &mut out);
+        assert_eq!(response, NetworkResponse::Connect);
+
+        let tcp = open(&mut service, shell, SocketKind::LinuxTcp);
+        let web = NetworkRequest::Connect {
+            session: tcp,
+            dest: elsewhere,
+        };
+        assert_eq!(service.authorize_request(&shell, &web), Ok(()));
+
+        // A caller the kernel did not attribute to an app opens nothing.
+        let stray = TrustedCaller::new(31, crate::APP_UNATTRIBUTED, 1);
+        let open_udp = NetworkRequest::Open {
+            kind: SocketKind::LinuxUdp,
+        };
+        assert_eq!(
+            service.authorize_request(&stray, &open_udp),
+            Err(NetworkRefusal {
+                reason: DenialReason::Destination,
+                target: None,
+            })
+        );
+        // Another caller's session is left to the session checks.
+        let foreign = NetworkRequest::Connect {
+            session: udp,
+            dest: elsewhere,
+        };
+        let other_shell = TrustedCaller::new(32, u64::from(SYSTEM_SHELL_SERVICE_ID.0), 1);
+        assert_eq!(service.authorize_request(&other_shell, &foreign), Ok(()));
+        let (response, _) = service.handle_request(other_shell, foreign, &[], &mut out);
+        assert_eq!(
+            response,
+            NetworkResponse::Error {
+                code: NetworkError::Denied(DenialReason::NoCapability).code()
+            }
+        );
     }
 
     #[test]

@@ -59,7 +59,7 @@ Missing capability vs missing right is surfaced to clients as distinct `NetworkE
 
 ## Session vs holder identity
 
-`SessionId` is tagged with the network-service `SessionGeneration`. The kernel attaches `TrustedCaller { pid, domain, instance_generation }`; clients cannot supply trusted identity fields in `NetworkRequest` payloads.
+`SessionId` is tagged with the network-service `SessionGeneration`. The kernel attaches `TrustedCaller { pid, domain, instance_generation }`; clients cannot supply trusted identity fields in `NetworkRequest` payloads. `domain` is the caller's app (#221 stage E): see [Per-app network policy](#per-app-network-policy-221-stage-e).
 
 ## Request/response frames
 
@@ -186,7 +186,16 @@ Each supervised network-service instance owns a fixed `SessionGeneration` assign
 
 ### Authorization hook (#87)
 
-`NetworkAuthorizer` / `NetworkOp` in `network_service.rs` gate each operation. Production builds will replace the M7 fixture authorizer with capability-broker checks in `kernel/src/capability/network.rs` (TODO #87). Denials surface as `NetworkResponse::Error` with stable `NetworkError::Denied` codes.
+`NetworkAuthorizer` / `NetworkOp` in `network_service.rs` gate each operation, and `NetworkAuthorizer::authorize_target` what it reaches (a name resolution, or the peer a `Connect` names). The kernel's capability broker (`kernel/src/capability/network.rs`) checks the caller's rights before a request reaches the service; the service's authorizer is the per-app destination policy below. Denials surface as `NetworkResponse::Error` with stable `NetworkError::Denied` codes.
+
+### Per-app network policy (#221 stage E)
+
+The network image installs `AppPolicyAuthorizer` (`service-fixtures/src/network_policy.rs`) over `NETWORK_POLICIES`, with the launch configuration's resolver. `AllowAllAuthorizer` is left for the host tests of the state machine.
+
+- **Who the caller is.** Only the kernel can say: `kernel/src/service/net_app.rs` attributes a row launched with `Grant::NetworkClient` to its manifest row id, and a Linux `fork` child to its parent's app (`execve` keeps the process, so the app). `SERVICE_NEXT` and `POP_HOLDER_EXIT` write that app as the caller's `domain`. Entries are keyed by `(pid, instance generation)` and outlive the process, so work it queued and its exit still carry its app. Any other caller is `APP_UNATTRIBUTED` (0) in a kernel that launches init, which has no policy, and `APP_SELF_TEST` in a self-test kernel, whose M7/M9 probes and fixtures may reach the lab network.
+- **What it may reach.** Each `AppNetworkPolicy` says whether the app may resolve names and lists `DestinationRule`s: TCP or UDP, a peer (`Any`, `SystemResolver` — the configured resolver on its port — or a `Subnet`), and a port range. The shells (0x5400, 0x5401) reach TCP anywhere and send datagrams only to the system resolver. An app with no entry may not `Open`, `Resolve` or `Connect`; `Close` and work on sessions it holds are left to the session checks. A host test requires every `NetworkClient` row of the system manifests to have exactly one entry and every entry to name such a row.
+- **Where it is checked.** Once per request, in `handle_service_request`, before any handler, via `NetworkService::authorize_request`, so the paths that bypass `handle_request` (resolve, TLS send, plain TCP connect) are judged too. A refusal is `NetworkError::Denied(DenialReason::Destination)` (code 15), which a Linux socket call sees as `EACCES`.
+- **Audit.** A refusal goes to the audit log through `NET_SUBOP_AUDIT_REFUSAL`: the kernel checks the reporter is the live service and the refused caller a holder it serves, then records `Authorize` by the caller on class `Network`, refused `DestinationDenied`, with the destination in `resource_id` (`NetDestination`: port, IPv4 address, transport). The audit service prints it as `[ADT ] #N <pid> dest net 10.77.0.50:53/udp` (or `resolve`). Allowed decisions are not reported (the kernel already records each client's use of its capability), and a refusal the same caller retries for the same destination is reported once per 10 s (`RefusalReports`), so neither routine traffic nor a retry loop turns into a stream of audit-store writes. Each record is charged to the refused caller's ring budget.
 
 ### Backend attach seam (#82 / #88)
 

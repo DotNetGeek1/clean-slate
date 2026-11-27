@@ -3,7 +3,10 @@
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC, SYSCALL_ESTALE,
 };
-use clean_slate_capability::{CapabilityState, HolderId, ResourceClass, Rights};
+use clean_slate_capability::{
+    AuditEvent, AuditKind, CapabilityState, HolderId, NetDestination, PolicyRefusal, ResourceClass,
+    ResourceRef, Rights,
+};
 use clean_slate_network::error::DenialReason;
 use clean_slate_network::protocol::{
     NetworkRequest, NetworkResponse, NETWORK_REQUEST_BYTES, NETWORK_RESPONSE_BYTES,
@@ -13,10 +16,10 @@ use clean_slate_service_fixtures::{
     NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
     NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_NEXT_METADATA_BYTES,
     NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT,
-    NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY,
-    NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
-    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK,
-    NET_WAIT_WORK_MASK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
+    NET_SUBOP_AUDIT_REFUSAL, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT,
+    NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT,
+    NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS,
+    NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_MASK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
 };
 
 use crate::arch::x86_64::cpu::without_interrupts;
@@ -88,9 +91,10 @@ fn find_network_handle(holder: HolderId, raw_device: bool) -> Option<u64> {
 fn denial_status(reason: DenialReason) -> u64 {
     match reason {
         DenialReason::StaleGeneration => SYSCALL_ESTALE,
-        DenialReason::NoCapability | DenialReason::MissingRight | DenialReason::Revoked => {
-            SYSCALL_EACCES
-        }
+        DenialReason::NoCapability
+        | DenialReason::MissingRight
+        | DenialReason::Revoked
+        | DenialReason::Destination => SYSCALL_EACCES,
     }
 }
 
@@ -197,6 +201,7 @@ pub(crate) fn handle_syscall_network_request(frame: &mut SyscallContext) {
         NET_SUBOP_RAW_RECEIVE => handle_raw_receive(frame),
         NET_SUBOP_POP_HOLDER_EXIT => handle_pop_holder_exit(frame),
         NET_SUBOP_ACK_HOLDER_EXIT => handle_ack_holder_exit(frame),
+        NET_SUBOP_AUDIT_REFUSAL => handle_audit_refusal(frame),
         NET_SUBOP_MONOTONIC_TICKS => handle_monotonic_ticks(frame),
         NET_SUBOP_TICK_PERIOD_NS => handle_tick_period_ns(frame),
         NET_SUBOP_WAIT_WORK => handle_wait_work(frame),
@@ -383,7 +388,9 @@ fn handle_service_next(frame: &mut SyscallContext) {
             }
             let mut meta = [0u8; 28];
             meta[0..8].copy_from_slice(&caller.pid.to_le_bytes());
-            meta[8..16].copy_from_slice(&caller.domain.to_le_bytes());
+            // The domain is the caller's app (#221 stage E), which only the kernel can say.
+            let app = crate::service::net_app::app_of(caller.pid, caller.instance_generation);
+            meta[8..16].copy_from_slice(&app.to_le_bytes());
             meta[16..24].copy_from_slice(&caller.instance_generation.to_le_bytes());
             let payload_len_usize = payload_len as usize;
             if payload_len_usize > NETWORK_MAX_PAYLOAD_BYTES {
@@ -627,7 +634,8 @@ fn handle_pop_holder_exit(frame: &mut SyscallContext) {
         Some(caller) => {
             let mut buf = [0u8; 24];
             buf[0..8].copy_from_slice(&caller.pid.to_le_bytes());
-            buf[8..16].copy_from_slice(&caller.domain.to_le_bytes());
+            let app = crate::service::net_app::app_of(caller.pid, caller.instance_generation);
+            buf[8..16].copy_from_slice(&app.to_le_bytes());
             buf[16..24].copy_from_slice(&caller.instance_generation.to_le_bytes());
             frame.rax = match copy_to_user(frame.rdx, &buf) {
                 Ok(()) => 1,
@@ -636,6 +644,59 @@ fn handle_pop_holder_exit(frame: &mut SyscallContext) {
         }
         None => frame.rax = 0,
     }
+}
+
+/// Rights a refused client request can have needed.
+const REFUSABLE_RIGHTS: Rights = Rights::NET_RESOLVE
+    .union(Rights::NET_CONNECT)
+    .union(Rights::NET_SEND);
+
+/// `NET_SUBOP_AUDIT_REFUSAL` (#221 stage E): the live service's per-app policy refused a
+/// client's request. Recorded against the client, so its own ring budget bounds what it can
+/// make the service report; the service may only report callers it is serving.
+fn handle_audit_refusal(frame: &mut SyscallContext) {
+    let holder = match current_holder() {
+        Ok(holder) => holder,
+        Err(status) => {
+            frame.rax = status;
+            return;
+        }
+    };
+    if live_network_service_pid() != Some(holder.0) {
+        frame.rax = SYSCALL_EACCES;
+        return;
+    }
+    if let Err(reason) = authorize_network_op(holder, frame.rsi, NetworkOp::RawDevice, None) {
+        frame.rax = denial_status(reason);
+        return;
+    }
+    let (caller_pid, caller_generation) = (frame.rdx, frame.r10);
+    let requested = u32::try_from(frame.r9).ok().and_then(Rights::from_bits);
+    let (Some(destination), Some(requested)) = (NetDestination::decode(frame.r8), requested) else {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    };
+    if requested.bits() == 0
+        || !REFUSABLE_RIGHTS.contains(requested)
+        || !net_bridge_mut().serves_holder(caller_pid, caller_generation)
+    {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    crate::capability::audit::record(
+        AuditEvent::new(
+            AuditKind::Authorize,
+            HolderId(caller_pid),
+            ResourceRef {
+                class: ResourceClass::Network,
+                id: destination.encode(),
+                instance_generation: 0,
+            },
+            requested,
+        )
+        .refused(PolicyRefusal::DestinationDenied),
+    );
+    frame.rax = 0;
 }
 
 fn handle_ack_holder_exit(frame: &mut SyscallContext) {
