@@ -12,5 +12,6 @@ The generator names the CA `Clean-Slate M7 Test CA`, the server certificate
 private keys are `server.key`, `server.key.pem`, `server-wrong-name.key`,
 and `server-wrong-name.key.pem`.
 
-The network service image embeds `ca.crt` as `TLS_TRUST_ANCHOR`
-(`net-service/src/bin/userspace.rs`).
+Only test kernels compile `ca.crt` in (`kernel/src/service/net_launch.rs`, the M7
+feature sets) and hand it to the network service at launch; the service image and
+production kernels never contain it.

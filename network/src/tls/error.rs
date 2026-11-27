@@ -13,6 +13,8 @@ pub enum TlsError {
     Closed,
     BufferTooSmall,
     Rng,
+    /// No wall clock to check certificate validity against: the transaction never started.
+    NoClock,
 }
 
 impl core::fmt::Debug for TlsError {
@@ -27,6 +29,7 @@ impl core::fmt::Debug for TlsError {
             Self::Closed => f.write_str("Closed"),
             Self::BufferTooSmall => f.write_str("BufferTooSmall"),
             Self::Rng => f.write_str("Rng"),
+            Self::NoClock => f.write_str("NoClock"),
         }
     }
 }
@@ -47,7 +50,7 @@ impl From<TlsError> for NetworkError {
             | TlsError::TruncatedRecord => NetworkError::Protocol,
             TlsError::Timeout => NetworkError::Timeout,
             TlsError::Closed => NetworkError::Closed,
-            TlsError::BufferTooSmall | TlsError::Rng => NetworkError::Protocol,
+            TlsError::BufferTooSmall | TlsError::Rng | TlsError::NoClock => NetworkError::Protocol,
         }
     }
 }

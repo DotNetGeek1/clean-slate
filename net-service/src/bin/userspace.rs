@@ -8,17 +8,17 @@ use alloc::boxed::Box;
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_ESTALE, SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
 };
+use clean_slate_native_abi::clock::{
+    decode_wall, CLOCK_SUBOP_WALL, NANOS_PER_SECOND, SYSCALL_NR_CLOCK,
+};
 use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
 use clean_slate_network::addr::{BoundedHostname, EtherType, IpProtocol, Ipv4Addr, SocketAddrV4};
 use clean_slate_network::buffer::FrameBuf;
+use clean_slate_network::config::{ServiceNetwork, TrustAnchorSet};
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
 use clean_slate_network::dns::{DnsResolver, ResolveOutcome};
 use clean_slate_network::error::{DenialReason, NetworkError};
 use clean_slate_network::ethernet::EthernetFrame;
-use clean_slate_network::fixture::{
-    APP_REQUEST_BYTES, APP_RESPONSE_BYTES, DNS_SERVER_ADDR, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS,
-    FIXTURE_HOSTNAME, GUEST_IPV4, PEER_IPV4, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
-};
 use clean_slate_network::ipv4::Ipv4Header;
 use clean_slate_network::limits::MAX_SESSIONS;
 use clean_slate_network::protocol::{
@@ -31,13 +31,14 @@ use clean_slate_network::tcp::TcpState;
 use clean_slate_network::tcp::TcpTransport;
 use clean_slate_network::tls::{
     tls_transaction, TlsConfig, TlsError, TlsTransactionBudget, TlsTransactionClock,
-    TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
+    TLS_RECORD_BUFFER_BYTES,
 };
 use clean_slate_service_fixtures::ready_detail::NetworkReadyDetail;
 use clean_slate_service_fixtures::{
-    AllowAllAuthorizer, NetworkService, NetworkServiceBootstrap, NETWORK_CAPABILITY_VERSION,
-    NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES,
-    NETWORK_SERVICE_AUX_NO_ENTROPY, NETWORK_SERVICE_BOOTSTRAP_ADDRESS,
+    AllowAllAuthorizer, NetworkProbe, NetworkService, NetworkServiceBootstrap,
+    NetworkServiceLaunch, NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
+    NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_AUX_BAD_LAUNCH, NETWORK_SERVICE_AUX_NO_ENTROPY,
+    NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_LAUNCH_ADDRESS,
     NETWORK_SERVICE_MODE_ACCEPTANCE, NETWORK_SERVICE_MODE_CAPACITY_LOOP,
     NETWORK_SERVICE_MODE_CLIENT, NETWORK_SERVICE_MODE_CONVERGED_CLIENT,
     NETWORK_SERVICE_MODE_INFLIGHT_ARM, NETWORK_SERVICE_MODE_STALE_CLOSE,
@@ -149,6 +150,45 @@ pub extern "C" fn _start() -> ! {
 
 fn bootstrap_mut() -> &'static mut NetworkServiceBootstrap {
     unsafe { &mut *(NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *mut NetworkServiceBootstrap) }
+}
+
+/// What the launcher handed this instance (#221 stage D). Read only.
+fn launch() -> &'static NetworkServiceLaunch {
+    unsafe { &*(NETWORK_SERVICE_LAUNCH_ADDRESS as *const NetworkServiceLaunch) }
+}
+
+fn probe() -> &'static NetworkProbe {
+    &launch().probe
+}
+
+/// The checked launch configuration; set once by `run_service_loop` before any stack exists.
+static mut SERVICE_NETWORK: ServiceNetwork = ServiceNetwork::UNCONFIGURED;
+/// The launch trust anchors (borrowed from the bootstrap page); set with `SERVICE_NETWORK`.
+static mut TRUST_ANCHORS: TrustAnchorSet<'static> = TrustAnchorSet::EMPTY;
+
+fn service_network() -> &'static ServiceNetwork {
+    unsafe { &*core::ptr::addr_of!(SERVICE_NETWORK) }
+}
+
+fn trust_anchors() -> &'static [&'static [u8]] {
+    unsafe { (*core::ptr::addr_of!(TRUST_ANCHORS)).as_slice() }
+}
+
+/// Pins `dest`'s next hop to the MAC the launch configuration names, if it names one;
+/// otherwise the stack resolves the next hop with ARP.
+fn pin_next_hop<L: NetworkLink>(stack: &mut L3Stack<L>, dest: Ipv4Addr, now: u64) {
+    if let Some((hop, mac)) = service_network().pinned_neighbour(dest) {
+        stack.arp_cache_mut().insert(hop, mac, now);
+    }
+}
+
+/// Wall-clock Unix seconds, or `None` when this boot has no wall clock (or the call fails).
+fn wall_clock_unix() -> Option<u64> {
+    let raw = raw_syscall(SYSCALL_NR_CLOCK, [CLOCK_SUBOP_WALL, 0, 0, 0, 0, 0]);
+    match decode_wall(raw) {
+        Ok(Some(ns)) => Some(ns / NANOS_PER_SECOND),
+        Ok(None) | Err(_) => None,
+    }
 }
 
 fn finish() -> ! {
@@ -746,8 +786,6 @@ fn queue_full() -> NetworkResponse {
     }
 }
 
-const TLS_TRUST_ANCHOR: &[u8] = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
-
 /// The request that owns the in-flight TLS transaction.
 struct ActiveTls {
     request_id: u64,
@@ -764,6 +802,8 @@ struct TlsJobInput {
     rng: NetRng,
     request: [u8; NETWORK_MAX_PAYLOAD_BYTES],
     request_len: usize,
+    /// Wall-clock seconds read when the request arrived; `None` fails the job closed.
+    wall_unix: Option<u64>,
 }
 
 struct TlsJobOutput {
@@ -781,7 +821,13 @@ struct TlsJob<'a, F> {
 
 async fn start_tls_job(input: TlsJobInput) -> TlsJobOutput {
     let mut response = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-    let config = TlsConfig::new(TLS_SERVER_NAME, TLS_TRUST_ANCHOR, VALIDATION_TIME_UNIX);
+    // No configured peer name: the empty name fails the transaction before it connects.
+    let server_name = service_network()
+        .tls_peer_name
+        .as_ref()
+        .and_then(|name| name.as_str().ok())
+        .unwrap_or("");
+    let config = TlsConfig::new(server_name, trust_anchors(), input.wall_unix);
     // SAFETY: only the service loop uses the TLS buffers and the shared transport, and
     // it holds no reference to either while it polls or drops this future.
     let transaction = unsafe {
@@ -875,6 +921,21 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             finish()
         }
     };
+    // #221 stage D: the network and the trust anchors come from the launcher. A launch block
+    // that does not check out stops the service before it takes the device or is ready.
+    let launch = launch();
+    let (network, anchors) = match (launch.network.parse(), launch.trust.set()) {
+        (Ok(network), Ok(anchors)) => (network, anchors),
+        _ => {
+            bootstrap.result_code = NETWORK_SERVICE_RESULT_ERROR;
+            bootstrap.aux_status = NETWORK_SERVICE_AUX_BAD_LAUNCH;
+            finish()
+        }
+    };
+    unsafe {
+        *core::ptr::addr_of_mut!(SERVICE_NETWORK) = network;
+        *core::ptr::addr_of_mut!(TRUST_ANCHORS) = anchors;
+    }
     let raw_handle = match network_capability(NETWORK_DEVICE_ID) {
         Ok(handle) => handle,
         Err(_) => finish(),
@@ -892,23 +953,26 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         (*service_state_ptr()).attach_backend(DemuxLink::for_udp());
         SERVICE_STATE_READY.store(true, Ordering::Release);
         *service_dns_resolver_slot() = Some(DnsResolver::alloc_boxed(
-            L3Stack::new(
+            L3Stack::with_route(
                 DemuxLink::for_udp(),
                 raw_mac,
-                GUEST_IPV4,
+                network.route,
                 ms_to_irq_ticks(ARP_TTL_MS),
             ),
             generation,
-            DNS_SERVER_ADDR,
+            // No resolver: queries go to 0.0.0.0, which has no route, so resolves fail.
+            network
+                .resolver
+                .unwrap_or(SocketAddrV4::new(Ipv4Addr::new([0; 4]), 53)),
             DnsResolver::<ServiceLink>::DEFAULT_TICKS_PER_SEC,
             rng.fork(),
         ));
         TcpTransport::init_in_place(
             service_tls_transport_ptr(),
-            L3Stack::new(
+            L3Stack::with_route(
                 DemuxLink::for_tcp(),
                 raw_mac,
-                GUEST_IPV4,
+                network.route,
                 ms_to_irq_ticks(ARP_TTL_MS),
             ),
             generation,
@@ -1206,9 +1270,7 @@ fn connect_linux_udp_endpoint(
     })?;
     let udp = udp_resolver()?.udp_mut();
     let to_response = |err: NetworkError| NetworkResponse::Error { code: err.code() };
-    udp.stack_mut()
-        .arp_cache_mut()
-        .insert(dest.addr, PEER_MAC, tick);
+    pin_next_hop(udp.stack_mut(), dest.addr, tick);
     if let Some(mapping) = slot.filter(|mapping| mapping.owner == caller) {
         return udp
             .table_mut()
@@ -1270,11 +1332,9 @@ fn handle_service_udp_send(
     })?;
     let udp_sid = linux_udp_endpoint(caller, session)?;
     let udp = udp_resolver()?.udp_mut();
-    // Every Linux UDP peer is reached through the fixture next hop that `connect` pinned;
-    // refresh the pin so a send after the ARP TTL never waits on neighbour discovery.
-    udp.stack_mut()
-        .arp_cache_mut()
-        .insert(dest.addr, PEER_MAC, now);
+    // When the launch configuration pins the next hop, refresh the pin so a send after the
+    // ARP TTL never waits on neighbour discovery; otherwise the stack resolves it with ARP.
+    pin_next_hop(udp.stack_mut(), dest.addr, now);
     let sent = udp
         .send(now, udp_sid, caller, Some(dest), payload)
         .map_err(|err| NetworkResponse::Error { code: err.code() })?;
@@ -1531,9 +1591,7 @@ fn handle_service_plain_tcp_connect(
         );
     };
     let tcp = shared_tcp_transport_mut();
-    tcp.stack_mut()
-        .arp_cache_mut()
-        .insert(dest.addr, PEER_MAC, now);
+    pin_next_hop(tcp.stack_mut(), dest.addr, now);
     let connection = match tcp.connect(now, plain_tcp_owner(ctx.service_generation), dest) {
         Ok(connection) => connection,
         Err(err) => {
@@ -1821,10 +1879,7 @@ fn start_service_tls_send<F: Future<Output = TlsJobOutput>>(
         code: NetworkError::Timeout.code(),
     })?;
     let rng = shared_tcp_transport_mut().fork_rng();
-    shared_tcp_transport_mut()
-        .stack_mut()
-        .arp_cache_mut()
-        .insert(remote.addr, PEER_MAC, now);
+    pin_next_hop(shared_tcp_transport_mut().stack_mut(), remote.addr, now);
     let mut input = TlsJobInput {
         remote,
         owner: plain_tcp_owner(ctx.service_generation),
@@ -1835,6 +1890,7 @@ fn start_service_tls_send<F: Future<Output = TlsJobOutput>>(
         rng,
         request: [0u8; NETWORK_MAX_PAYLOAD_BYTES],
         request_len: payload.len(),
+        wall_unix: wall_clock_unix(),
     };
     input
         .request
@@ -2193,14 +2249,16 @@ fn run_converged_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, 
 
 fn run_dns_phase() -> Result<Ipv4Addr, u64> {
     let handle = client_handle()?;
-    let name = BoundedHostname::try_from_str(FIXTURE_HOSTNAME).map_err(|_| 0u64)?;
+    let probe = probe();
+    let name = core::str::from_utf8(probe.resolve_name()).map_err(|_| 0u64)?;
+    let name = BoundedHostname::try_from_str(name).map_err(|_| 0u64)?;
     let request = NetworkRequest::Resolve { name }.encode();
     let request_id = client_submit(handle, &request, &[])?;
     let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
     let response = poll_until_done(handle, request_id, &mut payload)?;
     match response {
         NetworkResponse::Resolve { addr, ttl }
-            if addr == FIXTURE_A_RECORD && ttl == FIXTURE_A_TTL_SECS =>
+            if addr == Ipv4Addr::new(probe.expect_ipv4) && ttl == probe.expect_ttl =>
         {
             Ok(addr)
         }
@@ -2212,15 +2270,16 @@ fn run_dns_phase() -> Result<Ipv4Addr, u64> {
 fn run_tls_phase(resolved_addr: Ipv4Addr) -> Result<usize, u64> {
     let handle = client_handle()?;
     let session = open_tcp_session(handle)?;
-    let remote_tls = SocketAddrV4::new(resolved_addr, TLS_PORT);
+    let probe = probe();
+    let remote_tls = SocketAddrV4::new(resolved_addr, probe.tls_port);
     connect_session(handle, session, remote_tls)?;
-    let bytes_sent = send_session(handle, session, APP_REQUEST_BYTES)?;
-    if bytes_sent as usize != APP_REQUEST_BYTES.len() {
+    let bytes_sent = send_session(handle, session, probe.request())?;
+    if bytes_sent as usize != probe.request().len() {
         return Err(0);
     }
     let mut app_buf = [0u8; 64];
     let n = receive_session(handle, session, &mut app_buf)?;
-    if &app_buf[..n] != APP_RESPONSE_BYTES {
+    if &app_buf[..n] != probe.response() {
         return Err(0);
     }
     let close = NetworkRequest::Close { session }.encode();
@@ -2244,6 +2303,7 @@ fn map_tls_error_code(err: TlsError) -> u64 {
         TlsError::Closed => 7,
         TlsError::BufferTooSmall => 7,
         TlsError::Rng => 7,
+        TlsError::NoClock => 7,
     }
 }
 
@@ -2288,9 +2348,6 @@ fn run_client_echo(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> 
     Ok(NETWORK_SERVICE_RESULT_OK)
 }
 
-/// Discard port on the fixture peer: nothing is ever sent to it, so nothing comes back.
-const INFLIGHT_SILENT_PEER: SocketAddrV4 = SocketAddrV4::new(PEER_IPV4, 9);
-
 /// Leaves exactly one request parked in the service for the kernel to fail at termination.
 ///
 /// The receive waits on a connected UDP endpoint whose peer never sends, so only shutdown
@@ -2299,7 +2356,9 @@ const INFLIGHT_SILENT_PEER: SocketAddrV4 = SocketAddrV4::new(PEER_IPV4, 9);
 fn run_inflight_arm() -> Result<u64, u64> {
     let handle = client_handle()?;
     let session = open_session(handle, SocketKind::LinuxUdp)?;
-    connect_session(handle, session, INFLIGHT_SILENT_PEER)?;
+    // A peer port that never answers (the launcher's probe names it).
+    let silent = SocketAddrV4::new(Ipv4Addr::new(probe().silent_ipv4), probe().silent_port);
+    connect_session(handle, session, silent)?;
     let receive = NetworkRequest::Receive {
         session,
         max_len: 64,

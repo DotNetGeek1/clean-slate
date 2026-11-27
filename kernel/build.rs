@@ -361,8 +361,140 @@ fn emit_wall_clock_floor() {
     println!("cargo::rustc-env=CLEAN_SLATE_BUILD_FLOOR_UNIX={floor}");
 }
 
+/// Kernels whose network service runs against the hermetic M7 fixture peer: they hand the
+/// service the lab network and trust only the M7 test CA (#221 stage D). Every other kernel
+/// gets the production launch inputs below, and the test CA is not compiled into it.
+const FIXTURE_NETWORK_FEATURES: &[&str] = &[
+    "m7-net-service-self-test",
+    "m7-net-caps-self-test",
+    "m7-tls-self-test",
+    "m7-dns-self-test",
+    "m7-net-device-self-test",
+];
+
+/// #221 stage D launch inputs for the network service.
+///
+/// - `cfg(clean_slate_fixture_network)` in the fixture lanes above.
+/// - `production_trust_anchors.rs`: every `*.der` file in `CLEAN_SLATE_TRUST_ANCHORS_DIR`
+///   (default `kernel/trust-anchors`), in name order, as `PRODUCTION_TRUST_ANCHORS`.
+/// - `production_network.rs`: `CLEAN_SLATE_NET_STATIC` as `PRODUCTION_NETWORK`, a static
+///   configuration `local/prefix[,gw=a.b.c.d][,gw_mac=xx:..][,dns=a.b.c.d[:port]][,tls_name=n]`;
+///   unset is an unconfigured network.
+fn emit_network_launch_inputs() {
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_fixture_network)");
+    if any_feature_enabled(FIXTURE_NETWORK_FEATURES) {
+        println!("cargo::rustc-cfg=clean_slate_fixture_network");
+    }
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+
+    println!("cargo::rerun-if-env-changed=CLEAN_SLATE_TRUST_ANCHORS_DIR");
+    let anchors_dir = env::var_os("CLEAN_SLATE_TRUST_ANCHORS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("trust-anchors"));
+    println!("cargo::rerun-if-changed={}", anchors_dir.display());
+    let mut anchors: Vec<PathBuf> = std::fs::read_dir(&anchors_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.extension().is_some_and(|ext| ext == "der"))
+                .collect()
+        })
+        .unwrap_or_default();
+    anchors.sort();
+    let mut code = String::from("pub(crate) const PRODUCTION_TRUST_ANCHORS: &[&[u8]] = &[\n");
+    for anchor in &anchors {
+        println!("cargo::rerun-if-changed={}", anchor.display());
+        let path = anchor.canonicalize().expect("trust anchor path");
+        code.push_str(&format!(
+            "    include_bytes!({:?}),\n",
+            path.display().to_string()
+        ));
+    }
+    code.push_str("];\n");
+    std::fs::write(out_dir.join("production_trust_anchors.rs"), code)
+        .expect("write production_trust_anchors.rs");
+
+    println!("cargo::rerun-if-env-changed=CLEAN_SLATE_NET_STATIC");
+    let network = match env::var("CLEAN_SLATE_NET_STATIC") {
+        Ok(spec) if !spec.trim().is_empty() => static_network_code(spec.trim())
+            .unwrap_or_else(|err| panic!("CLEAN_SLATE_NET_STATIC={spec:?}: {err}")),
+        _ => "NetworkConfig::UNCONFIGURED".to_string(),
+    };
+    std::fs::write(
+        out_dir.join("production_network.rs"),
+        format!("pub(crate) const PRODUCTION_NETWORK: NetworkConfig = {network};\n"),
+    )
+    .expect("write production_network.rs");
+}
+
+fn parse_ipv4(text: &str) -> Result<[u8; 4], String> {
+    let octets: Vec<u8> = text
+        .split('.')
+        .map(|part| {
+            part.parse::<u8>()
+                .map_err(|_| format!("bad IPv4 address {text:?}"))
+        })
+        .collect::<Result<_, _>>()?;
+    octets
+        .try_into()
+        .map_err(|_| format!("bad IPv4 address {text:?}"))
+}
+
+/// Rust for a `NetworkConfig::new_static` call from `CLEAN_SLATE_NET_STATIC` (see
+/// [`emit_network_launch_inputs`]). The service checks the result again at launch.
+fn static_network_code(spec: &str) -> Result<String, String> {
+    let mut fields = spec.split(',').map(str::trim);
+    let local = fields.next().ok_or("missing local/prefix")?;
+    let (local, prefix) = local.split_once('/').ok_or("local address needs /prefix")?;
+    let local = parse_ipv4(local)?;
+    let prefix: u8 = prefix
+        .parse()
+        .ok()
+        .filter(|&p| (1..=32).contains(&p))
+        .ok_or("prefix must be 1..=32")?;
+    let (mut gateway, mut gateway_mac, mut dns, mut tls_name) = (None, None, None, String::new());
+    for field in fields {
+        let (key, value) = field
+            .split_once('=')
+            .ok_or(format!("bad field {field:?}"))?;
+        match key {
+            "gw" => gateway = Some(parse_ipv4(value)?),
+            "gw_mac" => {
+                let octets: Vec<u8> = value
+                    .split(':')
+                    .map(|part| u8::from_str_radix(part, 16).map_err(|_| "bad gw_mac"))
+                    .collect::<Result<_, _>>()?;
+                let octets: [u8; 6] = octets.try_into().map_err(|_| "bad gw_mac")?;
+                gateway_mac = Some(octets);
+            }
+            "dns" => {
+                let (addr, port) = match value.split_once(':') {
+                    Some((addr, port)) => (addr, port.parse::<u16>().map_err(|_| "bad dns port")?),
+                    None => (value, 53),
+                };
+                dns = Some((parse_ipv4(addr)?, port));
+            }
+            "tls_name" => tls_name = value.to_string(),
+            other => return Err(format!("unknown field {other:?}")),
+        }
+    }
+    let gateway = gateway.map_or("None".to_string(), |g| {
+        format!("Some(Ipv4Addr::new({g:?}))")
+    });
+    let gateway_mac =
+        gateway_mac.map_or("None".to_string(), |m| format!("Some(MacAddr::new({m:?}))"));
+    let dns = dns.map_or("None".to_string(), |(a, p)| {
+        format!("Some(SocketAddrV4::new(Ipv4Addr::new({a:?}), {p}))")
+    });
+    Ok(format!(
+        "NetworkConfig::new_static(Ipv4Route {{ local: Ipv4Addr::new({local:?}), prefix_len: {prefix}, gateway: {gateway} }}, {gateway_mac}, {dns}, {tls_name:?})"
+    ))
+}
+
 fn main() {
     emit_wall_clock_floor();
+    emit_network_launch_inputs();
     let system_init = emit_system_init_cfg();
     emit_boot_tail_cfgs(system_init);
     emit_linux_cfgs(system_init);

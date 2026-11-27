@@ -28,7 +28,7 @@ use clean_slate_network::tcp::TcpTransport;
 use clean_slate_network::tls::HANDSHAKE_MARKER;
 use clean_slate_network::tls::{
     tls_transaction, TlsConfig, TlsError, TlsTransactionBudget, TlsTransactionClock,
-    TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
+    TLS_RECORD_BUFFER_BYTES,
 };
 
 const OWNER: TrustedCaller = TrustedCaller::new(1, 0, 1);
@@ -178,8 +178,12 @@ fn run_tls_phase(
     tcp: &mut TcpTransport<VirtioNetDevice>,
     expect_identity_failure: bool,
 ) -> Result<(), &'static str> {
-    let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
-    let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
+    let ca: &[u8] = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
+    let anchors = [ca];
+    // Certificates are checked at the kernel's wall clock (#221); none fails closed.
+    let wall_unix = crate::time::wall::wall_clock_ns()
+        .map(|ns| ns / clean_slate_native_abi::clock::NANOS_PER_SECOND);
+    let config = TlsConfig::new(TLS_SERVER_NAME, &anchors, wall_unix);
     let remote_tls = SocketAddrV4::new(PEER_IPV4, TLS_PORT);
     let read_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_READ_BUF) };
     let write_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_WRITE_BUF) };

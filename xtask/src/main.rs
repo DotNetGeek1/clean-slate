@@ -1333,7 +1333,18 @@ const M10_MILESTONE_STEPS: [M9MilestoneStep; 17] = [
     ("test-system-desktop", system_desktop_lane::run),
 ];
 
+/// The network every image xtask builds is launched with, unless `CLEAN_SLATE_NET_STATIC` is
+/// already set (set it empty for an unconfigured network). The QEMU lanes and `cargo xtask run
+/// --net` put the guest on the hermetic M7 lab network (`network::fixture`), so the default
+/// image's network service gets that network at launch (#221 stage D). This is an address, not
+/// trust: only the M7 test kernels trust the test CA.
+const XTASK_LAB_NETWORK: &str =
+    "10.77.0.2/24,gw=10.77.0.1,gw_mac=52:54:00:ab:cd:ef,dns=10.77.0.1:53,tls_name=m7.fixture.test";
+
 fn main() -> ExitCode {
+    if env::var_os("CLEAN_SLATE_NET_STATIC").is_none() {
+        env::set_var("CLEAN_SLATE_NET_STATIC", XTASK_LAB_NETWORK);
+    }
     match run(env::args_os()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -7844,5 +7855,21 @@ mod tests {
         let result = finalize_m5_disk_lifecycle(Err(XtaskError::InvalidCommand("x".into())), false);
         assert!(matches!(result, Err(XtaskError::InvalidCommand(command)) if command == "x"));
         assert!(!disk.exists());
+    }
+}
+
+#[cfg(test)]
+mod lab_network_tests {
+    use super::XTASK_LAB_NETWORK;
+    use clean_slate_network::fixture::{
+        DNS_SERVER_ADDR, GATEWAY_IPV4, GUEST_IPV4, PEER_MAC, SUBNET_PREFIX_LEN, TLS_SERVER_NAME,
+    };
+
+    #[test]
+    fn the_lab_network_is_the_m7_fixture_network() {
+        let expected = format!(
+            "{GUEST_IPV4}/{SUBNET_PREFIX_LEN},gw={GATEWAY_IPV4},gw_mac={PEER_MAC},dns={DNS_SERVER_ADDR},tls_name={TLS_SERVER_NAME}"
+        );
+        assert_eq!(XTASK_LAB_NETWORK, expected);
     }
 }

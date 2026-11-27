@@ -22,7 +22,7 @@ pub use trace::HANDSHAKE_MARKER;
 #[cfg(feature = "tls")]
 pub use transaction::{tls_transaction, TlsTransactionBudget, TlsTransactionClock};
 #[cfg(feature = "tls")]
-pub use verify::{TlsRng, VALIDATION_TIME_UNIX};
+pub use verify::TlsRng;
 
 /// Maximum TLS ciphertext record size (RFC 8446); safe read buffer size for `embedded-tls`.
 pub const TLS_RECORD_BUFFER_BYTES: usize = 16_640;
