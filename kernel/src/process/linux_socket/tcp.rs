@@ -6,7 +6,7 @@
 //! into the socket buffer and wakes blocked readers and `poll(2)` waiters.
 
 use clean_slate_linux_abi::{LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EAGAIN, EPIPE};
-use clean_slate_network::error::NetworkError;
+use clean_slate_network::error::{DenialReason, NetworkError};
 use clean_slate_network::protocol::{NetworkRequest, NetworkResponse};
 use clean_slate_service_fixtures::NETWORK_MAX_PAYLOAD_BYTES;
 
@@ -26,6 +26,10 @@ pub(crate) fn map_network_error(code: u16) -> Result<u64, LinuxErrno> {
         c if c == NetworkError::Unreachable.code() => Err(clean_slate_linux_abi::ECONNREFUSED),
         c if c == NetworkError::Timeout.code() => Err(clean_slate_linux_abi::ETIMEDOUT),
         c if c == NetworkError::Reset.code() => Err(clean_slate_linux_abi::ECONNRESET),
+        // The app's network policy (#221 stage E) does not let it reach this destination.
+        c if c == NetworkError::Denied(DenialReason::Destination).code() => {
+            Err(clean_slate_linux_abi::EACCES)
+        }
         _ => Err(clean_slate_linux_abi::EIO),
     }
 }
@@ -265,6 +269,19 @@ mod tests {
         assert_eq!(
             map_connect_error(NetworkError::Unreachable.code()),
             Err(clean_slate_linux_abi::ECONNREFUSED)
+        );
+    }
+
+    #[test]
+    fn a_destination_the_app_may_not_reach_is_eacces() {
+        let refused = NetworkError::Denied(DenialReason::Destination).code();
+        assert_eq!(
+            map_connect_error(refused),
+            Err(clean_slate_linux_abi::EACCES)
+        );
+        assert_eq!(
+            map_network_error(refused),
+            Err(clean_slate_linux_abi::EACCES)
         );
     }
 

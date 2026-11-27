@@ -27,8 +27,8 @@ use core::fmt::{self, Write};
 use core::mem::offset_of;
 
 use clean_slate_capability::{
-    AuditEvent, AuditKind, AuditOutcome, CapabilityError, HolderId, PolicyRefusal, ResourceClass,
-    AUDIT_EVENT_SIZE_BYTES,
+    AuditEvent, AuditKind, AuditOutcome, CapabilityError, HolderId, NetDestination, PolicyRefusal,
+    ResourceClass, AUDIT_EVENT_SIZE_BYTES,
 };
 
 /// The kernel returns at most this many records per read.
@@ -306,8 +306,28 @@ impl fmt::Display for RecordLine<'_> {
         if record.kind != AuditKind::Authorize as u8 {
             write!(f, " {}", Kind(record.kind))?;
         }
-        write!(f, " {}", Class(record.class))
+        write!(f, " {}", Class(record.class))?;
+        match refused_destination(record) {
+            Some(destination) => {
+                f.write_str(" ")?;
+                destination.write_to(f)
+            }
+            None => Ok(()),
+        }
     }
+}
+
+/// The destination of a network policy refusal (#221 stage E), which its `resource_id` holds.
+/// The kernel writes those only as a use by the refused holder, so the line has room for the
+/// longest address; any other shape is printed without it.
+fn refused_destination(record: &AuditRecord) -> Option<NetDestination> {
+    let refusal = AuditOutcome::refused(PolicyRefusal::DestinationDenied);
+    (record.class == ResourceClass::Network as u8
+        && record.outcome == refusal
+        && record.kind == AuditKind::Authorize as u8
+        && record.actor == record.subject)
+        .then(|| NetDestination::decode(record.resource_id))
+        .flatten()
 }
 
 struct Outcome(AuditOutcome);
@@ -379,6 +399,7 @@ const fn refusal_name(refusal: PolicyRefusal) -> &'static str {
         PolicyRefusal::AuthorityMismatch => "mismatch",
         PolicyRefusal::Unavailable => "unavail",
         PolicyRefusal::Busy => "busy",
+        PolicyRefusal::DestinationDenied => "dest",
     }
 }
 
@@ -590,6 +611,60 @@ mod tests {
         let (summary, _) = drain(&mut reader, &mut script);
         assert_eq!(script.since.len(), AUDIT_DRAIN_MAX_READS);
         assert_eq!(summary.through, 8 * AUDIT_DRAIN_MAX_READS as u64);
+    }
+
+    #[test]
+    fn a_network_policy_refusal_names_its_destination() {
+        use clean_slate_capability::NetTransport;
+        let refusal = |sequence, destination: NetDestination, requested| {
+            let mut event = AuditEvent::new(
+                AuditKind::Authorize,
+                HolderId(12),
+                ResourceRef {
+                    class: ResourceClass::Network,
+                    id: destination.encode(),
+                    instance_generation: 0,
+                },
+                requested,
+            )
+            .refused(PolicyRefusal::DestinationDenied);
+            event.sequence = sequence;
+            event
+        };
+        let udp = NetDestination {
+            transport: NetTransport::Udp,
+            addr: [10, 77, 0, 50],
+            port: 53,
+        };
+        let mut reader = AuditDrain::new();
+        let mut script = Script::new(vec![vec![
+            refusal(1, udp, Rights::NET_CONNECT),
+            refusal(2, NetDestination::RESOLVE, Rights::NET_RESOLVE),
+        ]]);
+        let (summary, lines) = drain(&mut reader, &mut script);
+        assert_eq!(
+            lines,
+            [
+                "[ADT ] #1 12 dest net 10.77.0.50:53/udp",
+                "[ADT ] #2 12 dest net resolve",
+            ]
+        );
+        assert_eq!(summary.refused, 2);
+        // The longest destination at the largest numbers still fits one message.
+        let widest = NetDestination {
+            transport: NetTransport::Tcp,
+            addr: [255; 4],
+            port: u16::MAX,
+        };
+        let mut event = refusal(RECORD_LINE_MAX_NUMBER, widest, Rights::NET_CONNECT);
+        event.actor = HolderId(RECORD_LINE_MAX_NUMBER);
+        event.subject = event.actor;
+        let line = record_line(&AuditRecord::decode(&bytes_of(&event)));
+        assert_eq!(
+            line,
+            "[ADT ] #9999999999 9999999999 dest net 255.255.255.255:65535/tcp"
+        );
+        assert_eq!(line.len(), AUDIT_LINE_MAX_BYTES);
     }
 
     #[test]

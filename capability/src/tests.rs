@@ -807,3 +807,47 @@ fn m10_resource_ref_constructors() {
     assert_eq!(inp.id, 0);
     assert_eq!(inp.instance_generation, 0);
 }
+
+#[test]
+fn a_refused_network_destination_round_trips_and_prints_its_address() {
+    use crate::{NetDestination, NetTransport, PolicyRefusal};
+    let destination = NetDestination {
+        transport: NetTransport::Udp,
+        addr: [10, 77, 0, 50],
+        port: 53,
+    };
+    assert_eq!(
+        NetDestination::decode(destination.encode()),
+        Some(destination)
+    );
+    assert_eq!(
+        NetDestination::decode(NetDestination::RESOLVE.encode()),
+        Some(NetDestination::RESOLVE)
+    );
+    assert_eq!(NetDestination::decode(3 << 48), None, "unknown transport");
+    assert_eq!(
+        NetDestination::decode(1 << 56),
+        None,
+        "bits above the transport"
+    );
+    let event = crate::AuditEvent::new(
+        crate::AuditKind::Authorize,
+        crate::HolderId(12),
+        ResourceRef {
+            class: ResourceClass::Network,
+            id: destination.encode(),
+            instance_generation: 0,
+        },
+        Rights::NET_CONNECT,
+    )
+    .refused(PolicyRefusal::DestinationDenied);
+    assert_eq!(NetDestination::of_refusal(&event), Some(destination));
+    let mut line = std::string::String::new();
+    crate::format_audit_line(&event, &mut line).unwrap();
+    assert!(
+        line.contains(" to=10.77.0.50:53/udp op=net_connect outcome=destination-denied "),
+        "{line}"
+    );
+    let allowed = event.with_result(Ok(()));
+    assert_eq!(NetDestination::of_refusal(&allowed), None);
+}

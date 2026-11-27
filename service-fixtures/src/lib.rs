@@ -18,6 +18,7 @@ pub mod init_bootstrap;
 pub mod m6_fixture;
 /// #218 shared service manifest (kernel grants, init start order and restart policy).
 pub mod manifest;
+pub mod network_policy;
 mod network_service;
 mod network_transport;
 /// M6.3 object-capability protocol (lane-owned).
@@ -47,8 +48,13 @@ pub use diagnostics::{
     format_crash_service_injecting_line, format_crash_service_replacement_healthy_line,
     format_crash_service_started_line, format_unrelated_workload_progress_line,
 };
+pub use network_policy::{
+    audit_destination, AppNetworkPolicy, AppPolicyAuthorizer, DestinationRule, Peer,
+    RefusalReports, APP_SELF_TEST, APP_UNATTRIBUTED, NETWORK_POLICIES,
+};
 pub use network_service::{
-    AllowAllAuthorizer, DenyAllAuthorizer, NetworkAuthorizer, NetworkOp, NetworkService,
+    AllowAllAuthorizer, DenyAllAuthorizer, NetworkAuthorizer, NetworkOp, NetworkRefusal,
+    NetworkService, NetworkTarget,
 };
 pub use network_transport::{
     encode_request, encode_response, NetworkProbe, NetworkServiceBootstrap, NetworkServiceLaunch,
@@ -64,7 +70,7 @@ pub use network_transport::{
     NETWORK_SERVICE_NEXT_METADATA_BYTES, NETWORK_SERVICE_NEXT_WIRE_BYTES,
     NETWORK_SERVICE_RESULT_ERROR, NETWORK_SERVICE_RESULT_OK, NETWORK_SERVICE_RESULT_PENDING,
     NETWORK_STATUS_PENDING, NETWORK_UNAUTHORIZED_PROBE_SERVICE_ID_VALUE, NET_SERVICE_ROLE_ID,
-    NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
+    NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_AUDIT_REFUSAL, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
     NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
     NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_MASK, NET_WAIT_WORK_REQUESTS,

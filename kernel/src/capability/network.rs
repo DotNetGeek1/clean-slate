@@ -244,6 +244,7 @@ fn log_denied(holder: HolderId, reason: DenialReason) {
         DenialReason::MissingRight => "missing-right",
         DenialReason::StaleGeneration => "stale-generation",
         DenialReason::Revoked => "revoked",
+        DenialReason::Destination => "destination",
     };
     kernel_log_fmt(format_args!(
         "[NET ] denied pid={} reason={}\n",
