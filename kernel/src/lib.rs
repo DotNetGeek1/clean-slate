@@ -9,6 +9,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod arch;
 mod boot;
+#[cfg(any(test, clean_slate_bump_allocator))]
+mod bump_heap;
 mod capability;
 mod device;
 mod diagnostics;
@@ -51,30 +53,26 @@ static M5_ALLOCATOR: M5BumpAllocator = M5BumpAllocator;
 #[cfg(all(clean_slate_bump_allocator, not(test)))]
 unsafe impl GlobalAlloc for M5BumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let align = layout.align();
-        let size = layout.size();
-        if align == 0 || size == 0 {
-            return null_mut();
-        }
+        let base = unsafe { core::ptr::addr_of_mut!(M5_HEAP.0) as *mut u8 };
         let mut current = M5_HEAP_OFFSET.load(Ordering::Relaxed);
         loop {
-            let aligned = (current + (align - 1)) & !(align - 1);
-            let Some(next) = aligned.checked_add(size) else {
+            // Align the address, not the offset: the heap base is only 16-byte aligned (#350).
+            let Some(reservation) = bump_heap::reserve(
+                base as usize,
+                current,
+                layout.size(),
+                layout.align(),
+                M5_HEAP_BYTES,
+            ) else {
                 return null_mut();
             };
-            if next > M5_HEAP_BYTES {
-                return null_mut();
-            }
             match M5_HEAP_OFFSET.compare_exchange(
                 current,
-                next,
+                reservation.next,
                 Ordering::SeqCst,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => {
-                    let base = unsafe { core::ptr::addr_of_mut!(M5_HEAP.0) as *mut u8 };
-                    return unsafe { base.add(aligned) };
-                }
+                Ok(_) => return unsafe { base.add(reservation.offset) },
                 Err(observed) => current = observed,
             }
         }
