@@ -128,6 +128,10 @@ pub enum Event {
     /// `WindowFocused` (0x8703, `WINDOW_LIST`): the listed window with keyboard focus; `None`
     /// when no listed window has it.
     WindowFocused { window: Option<WindowHandle> },
+    /// `OutputChanged` (0x8800, `OUTPUT_EVENTS`): the output now runs `output` (#314). Sent
+    /// after the mode change took effect; toplevels get a `Configure` with the new bounds as
+    /// well, so only surfaces sized to the output (the shell's) need this event.
+    OutputChanged { output: OutputInfo },
 }
 
 impl Event {
@@ -158,6 +162,7 @@ impl Event {
             Self::WindowTitle { .. } => OP_WINDOW_TITLE,
             Self::WindowRemoved { .. } => OP_WINDOW_REMOVED,
             Self::WindowFocused { .. } => OP_WINDOW_FOCUSED,
+            Self::OutputChanged { .. } => OP_OUTPUT_CHANGED,
         }
     }
 
@@ -172,6 +177,9 @@ impl Event {
                 output,
             } => {
                 Self::encode_welcome_body(&mut out, version, features, output)?;
+            }
+            Self::OutputChanged { output } => {
+                Self::encode_output(&mut out, output)?;
             }
             Self::Error {
                 object,
@@ -425,6 +433,9 @@ impl Event {
             OP_WINDOW_FOCUSED => Self::WindowFocused {
                 window: WindowHandle::new(read_u32_le(bytes, 12)),
             },
+            OP_OUTPUT_CHANGED => Self::OutputChanged {
+                output: Self::decode_output(bytes).map_err(|c| decode_error(c, bytes))?,
+            },
             _ => return Err(decode_error(ProtocolError::UnknownOpcode, bytes)),
         };
         Ok(Tagged { tag, message })
@@ -439,6 +450,11 @@ impl Event {
         write_u16_le(out, 12, version.major);
         write_u16_le(out, 14, version.minor);
         write_u64_le(out, 16, features.bits());
+        Self::encode_output(out, output)
+    }
+
+    /// `OutputInfo` at bytes 24..56, shared by `Welcome` and `OutputChanged`.
+    fn encode_output(out: &mut [u8; FRAME_BYTES], output: OutputInfo) -> Result<(), ProtocolError> {
         write_u32_le(out, 24, output.id.encode());
         write_u32_le(out, 28, output.mode.width_px);
         write_u32_le(out, 32, output.mode.height_px);
@@ -455,6 +471,17 @@ impl Event {
     }
 
     fn decode_welcome_body(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        Ok(Self::Welcome {
+            version: ProtocolVersion {
+                major: read_u16_le(bytes, 12),
+                minor: read_u16_le(bytes, 14),
+            },
+            features: Features(read_u64_le(bytes, 16)),
+            output: Self::decode_output(bytes)?,
+        })
+    }
+
+    fn decode_output(bytes: &[u8]) -> Result<OutputInfo, ProtocolError> {
         let output_id =
             OutputId::decode(read_u32_le(bytes, 24)).map_err(|_| ProtocolError::MalformedFrame)?;
         let format = PixelFormat::from_u8(bytes[40]).ok_or(ProtocolError::InvalidFormat)?;
@@ -470,19 +497,12 @@ impl Event {
             scale: Scale120(scale_raw),
             refresh_mhz: read_u32_le(bytes, 44),
         };
-        Ok(Self::Welcome {
-            version: ProtocolVersion {
-                major: read_u16_le(bytes, 12),
-                minor: read_u16_le(bytes, 14),
-            },
-            features: Features(read_u64_le(bytes, 16)),
-            output: OutputInfo {
-                id: output_id,
-                mode,
-                logical_size: Size {
-                    width: read_u32_le(bytes, 48),
-                    height: read_u32_le(bytes, 52),
-                },
+        Ok(OutputInfo {
+            id: output_id,
+            mode,
+            logical_size: Size {
+                width: read_u32_le(bytes, 48),
+                height: read_u32_le(bytes, 52),
             },
         })
     }

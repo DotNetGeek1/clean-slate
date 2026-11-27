@@ -282,6 +282,33 @@ pub fn constrain_move(
     }
 }
 
+/// Content origin that keeps the whole frame on `output` after an output change (#314): the
+/// frame moves by the least amount, and a frame larger than the output is pinned to the
+/// top-left corner (its `Configure` shrinks it). `frame_offset` is frame minus content origin.
+pub fn fit_inside(frame_offset: Point, frame_size: Size, origin: Point, output: Size) -> Point {
+    let axis = |at: i32, offset: i32, extent: u32, bound: u32| {
+        let frame = i64::from(at) + i64::from(offset);
+        let max = (i64::from(bound) - i64::from(extent)).max(0);
+        to_i32(frame.clamp(0, max) - i64::from(offset))
+    };
+    Point {
+        x: axis(origin.x, frame_offset.x, frame_size.width, output.width),
+        y: axis(origin.y, frame_offset.y, frame_size.height, output.height),
+    }
+}
+
+/// Content size whose frame fits `output`: each axis loses what the frame overhangs, and keeps
+/// at least one pixel.
+pub fn fit_size(content: Size, frame_size: Size, output: Size) -> Size {
+    let axis = |content: u32, frame: u32, bound: u32| {
+        content.saturating_sub(frame.saturating_sub(bound)).max(1)
+    };
+    Size {
+        width: axis(content.width, frame_size.width, output.width),
+        height: axis(content.height, frame_size.height, output.height),
+    }
+}
+
 /// Client limits as an inclusive range: `0` means unbounded; never 0 or above the protocol
 /// extent; a min above the max yields the max.
 fn axis_range(min: u32, max: u32, bound: u32) -> (u32, u32) {
@@ -673,6 +700,80 @@ mod tests {
             assert!(frame_x <= i64::from(output.width - MIN_VISIBLE));
             assert!((0..=i64::from(output.height - MIN_VISIBLE)).contains(&frame_y));
         }
+    }
+
+    #[test]
+    fn fit_inside_keeps_the_whole_frame_on_the_output() {
+        let output = Size {
+            width: 640,
+            height: 480,
+        };
+        let offset = Point { x: -2, y: -10 };
+        let frame = Size {
+            width: 304,
+            height: 212,
+        };
+        // Already inside: unchanged.
+        let inside = Point { x: 100, y: 100 };
+        assert_eq!(fit_inside(offset, frame, inside, output), inside);
+        // Past the right and bottom edges: pulled back flush with them.
+        let at = fit_inside(offset, frame, Point { x: 1000, y: 700 }, output);
+        assert_eq!((at.x - 2 + 304, at.y - 10 + 212), (640, 480));
+        // Above and left of the output: the frame's corner lands on the origin.
+        let at = fit_inside(offset, frame, Point { x: -500, y: -500 }, output);
+        assert_eq!((at.x - 2, at.y - 10), (0, 0));
+        // Larger than the output: pinned to the corner.
+        let huge = Size {
+            width: 900,
+            height: 700,
+        };
+        let at = fit_inside(offset, huge, Point { x: 50, y: 50 }, output);
+        assert_eq!((at.x - 2, at.y - 10), (0, 0));
+        // Extreme coordinates cannot overflow.
+        let at = fit_inside(
+            offset,
+            frame,
+            Point {
+                x: i32::MAX,
+                y: i32::MIN,
+            },
+            output,
+        );
+        assert_eq!((at.x - 2 + 304, at.y - 10), (640, 0));
+    }
+
+    #[test]
+    fn fit_size_shrinks_only_what_overhangs() {
+        let output = Size {
+            width: 640,
+            height: 480,
+        };
+        let content = Size {
+            width: 700,
+            height: 300,
+        };
+        let frame = Size {
+            width: 704,
+            height: 312,
+        };
+        assert_eq!(
+            fit_size(content, frame, output),
+            Size {
+                width: 636,
+                height: 300
+            }
+        );
+        let tiny = Size {
+            width: 2,
+            height: 2,
+        };
+        assert_eq!(
+            fit_size(content, frame, tiny),
+            Size {
+                width: 1,
+                height: 1
+            }
+        );
     }
 
     #[test]

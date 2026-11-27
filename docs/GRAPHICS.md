@@ -344,7 +344,8 @@ Authoritative: `graphics::mode` (`ModeList`, `ModeFlags`, `mode_size_in_bounds`,
 - **VirtIO-GPU.** The device scans out a resource of any size, so every listed size is settable: the current one, the host's size from `GET_DISPLAY_INFO`, each `STANDARD_MODE_SIZES` entry no larger than it in either axis, and the configured size. A change is one batch: `RESOURCE_DETACH_BACKING` (when a buffer is attached), `RESOURCE_UNREF`, `RESOURCE_CREATE_2D` at the new size. The next present attaches its buffer and links the scanout (`SET_SCANOUT` with the full new mode), exactly as after a bring-up, and must carry full-frame damage. A failed change needs a reset, and the reset brings the device up in the mode that was asked for.
 - **Scanout buffers.** Each is allocated on its first `MAP_SCANOUT` with room for the largest frame among the current and the settable modes, in whole pages; `ScanoutMapping.byte_len` is that capacity. A mode change re-lays the buffers out in place, so mappings never move and stay valid across it. Once buffers exist, a listed size whose frame would not fit them loses `SETTABLE`.
 - **Epoch.** A mode change bumps the `OutputId` epoch when it takes effect (at once on a synchronous backend, at the device's answer on VirtIO-GPU) and signals the wake bit. Until then the old mode is `CURRENT`, and `PRESENT`, `MAP_SCANOUT` of a new index and another `SET_MODE` are `BufferBusy`. Every request on the old epoch is `StaleEpoch`; the compositor re-queries the mode as after a reset.
-- **Choice.** `ModeList::choose` is the compositor's start-up policy: the preferred entry if it is settable, else the largest settable entry (the wider of equal areas), else the current one.
+- **Choice.** `ModeList::choose` is the compositor's start-up policy: the preferred entry if it is settable, else the largest settable entry (the wider of equal areas), else the current one. `Compositor::start` issues `SET_MODE` for it when it is not the current mode (`Stats::mode_requested`); a refusal keeps the current mode. With the reference launch flags the choice is 1280×800 on both backends: GOP sets only its boot mode, and QEMU's VirtIO-GPU reports `xres`×`yres` as its preferred size.
+- **Re-layout.** When a `QUERY_MODE` after an epoch change reports another size (`compositor/src/compositor/output.rs`), the compositor moves every placed toplevel the least distance that puts its whole frame on the output (`wm::fit_inside`), sends each window a `Configure` with the new bounds and, if its frame is still larger than the output, a size that fits (`wm::fit_size`), clamps the pointer, posts `OutputChanged` to every `OUTPUT_EVENTS` connection, repaints the whole output and logs `[COMP] output changed output=WxH`. The desktop shell lays itself out again for the new size with a second buffer set: it registers the new background and rail buffers while the old ones stay on screen, commits both surfaces at once, then unregisters each old buffer when the compositor releases it and releases its memory once that is confirmed; a further change waits until the old set is gone.
 
 ## Pixels, alpha and colour
 
@@ -628,6 +629,7 @@ Protocol version `1.0` (`PROTOCOL_MAJOR`, `PROTOCOL_MINOR`); `M10_SERVER_FEATURE
 | seat | — | `InputReset` 0x8060 |
 | text input (`TEXT_INPUT`) | — | `Text` 0x8100, `KeyRepeat` 0x8101 (0x8102 reserved for preedit) |
 | window list (`WINDOW_LIST`, shell only) | `ActivateWindow` 0x0700 | `WindowAdded` 0x8700, `WindowTitle` 0x8701, `WindowRemoved` 0x8702, `WindowFocused` 0x8703 |
+| output events (`OUTPUT_EVENTS`) | — | `OutputChanged` 0x8800 |
 
 Per-frame limits: `Damage` carries at most `DAMAGE_RECTS_PER_FRAME` (5) `BufferRect`s and the region requests at most `REGION_RECTS_PER_FRAME` (3) `Rect`s; larger sets use several requests before one `Commit`. `SetTitle` carries a `WindowTitle` of at most `MAX_TITLE_BYTES` (40) bytes of UTF-8, truncated on a character boundary by the encoder. `Commit` carries `request_frame`, `color_space` and an optional configure `ack`.
 
@@ -647,6 +649,10 @@ Per-frame limits: `Damage` carries at most `DAMAGE_RECTS_PER_FRAME` (5) `BufferR
 - `WindowTitle` (0x8701): `window` @12, `len` u8 @16 (0..=40), 17..24 zero, UTF-8 @24..64 (`len` bytes, the rest zero).
 - `WindowRemoved` (0x8702): `window` @12. The window was hidden or destroyed, or its client left.
 - `WindowFocused` (0x8703): `window` @12, 0 when no listed window has focus (a shell surface or nothing does).
+
+**Output events (#314).** A client whose surfaces are sized to the output sets `Features::OUTPUT_EVENTS` in `Hello`; the compositor offers it to everyone (`M10_SERVER_FEATURES`), and the desktop shell asks for it. Toplevels need no event: a mode change reaches them as a `Configure` ([Display modes](#display-modes-314)).
+
+- `OutputChanged` (0x8800): object 0, 12..24 zero, the new `OutputInfo` @24..56 laid out as in `Welcome`, 56..64 zero. Sent once per change, after the new mode took effect.
 
 **Negotiation.** `Hello { version, features }` must be the first request; `Welcome` replies with the negotiated version and features and the output (`OutputInfo`: id, mode, logical size). `negotiate`:
 
@@ -856,8 +862,8 @@ None collides with `NETWORK_STATUS_PENDING` (`u64::MAX - 15`). Capability failur
 ## Versioning and extension points
 
 - **Version.** `ProtocolVersion { major, minor }`, 1.0 in M10. A major bump is incompatible and rejected at `Hello`. A minor bump may only add opcodes inside the reserved ranges below, and the server may use them only when the negotiated minor allows it.
-- **Opcodes.** In 1.0 every reserved or unassigned opcode decodes to `UnknownOpcode` (recoverable). Core growth: requests `0x0002..=0x000F` and unused holes in `0x0010..=0x00FF`; events `0x8003..=0x800F` (`0x8003` is earmarked for `OutputChanged` when `MAX_OUTPUTS > 1`) and unused holes in `0x8010..=0x80FF`. Unassigned: `0x0800..=0x7FFF` and `0x8800..=0xFFFF`.
-- **Features.** `Features(u64)`; `Features::KNOWN` = `0x7F` (the OR of `Features::TEXT_INPUT` … `Features::WINDOW_LIST`). The compositor offers `TEXT_INPUT` (#309) to everyone and `WINDOW_LIST` (#237) to `GFX_SHELL` holders, so every other feature below is negotiated off. Opcodes of a feature not negotiated are never sent. The bit assignments and opcode ranges are frozen in `graphics::protocol`.
+- **Opcodes.** In 1.0 every reserved or unassigned opcode decodes to `UnknownOpcode` (recoverable). Core growth: requests `0x0002..=0x000F` and unused holes in `0x0010..=0x00FF`; events `0x8003..=0x800F` (`0x8003` is earmarked for output hotplug when `MAX_OUTPUTS > 1`; a mode change of the one output is `OutputChanged` 0x8800, #314) and unused holes in `0x8010..=0x80FF`. Unassigned: `0x0900..=0x7FFF` and `0x8900..=0xFFFF`.
+- **Features.** `Features(u64)`; `Features::KNOWN` = `0xFF` (the OR of `Features::TEXT_INPUT` … `Features::OUTPUT_EVENTS`). The compositor offers `TEXT_INPUT` (#309) and `OUTPUT_EVENTS` (#314) to everyone and `WINDOW_LIST` (#237) to `GFX_SHELL` holders, so every other feature below is negotiated off. Opcodes of a feature not negotiated are never sent. The bit assignments and opcode ranges are frozen in `graphics::protocol`.
 
 | Bit | Feature | Opcodes (request / event) | Future content |
 |---|---|---|---|
@@ -868,8 +874,9 @@ None collides with `NETWORK_STATUS_PENDING` (`u64::MAX - 15`). Capability failur
 | `1 << 4` | client decorations | `0x0500..=0x05FF` / `0x8500..=0x85FF` | decoration negotiation (`DecorationMode::Client`) |
 | `1 << 5` | subsurfaces | `0x0600..=0x06FF` / `0x8600..=0x86FF` | `SurfaceRole::Subsurface`, position and stacking |
 | `1 << 6` | window list | `0x0700..=0x07FF` / `0x8700..=0x87FF` | `ActivateWindow`; `WindowAdded`, `WindowTitle`, `WindowRemoved`, `WindowFocused` (#237; `GFX_SHELL` only) |
+| `1 << 7` | output events | `0x0800..=0x08FF` / `0x8800..=0x88FF` | `OutputChanged` 0x8800 (#314) |
 
-Other reserved vocabulary: `SurfaceRole::Cursor` (client cursors), `Layer::Cursor`, `WindowStates` bits other than `ACTIVATED`, `ColorSpace` values other than `Srgb`, display subops 9 and above (`RELEASE_PRESENTER`), `OutputChanged`.
+Other reserved vocabulary: `SurfaceRole::Cursor` (client cursors), `Layer::Cursor`, `WindowStates` bits other than `ACTIVATED`, `ColorSpace` values other than `Srgb`, display subops 9 and above (`RELEASE_PRESENTER`), output hotplug.
 
 **Compatibility shims.** The contract leaves room for Linux (M11: DRM/KMS subset, evdev) and Windows (M13) guest surfaces without adopting their semantics. Shims translate into this protocol as ordinary clients; for example the evdev shim negates `vertical` for `REL_WHEEL`. Nothing in the protocol is a Wayland, X11, DRM or GDI object.
 

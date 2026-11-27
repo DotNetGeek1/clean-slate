@@ -22,6 +22,10 @@ impl<S: Syscalls> Host for Client<S> {
     fn pixels(&mut self, slot: BufferSlot) -> Option<&mut [u8]> {
         CompositorClient::pixels(self, usize::from(slot.0))
     }
+
+    fn release(&mut self, slot: BufferSlot) {
+        CompositorClient::release(self, usize::from(slot.0));
+    }
 }
 
 #[cfg(test)]

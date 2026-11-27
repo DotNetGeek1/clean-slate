@@ -12,6 +12,10 @@
 //!                     and committed with exactly those Damage rects
 //! any phase        -> WindowAdded/Removed/Focused and launcher events -> the rail's apps
 //! rail click       -> ActivateWindow (app has a window) or a launcher START (it is not running)
+//! OutputChanged    -> (once running and nothing is retiring) Shell::new(new size), allocate
+//!                     the other buffer set, RegisterBuffer each in turn, then repaint, Attach
+//!                     and Commit both surfaces at once; each old buffer is unregistered once
+//!                     the compositor releases it, and released when that is confirmed (#314)
 //! ```
 //!
 //! The shell is an ordinary compositor client: the background and the rail are surfaces whose
@@ -25,7 +29,8 @@ use clean_slate_graphics::input::{KeyState, PointerButton};
 use clean_slate_graphics::pixel::{BufferLayout, ColorSpace};
 use clean_slate_graphics::protocol::request::REGION_RECTS_PER_FRAME;
 use clean_slate_graphics::protocol::{
-    Event, Features, ProtocolError, ProtocolVersion, Request, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    Event, Features, ProtocolError, ProtocolVersion, Request, OP_REGISTER_BUFFER, PROTOCOL_MAJOR,
+    PROTOCOL_MINOR,
 };
 use clean_slate_graphics::role::SurfaceRole;
 use clean_slate_graphics::{Fixed24_8, Point};
@@ -37,20 +42,26 @@ use crate::apps::{Action, Apps};
 use clean_slate_ui::surface::{self, Damage};
 use clean_slate_ui::{QualityTier, CLEAN_SLATE_DARK};
 
-/// Buffers the shell registers: one background buffer, two alternating rail buffers.
-pub const BUFFER_COUNT: usize = 3;
+/// Buffers one layout uses: one background buffer, two alternating rail buffers.
+pub const ROLE_COUNT: usize = 3;
+/// Host buffer slots: two sets of [`ROLE_COUNT`], so an output change can register the new
+/// set while the compositor still shows the old one (#314).
+pub const BUFFER_COUNT: usize = 2 * ROLE_COUNT;
 /// The background's only buffer.
 pub const BACKGROUND_SLOT: BufferSlot = BufferSlot(0);
 /// The rail's two buffers.
 pub const RAIL_SLOTS: [BufferSlot; 2] = [BufferSlot(1), BufferSlot(2)];
 
-/// One of the shell's pixel buffers.
+/// One of the shell's pixel buffers: a role (`0..ROLE_COUNT`) inside the session, a host slot
+/// (`0..BUFFER_COUNT`, the role in the current set) on the [`Host`] calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BufferSlot(pub u8);
 
 impl BufferSlot {
-    /// Every slot, in registration order.
-    pub const ALL: [Self; BUFFER_COUNT] = [BACKGROUND_SLOT, RAIL_SLOTS[0], RAIL_SLOTS[1]];
+    /// Every role, in registration order.
+    pub const ROLES: [Self; ROLE_COUNT] = [BACKGROUND_SLOT, RAIL_SLOTS[0], RAIL_SLOTS[1]];
+    /// Every host slot.
+    pub const ALL: [Self; BUFFER_COUNT] = [Self(0), Self(1), Self(2), Self(3), Self(4), Self(5)];
 
     const fn index(self) -> usize {
         self.0 as usize
@@ -72,6 +83,9 @@ pub trait Host {
 
     /// The shell's mapping of `slot`.
     fn pixels(&mut self, slot: BufferSlot) -> Option<&mut [u8]>;
+
+    /// Unmaps and releases `slot`'s buffer, once the compositor has unregistered it.
+    fn release(&mut self, slot: BufferSlot);
 }
 
 /// Why the session ended.
@@ -102,6 +116,8 @@ enum Phase {
     CreatingBackground,
     CreatingRail,
     Running,
+    /// Registering the other buffer set for a new output size; the old set stays on screen.
+    Resizing(BufferSlot),
     Done,
 }
 
@@ -123,6 +139,17 @@ impl Slot {
     }
 }
 
+/// A buffer of the previous set, on its way out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Retiring {
+    id: ClientBufferId,
+    /// Host slot to release once the compositor confirms.
+    slot: BufferSlot,
+    /// `UnregisterBuffer` sent; waiting for `BufferUnregistered`. Otherwise waiting for the
+    /// compositor to release it.
+    unregistered: bool,
+}
+
 /// Running counters (diagnostics and tests).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionStats {
@@ -138,6 +165,8 @@ pub struct SessionStats {
     pub activations: u32,
     /// Recoverable protocol errors seen after setup.
     pub protocol_errors: u32,
+    /// Output changes the shell re-laid itself out for (#314).
+    pub relayouts: u32,
 }
 
 /// The shell protocol client.
@@ -145,7 +174,18 @@ pub struct ShellSession {
     tier: QualityTier,
     shell: Option<Shell<'static>>,
     phase: Phase,
-    slots: [Slot; BUFFER_COUNT],
+    /// The output size the shell is laid out for.
+    output: Size,
+    /// Which host buffer set (`0` or `1`) the roles map to.
+    set: u8,
+    /// Buffers of the current set, by role.
+    slots: [Slot; ROLE_COUNT],
+    /// A newer output size not laid out yet.
+    pending_output: Option<Size>,
+    /// The layout and buffers being registered for it.
+    incoming: Option<Shell<'static>>,
+    incoming_ids: [Option<ClientBufferId>; ROLE_COUNT],
+    retiring: [Option<Retiring>; ROLE_COUNT],
     background: Option<SurfaceId>,
     rail: Option<SurfaceId>,
     pointer_on_rail: bool,
@@ -180,6 +220,17 @@ pub fn surface_layout(surface: &ShellSurface) -> Option<BufferLayout> {
     BufferLayout::packed(surface.rect.width, surface.rect.height, surface.format).ok()
 }
 
+/// Buffer layout of `role` in `shell`'s layout.
+fn role_layout(shell: &Shell<'_>, role: BufferSlot) -> Option<BufferLayout> {
+    let kind = if role == BACKGROUND_SLOT {
+        ShellSurfaceKind::Background
+    } else {
+        ShellSurfaceKind::Rail
+    };
+    let surface = shell.surfaces().into_iter().find(|s| s.kind == kind)?;
+    surface_layout(&surface)
+}
+
 impl ShellSession {
     /// A session painting at `tier` (clamped to Q1 by [`Shell::new`]).
     pub const fn new(tier: QualityTier) -> Self {
@@ -187,7 +238,16 @@ impl ShellSession {
             tier,
             shell: None,
             phase: Phase::New,
+            output: Size {
+                width: 0,
+                height: 0,
+            },
+            set: 0,
             slots: [Slot::new(), Slot::new(), Slot::new()],
+            pending_output: None,
+            incoming: None,
+            incoming_ids: [None; ROLE_COUNT],
+            retiring: [None; ROLE_COUNT],
             background: None,
             rail: None,
             pointer_on_rail: false,
@@ -202,6 +262,7 @@ impl ShellSession {
                 deferred: 0,
                 activations: 0,
                 protocol_errors: 0,
+                relayouts: 0,
             },
         }
     }
@@ -228,9 +289,28 @@ impl ShellSession {
         self.rail
     }
 
-    /// Registered buffer ids by slot.
-    pub fn buffers(&self) -> [Option<ClientBufferId>; BUFFER_COUNT] {
+    /// Registered buffer ids of the current set, by role.
+    pub fn buffers(&self) -> [Option<ClientBufferId>; ROLE_COUNT] {
         [self.slots[0].id, self.slots[1].id, self.slots[2].id]
+    }
+
+    /// The output size the shell is laid out for.
+    pub fn output(&self) -> Size {
+        self.output
+    }
+
+    /// Old buffers still waiting to be released or unregistered after an output change.
+    pub fn retiring(&self) -> usize {
+        self.retiring.iter().flatten().count()
+    }
+
+    /// The host slot of `role` in the current set.
+    pub fn host_slot(&self, role: BufferSlot) -> BufferSlot {
+        Self::slot_in(self.set, role)
+    }
+
+    const fn slot_in(set: u8, role: BufferSlot) -> BufferSlot {
+        BufferSlot(set * ROLE_COUNT as u8 + role.0)
     }
 
     /// Rail buffers currently held by the compositor.
@@ -254,14 +334,14 @@ impl ShellSession {
     }
 
     /// Sends `Hello`, asking for the window list (#237), which the compositor grants because
-    /// the shell holds `GFX_SHELL`.
+    /// the shell holds `GFX_SHELL`, and for output changes (#314).
     pub fn start(&mut self, host: &mut dyn Host) -> Outcome {
         let hello = Request::Hello {
             version: ProtocolVersion {
                 major: PROTOCOL_MAJOR,
                 minor: PROTOCOL_MINOR,
             },
-            features: Features(Features::WINDOW_LIST),
+            features: Features(Features::WINDOW_LIST | Features::OUTPUT_EVENTS),
         };
         self.phase = Phase::Hello;
         self.send(host, &hello, None)
@@ -274,11 +354,19 @@ impl ShellSession {
         if self.apps.on_window(event) {
             self.refresh_rail();
         }
-        match self.phase {
+        if let Event::OutputChanged { output } = *event {
+            self.pending_output = Some(output.logical_size);
+        }
+        let outcome = match self.phase {
             Phase::New | Phase::Done => Outcome::Continue,
             Phase::Running => self.running(event, host),
+            Phase::Resizing(role) => self.resizing(role, event, host),
             _ => self.setup(event, host),
+        };
+        if outcome == Outcome::Continue && self.phase == Phase::Running {
+            return self.relayout(host);
         }
+        outcome
     }
 
     /// Handles one event from init's launcher: the rail follows the rows' states.
@@ -329,7 +417,7 @@ impl ShellSession {
             }
             (Phase::Registering(slot), Event::BufferRegistered { buffer }) => {
                 self.slots[slot.index()].id = Some(buffer);
-                match BufferSlot::ALL.get(slot.index() + 1) {
+                match BufferSlot::ROLES.get(slot.index() + 1) {
                     Some(next) => self.register(host, *next),
                     None => {
                         self.phase = Phase::CreatingBackground;
@@ -358,32 +446,44 @@ impl ShellSession {
     }
 
     fn slot_layout(&self, slot: BufferSlot) -> Option<BufferLayout> {
-        let kind = if slot == BACKGROUND_SLOT {
-            ShellSurfaceKind::Background
-        } else {
-            ShellSurfaceKind::Rail
-        };
-        surface_layout(&self.surface(kind)?)
+        role_layout(self.shell.as_ref()?, slot)
     }
 
-    fn welcome(&mut self, host: &mut dyn Host, size: Size) -> Outcome {
+    /// The shell laid out for `size`, showing the current apps.
+    fn layout(&self, size: Size) -> Option<Shell<'static>> {
         let mut shell = Shell::new(&CLEAN_SLATE_DARK, self.tier, size, ShellConfig::M10);
         if shell.zones().rail.is_empty() || shell.zones().workspace.is_empty() {
-            self.phase = Phase::Done;
-            return Outcome::Exit(ExitReason::BadOutput);
+            return None;
         }
         shell.set_apps(self.apps.rail());
-        self.shell = Some(shell);
-        for slot in BufferSlot::ALL {
-            let Some(layout) = self.slot_layout(slot) else {
+        Some(shell)
+    }
+
+    /// Allocates every role of buffer set `set` for `shell`.
+    fn allocate_set(&mut self, host: &mut dyn Host, shell: &Shell<'static>, set: u8) -> Outcome {
+        for role in BufferSlot::ROLES {
+            let Some(layout) = role_layout(shell, role) else {
                 self.phase = Phase::Done;
                 return Outcome::Exit(ExitReason::BadOutput);
             };
-            if let Err(error) = host.allocate(slot, layout.byte_len()) {
+            if let Err(error) = host.allocate(Self::slot_in(set, role), layout.byte_len()) {
                 self.phase = Phase::Done;
                 return Outcome::Exit(ExitReason::HostFailed(error));
             }
         }
+        Outcome::Continue
+    }
+
+    fn welcome(&mut self, host: &mut dyn Host, size: Size) -> Outcome {
+        let Some(shell) = self.layout(size) else {
+            self.phase = Phase::Done;
+            return Outcome::Exit(ExitReason::BadOutput);
+        };
+        if let Outcome::Exit(reason) = self.allocate_set(host, &shell, self.set) {
+            return Outcome::Exit(reason);
+        }
+        self.shell = Some(shell);
+        self.output = size;
         self.register(host, BACKGROUND_SLOT)
     }
 
@@ -392,7 +492,8 @@ impl ShellSession {
             return Outcome::Exit(ExitReason::BadOutput);
         };
         self.phase = Phase::Registering(slot);
-        self.send(host, &Request::RegisterBuffer { layout }, Some(slot))
+        let transfer = self.host_slot(slot);
+        self.send(host, &Request::RegisterBuffer { layout }, Some(transfer))
     }
 
     fn opaque(&self, surface: SurfaceId, rect: Rect) -> Request {
@@ -502,6 +603,18 @@ impl ShellSession {
             Event::BufferReleased { buffer } => {
                 if let Some(slot) = self.slots.iter_mut().find(|s| s.id == Some(buffer)) {
                     slot.busy = false;
+                }
+                if let Outcome::Exit(reason) = self.retire_released(buffer, host) {
+                    return Outcome::Exit(reason);
+                }
+                None
+            }
+            Event::BufferUnregistered { buffer } => {
+                for entry in &mut self.retiring {
+                    if let Some(old) = entry.filter(|r| r.unregistered && r.id == buffer) {
+                        host.release(old.slot);
+                        *entry = None;
+                    }
                 }
                 None
             }
@@ -630,7 +743,7 @@ impl ShellSession {
         let (Some(layout), Some(shell)) = (self.slot_layout(slot), self.shell) else {
             return false;
         };
-        let Some(bytes) = host.pixels(slot) else {
+        let Some(bytes) = host.pixels(self.host_slot(slot)) else {
             return false;
         };
         let Ok(mut canvas) = Canvas::new(bytes, layout) else {
@@ -643,6 +756,156 @@ impl ShellSession {
         }
         self.slots[slot.index()].stale = Damage::new();
         true
+    }
+
+    // ---- output changes (#314) --------------------------------------------------------------
+
+    /// Starts laying the shell out for a newer output size, once the last change has retired
+    /// every old buffer: allocates the other buffer set and registers its first buffer.
+    fn relayout(&mut self, host: &mut dyn Host) -> Outcome {
+        if self.retiring.iter().any(Option::is_some) {
+            return Outcome::Continue;
+        }
+        let Some(size) = self.pending_output.take() else {
+            return Outcome::Continue;
+        };
+        if size == self.output {
+            return Outcome::Continue;
+        }
+        let Some(shell) = self.layout(size) else {
+            self.phase = Phase::Done;
+            return Outcome::Exit(ExitReason::BadOutput);
+        };
+        let next = self.set ^ 1;
+        if let Outcome::Exit(reason) = self.allocate_set(host, &shell, next) {
+            return Outcome::Exit(reason);
+        }
+        self.incoming = Some(shell);
+        self.incoming_ids = [None; ROLE_COUNT];
+        self.output = size;
+        self.register_incoming(host, BACKGROUND_SLOT)
+    }
+
+    fn register_incoming(&mut self, host: &mut dyn Host, role: BufferSlot) -> Outcome {
+        let Some(layout) = self.incoming.as_ref().and_then(|s| role_layout(s, role)) else {
+            return Outcome::Exit(ExitReason::BadOutput);
+        };
+        self.phase = Phase::Resizing(role);
+        let transfer = Self::slot_in(self.set ^ 1, role);
+        self.send(host, &Request::RegisterBuffer { layout }, Some(transfer))
+    }
+
+    /// While the new set registers, the old one keeps serving the rail.
+    fn resizing(&mut self, role: BufferSlot, event: &Event, host: &mut dyn Host) -> Outcome {
+        match *event {
+            Event::BufferRegistered { buffer } => {
+                self.incoming_ids[role.index()] = Some(buffer);
+                match BufferSlot::ROLES.get(role.index() + 1) {
+                    Some(next) => self.register_incoming(host, *next),
+                    None => self.switch(host),
+                }
+            }
+            Event::Error {
+                request_opcode: OP_REGISTER_BUFFER,
+                code,
+                ..
+            } => {
+                self.phase = Phase::Done;
+                Outcome::Exit(ExitReason::SetupFailed(code))
+            }
+            _ => self.running(event, host),
+        }
+    }
+
+    /// Paints the new set and commits both surfaces with it; the old set retires.
+    fn switch(&mut self, host: &mut dyn Host) -> Outcome {
+        let (Some(background), Some(rail), Some(shell)) =
+            (self.background, self.rail, self.incoming.take())
+        else {
+            return Outcome::Exit(ExitReason::BadOutput);
+        };
+        let old_set = self.set;
+        let old = self.slots;
+        self.shell = Some(shell);
+        self.set ^= 1;
+        for (slot, id) in self.slots.iter_mut().zip(self.incoming_ids) {
+            *slot = Slot { id, ..Slot::new() };
+        }
+        self.uncommitted = Damage::new();
+        for role in BufferSlot::ROLES {
+            if !self.paint_full(host, role) {
+                return Outcome::Exit(ExitReason::NoPixels);
+            }
+        }
+        let (Some(back), Some(strip)) = (
+            self.surface(ShellSurfaceKind::Background),
+            self.surface(ShellSurfaceKind::Rail),
+        ) else {
+            return Outcome::Exit(ExitReason::BadOutput);
+        };
+        let back_size = Size {
+            width: back.rect.width,
+            height: back.rect.height,
+        };
+        let strip_size = Size {
+            width: strip.rect.width,
+            height: strip.rect.height,
+        };
+        let mut requests = [Request::CreateSurface; 7];
+        let mut count = 0;
+        let mut push = |request| {
+            requests[count] = request;
+            count += 1;
+        };
+        push(self.opaque(background, whole(back_size)));
+        let [attach, commit] = self.first_commit(background, BACKGROUND_SLOT);
+        push(attach);
+        push(commit);
+        if self.tier.clamp_m10() == QualityTier::Q0 {
+            push(self.opaque(rail, whole(strip_size)));
+        }
+        let [attach, commit] = self.first_commit(rail, RAIL_SLOTS[0]);
+        push(attach);
+        push(commit);
+        if let Outcome::Exit(reason) = self.send_all(host, &requests[..count]) {
+            return Outcome::Exit(reason);
+        }
+        self.slots[BACKGROUND_SLOT.index()].busy = true;
+        self.slots[RAIL_SLOTS[0].index()].busy = true;
+        self.stats.commits += 2;
+        self.stats.relayouts += 1;
+        self.phase = Phase::Running;
+        for (role, slot) in BufferSlot::ROLES.into_iter().zip(old) {
+            let Some(id) = slot.id else {
+                continue;
+            };
+            self.retiring[role.index()] = Some(Retiring {
+                id,
+                slot: Self::slot_in(old_set, role),
+                unregistered: false,
+            });
+            if !slot.busy {
+                if let Outcome::Exit(reason) = self.retire_released(id, host) {
+                    return Outcome::Exit(reason);
+                }
+            }
+        }
+        Outcome::Continue
+    }
+
+    /// An old buffer the compositor no longer holds: unregister it.
+    fn retire_released(&mut self, buffer: ClientBufferId, host: &mut dyn Host) -> Outcome {
+        let Some(index) = self
+            .retiring
+            .iter()
+            .position(|r| matches!(r, Some(r) if r.id == buffer && !r.unregistered))
+        else {
+            return Outcome::Continue;
+        };
+        if let Some(entry) = self.retiring[index].as_mut() {
+            entry.unregistered = true;
+        }
+        self.send(host, &Request::UnregisterBuffer { buffer }, None)
     }
 
     // ---- sending ----------------------------------------------------------------------------

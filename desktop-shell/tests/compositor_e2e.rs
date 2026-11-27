@@ -102,6 +102,8 @@ struct Proc {
     next_tag: u32,
     disconnected: bool,
     exited: bool,
+    /// Buffers released after the compositor unregistered them.
+    released: usize,
 }
 
 struct ShellProc {
@@ -179,6 +181,15 @@ impl Host for Link<'_> {
 
     fn pixels(&mut self, slot: BufferSlot) -> Option<&mut [u8]> {
         self.bytes(usize::from(slot.0))
+    }
+
+    fn release(&mut self, slot: BufferSlot) {
+        let slot = usize::from(slot.0);
+        let id = self.proc_.shm_ids[slot];
+        // The shell releases a buffer only once the compositor has unmapped it.
+        assert!(self.shm.free(id), "slot {slot} released while mapped");
+        self.proc_.shm_ids[slot] = 0;
+        self.proc_.released += 1;
     }
 }
 
@@ -263,6 +274,7 @@ impl World {
             next_tag: 1,
             disconnected: false,
             exited: false,
+            released: 0,
         }
     }
 
@@ -873,5 +885,120 @@ fn compositor_diagnostics_track_window_lifecycle_and_return_rows_to_baseline() {
         assert_eq!(world.comp.wm().focus, Some(World::app_key(&again)));
         let lines = observe(&world, &mut tracker);
         assert!(lines[0].starts_with("[WIN ] created"), "{lines:?}");
+    });
+}
+
+fn sized(width: u32, height: u32) -> DisplayMode {
+    DisplayMode {
+        width_px: width,
+        height_px: height,
+        stride_bytes: width * 4,
+        ..mode()
+    }
+}
+
+/// BGR of display pixel (x, y) at a `width`-pixel stride.
+fn pixel_at(world: &World, width: u32, x: i32, y: i32) -> [u8; 3] {
+    let at = (y as u32 * width * 4 + x as u32 * 4) as usize;
+    let s = world.display.scanout();
+    [s[at], s[at + 1], s[at + 2]]
+}
+
+/// #314: a runtime mode change re-lays out the shell (new background and rail at the new size,
+/// old buffers unregistered and released) and keeps the app window wholly on the output.
+#[test]
+fn a_mode_change_re_lays_out_the_shell_and_keeps_the_window_inside() {
+    big_stack(|| {
+        let tier = QualityTier::Q1;
+        let (width, height) = (1024u32, 768u32);
+        let mut world = World::new(tier);
+        world.display.offer(sized(width, height)).expect("offer");
+        let mut shell = world.launch_shell(tier);
+        let mut app = world.launch_app(&mut shell, 7, tier);
+        // Put the window in the bottom-right corner, where 1024x768 does not reach.
+        let key = World::app_key(&app);
+        let corner = Point {
+            x: (WIDTH - PANEL_SIZE.width - 4) as i32,
+            y: (HEIGHT - PANEL_SIZE.height - 4) as i32,
+        };
+        world.comp.move_surface(key, corner);
+        world.settle(Some(&mut shell), &mut [&mut app]);
+        let old_buffers = shell.session.buffers();
+
+        world.display.set_mode(width, height).expect("set mode");
+        world.waiter.raise(WAKE_DISPLAY);
+        world.settle(Some(&mut shell), &mut [&mut app]);
+
+        let output = clean_slate_graphics::Size { width, height };
+        assert_eq!(shell.exit, None);
+        assert_eq!(world.comp.present().expect("present").size(), output);
+        assert_eq!(world.comp.stats().output_changes, 1);
+        assert_eq!(shell.session.output(), output);
+        assert_eq!(shell.session.stats().relayouts, 1);
+        assert_eq!(shell.session.stats().protocol_errors, 0);
+        assert_eq!(app.session.stats().protocol_errors, 0);
+        // The old set is gone: unregistered by the compositor, then released by the shell.
+        assert_eq!(shell.session.retiring(), 0);
+        assert_eq!(shell.proc_.released, 3);
+        assert!(shell
+            .session
+            .buffers()
+            .iter()
+            .all(|id| id.is_some() && !old_buffers.contains(id)));
+
+        // The app window's frame is wholly on the smaller output.
+        let frame = world.chrome().frame_rect(world.content(&app));
+        assert!(
+            frame.x >= 0
+                && frame.y >= 0
+                && frame.x + frame.width as i32 <= width as i32
+                && frame.y + frame.height as i32 <= height as i32,
+            "{frame:?} outside {width}x{height}"
+        );
+
+        // The screen shows the shell laid out for 1024x768: the rail spans the new height and
+        // the background is the one painted for the new size.
+        let shell_model = shell.session.shell().expect("shell");
+        let zones = shell_model.zones();
+        assert_eq!(zones.rail.height, height);
+        let new_shell =
+            clean_slate_ui::shell::Shell::new(&CLEAN_SLATE_DARK, tier, output, ShellConfig::M10);
+        let info = new_shell
+            .surfaces()
+            .into_iter()
+            .find(|s| s.kind == ShellSurfaceKind::Background)
+            .expect("background");
+        let layout = surface_layout(&info).expect("layout");
+        let mut background = vec![0u8; layout.byte_len()];
+        let mut canvas = Canvas::new(&mut background, layout).expect("canvas");
+        new_shell.paint_background(&mut canvas);
+        let stride = layout.stride_bytes() as usize;
+        let cursor = world.comp.wm().cursor.shown;
+        let mut checked = 0;
+        for y in (0..height as i32).step_by(37) {
+            for x in (zones.rail.width as i32..width as i32).step_by(41) {
+                let inside = |r: Rect| {
+                    x >= r.x && y >= r.y && x < r.x + r.width as i32 && y < r.y + r.height as i32
+                };
+                // The frame's shadow reaches past it (Q1).
+                if inside(world.chrome().visual_rect(frame)) || cursor.is_some_and(inside) {
+                    continue;
+                }
+                let at = y as usize * stride + x as usize * 4;
+                let want = [background[at], background[at + 1], background[at + 2]];
+                assert_eq!(pixel_at(&world, width, x, y), want, "({x}, {y})");
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "{checked}");
+        let rail_bottom = height as i32 - 2;
+        assert_ne!(
+            pixel_at(&world, width, 44, rail_bottom),
+            {
+                let at = rail_bottom as usize * stride + 44 * 4;
+                [background[at], background[at + 1], background[at + 2]]
+            },
+            "rail drawn at the new height"
+        );
     });
 }
