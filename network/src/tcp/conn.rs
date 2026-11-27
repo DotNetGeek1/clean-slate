@@ -40,8 +40,10 @@ pub const TCP_RTO_MAX_MS: u64 = 4_000;
 /// TIME-WAIT duration before a closed connection slot is reusable.
 pub const TCP_TIME_WAIT_MS: u64 = 200;
 
-/// Active-open timeout while waiting for SYN-ACK.
-pub const TCP_CONNECT_TIMEOUT_MS: u64 = 500;
+/// Backstop active-open timeout while waiting for SYN-ACK. Callers own the real connect
+/// deadline (the network service's is 500 ms) and must always reach it first: a connection
+/// the transport times out is freed, so the caller would see it vanish instead of time out.
+pub const TCP_CONNECT_TIMEOUT_MS: u64 = 10_000;
 
 /// Disjoint out-of-order ranges held per connection; a segment that would need a fifth is dropped.
 pub const TCP_MAX_OOO_RANGES: usize = 4;

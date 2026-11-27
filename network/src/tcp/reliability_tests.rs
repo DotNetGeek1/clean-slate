@@ -624,7 +624,7 @@ fn far_out_of_range_ack_is_challenged() {
 fn timers_follow_the_tick_period() {
     let ten_ms = TcpTimers::from_tick_period_ns(10_000_000);
     assert_eq!(ten_ms.rto_initial, TcpTimers::DEFAULT.rto_initial / 10);
-    assert_eq!(ten_ms.connect_timeout, 50);
+    assert_eq!(ten_ms.connect_timeout, 1_000);
     let coarse = TcpTimers::from_tick_period_ns(1_000_000_000);
     assert_eq!(coarse.rto_min, 1, "never zero ticks");
 }
@@ -1081,4 +1081,26 @@ fn soak_many_seeds() {
 #[test]
 fn transfer_survives_heavy_loss() {
     lossy_transfer(42, 25, 5);
+}
+
+/// The network service times out a Linux connect after 500 ms and reports `Timeout` only
+/// while the connection still exists, so the transport's own backstop must outlast it.
+#[test]
+fn unanswered_connect_outlives_the_service_deadline() {
+    let (mut guest, mut peer) = pair();
+    let remote = SocketAddrV4::new(PEER_IPV4, PEER_PORT);
+    let id = guest.connect(0, OWNER, remote).unwrap();
+    for t in 1..=1_000 {
+        tick(&mut guest, t);
+        peer.recv(t);
+    }
+    assert_eq!(guest.state(id, OWNER).unwrap(), TcpState::SynSent);
+    assert!(guest.stats().retransmits >= 3, "SYN retried with backoff");
+    let backstop = TcpTimers::DEFAULT.connect_timeout;
+    for t in 1_001..=backstop + 1 {
+        tick(&mut guest, t);
+        peer.recv(t);
+    }
+    assert_eq!(guest.state(id, OWNER).unwrap_err(), NetworkError::NotFound);
+    assert_eq!(guest.stats().timeouts, 1);
 }
