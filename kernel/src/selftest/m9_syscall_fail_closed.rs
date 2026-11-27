@@ -87,14 +87,18 @@ const MAP_FAILURE_ATTEMPTS: u64 = 2048;
 /// The refused `brk` then asks for `MAPPING_TABLE_HEADROOM + 1` pages and
 /// rolls back only the headroom.
 const MAPPING_TABLE_HEADROOM: usize = 2;
-/// The hole below the mmap window, the offender's code page and the window
-/// all sit in the one 2 MiB span whose page table that code page already
-/// populated. The refused `brk` stays in the hole, so it allocates no
-/// page-table frame. The window is the rest of that span, which is large
-/// enough to fill the mapping table before the measurement.
+/// The hole below the mmap window and the offender's code page sit in the
+/// 2 MiB span whose page table that code page already populated, so the
+/// refused `brk`, which stays in the hole, allocates no page-table frame.
+/// The window is the rest of that span plus the next one: the probe's first
+/// mmap lands at the top of the second span and the filler runs up from the
+/// bottom of the first, so both page tables exist before the measurement and
+/// the later probes near the first mmap allocate none. Two spans are needed
+/// because the mapping table (`SMALL_ADDRESS_SPACE_USER_MAPPINGS`) no longer
+/// fits in what is left of one.
 const PROBE_BRK_BASE: u64 = USER_TEST_CODE_ADDRESS + 0x8000;
 const PROBE_MMAP_WINDOW: Range<u64> =
-    USER_TEST_CODE_ADDRESS + 0x10000..USER_TEST_CODE_ADDRESS + 0x20_0000;
+    USER_TEST_CODE_ADDRESS + 0x10000..USER_TEST_CODE_ADDRESS + 0x40_0000;
 const PROBE_BRK_HOLE_PAGES: u64 = (PROBE_MMAP_WINDOW.start - PROBE_BRK_BASE) / PAGE_SIZE;
 // `HEADROOM < hole` is `HEADROOM + 1` pages fitting in the hole.
 const _: () = assert!((MAPPING_TABLE_HEADROOM as u64) < PROBE_BRK_HOLE_PAGES);
