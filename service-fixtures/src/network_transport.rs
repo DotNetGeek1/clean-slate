@@ -71,6 +71,13 @@ pub const NET_SUBOP_WAIT_WORK: u64 = 12;
 /// Allowed decisions are not reported: the kernel already records each client's use of its
 /// capability. Returns 0, or `EINVAL` / `EACCES` / `ESTALE`.
 pub const NET_SUBOP_AUDIT_REFUSAL: u64 = 13;
+/// The live service publishes the resolver it uses (#354), so Linux programs read it from
+/// `/etc/resolv.conf`: `rsi` = raw-device handle, `rdx` = 1 with a resolver or 0 for none,
+/// `r10` = its IPv4 address (big-endian octets in the low 32 bits), `r8` = its port. The
+/// service sends it once its network is up (after a DHCP lease, when there is one) and again
+/// whenever the resolver changes. The kernel keeps it while that service instance is live.
+/// Returns 0, or `EINVAL` / `EACCES` / `ESTALE`.
+pub const NET_SUBOP_PUBLISH_RESOLVER: u64 = 14;
 /// Wake for a queued client request or a pending holder-exit notification.
 pub const NET_WAIT_WORK_REQUESTS: u64 = 1 << 0;
 /// Wake when `NET_SUBOP_RAW_RECEIVE` would return a frame.
@@ -312,6 +319,34 @@ mod native_abi_mirrors_the_service_protocol {
     };
     use clean_slate_native_abi::status::{STATUS_EACCES, STATUS_ESTALE};
     use clean_slate_network::addr::{BoundedHostname, Ipv4Addr, SocketAddrV4};
+
+    #[test]
+    fn every_network_subop_has_its_own_number() {
+        let subops = [
+            super::NET_SUBOP_SUBMIT,
+            super::NET_SUBOP_POLL,
+            super::NET_SUBOP_SERVICE_NEXT,
+            super::NET_SUBOP_SERVICE_COMPLETE,
+            super::NET_SUBOP_RAW_GEOMETRY,
+            super::NET_SUBOP_RAW_TRANSMIT,
+            super::NET_SUBOP_RAW_RECEIVE,
+            super::NET_SUBOP_POP_HOLDER_EXIT,
+            super::NET_SUBOP_ACK_HOLDER_EXIT,
+            super::NET_SUBOP_MONOTONIC_TICKS,
+            super::NET_SUBOP_TICK_PERIOD_NS,
+            super::NET_SUBOP_WAIT_WORK,
+            super::NET_SUBOP_AUDIT_REFUSAL,
+            super::NET_SUBOP_PUBLISH_RESOLVER,
+            super::NET_SUBOP_WAIT,
+            super::NET_SUBOP_DISCARD,
+        ];
+        for (index, subop) in subops.iter().enumerate() {
+            assert!(
+                !subops[index + 1..].contains(subop),
+                "sub-operation {subop} is used twice"
+            );
+        }
+    }
     use clean_slate_network::error::{DenialReason, NetworkError};
     use clean_slate_network::limits::{MAX_APPLICATION_PAYLOAD_BYTES, MAX_REQUEST_HOSTNAME_LEN};
     use clean_slate_network::protocol::{

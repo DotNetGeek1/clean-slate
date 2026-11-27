@@ -127,7 +127,7 @@ Text that does not fit is truncated on a character boundary and ends with `...`.
 
 The zones tile the output exactly, and nothing is placed below the workspace. `ShellConfig::MINIMAL` drops both placeholders. Later search, calendar, media and system modules fill the existing search and context zones, so the compositor and window architecture do not change.
 
-**Rail layout.** It has an 80 px brand block, five 60 px destinations with 4 px gaps (Home, Apps, Spaces, Files, System), and Settings anchored 16 px above the bottom edge. A selected item has a `surface_raised` pill, a 3 px cyan indicator bar on the left edge, a cyan icon and a primary label. A hovered item has a `rail_hover` pill and primary text.
+**Rail layout.** It has an 80 px brand block, five 60 px destinations with 4 px gaps (Home, Apps, Spaces, Files, System), and Settings anchored 16 px above the bottom edge. A selected item has a `surface_raised` pill, a 3 px cyan indicator bar on the left edge, a cyan icon and a primary label. A hovered item has a `rail_hover` pill and primary text. A running app has a 6 px cyan dot at the pill's top right; an app with a minimized window also has a 10×2 cyan bar at its top left, the title-bar minimize glyph, and a click restores that window (#357).
 
 **Surfaces and layers.** The shell is an ordinary CPL3 compositor client holding the root `Graphics{GFX_CONNECT|GFX_SHELL}` grant, and `Shell::surfaces` lists what it creates:
 
@@ -147,7 +147,7 @@ The window manager (#115, `compositor::wm`) owns decoration behaviour: hit testi
 | Title bar height | 32 (inside the border) |
 | Border | 1 |
 | Top corner radius | 8 (the bottom corners are square, so the client surface is never clipped) |
-| Controls | 24×24, 6 px from the right edge; Close only (Minimize and Maximize return with a minimized-window list in the rail, #115) |
+| Controls | 24×24, 4 px apart, 6 px from the right edge; order Minimize, Close (no Maximize, #115; minimized windows wait on the rail, #357) |
 | Title padding | 12 (title left-aligned, truncated before the controls) |
 | Resize margin | 6, invisible and outside the border |
 

@@ -10,7 +10,9 @@
 //!    `[INPT] pointer settled` at the target, and every button edge for its `[INPT] button` line
 //!    with the expected position and hit, before the next input is sent. Increment, toggle, a
 //!    background click, key `a` (delivered by focus), `s` held for a second so the compositor
-//!    repeats it and stops at the release (#309), a title-bar drag and the close control.
+//!    repeats it and stops at the release (#309), a title-bar drag, the minimise control (the
+//!    window leaves the screen and the rail marks the app) and a rail click that restores it
+//!    where it was (#357), then the close control.
 //! 4. **App closed** and 5. **app fault** (`0x1F`): init brings the app back, and after a fault
 //!    not before about half a second (D2).
 //! 6. **Desktop shell fault** (`0x1E`): the app keeps its pid and a click still reaches it.
@@ -31,10 +33,12 @@ use clean_slate_graphics::Point;
 use clean_slate_ui::{ChromeControl, ChromeStyle};
 
 use crate::m10_desktop_lane::{
-    check_held_key, is_held_key_line, motion_chunks, validate_captures, PlannedCapture,
-    BACKGROUND_POINT, DRAG, EXPECTED_INPUT, HELD_KEY_HOLD, HELD_KEY_MIN_REPEATS,
+    check_held_key, is_held_key_line, motion_chunks, validate_captures, without_pending_text,
+    PlannedCapture, BACKGROUND_POINT, DRAG, EXPECTED_INPUT, HELD_KEY_HOLD, HELD_KEY_MIN_REPEATS,
 };
-use crate::m10_desktop_visual::{center, chrome, frame_rect, panel, translate, window_origin};
+use crate::m10_desktop_visual::{
+    center, chrome, frame_rect, panel, rail_item, translate, window_origin,
+};
 use crate::m10_desktop_visual::{Scene, OUTPUT};
 use crate::qmp::lane::Capture;
 use crate::qmp::{InputAction, MouseButton, QCode};
@@ -61,9 +65,9 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(60);
 /// a busy host leaves the guest behind on a burst of motion). Every edge is therefore sent only
 /// once the guest has reported the pointer settled, which means it has read every queued byte.
 const PACKETS_PER_BATCH: usize = 4;
-/// How long a batch may take to settle where it should before the lane corrects from where the
-/// guest says the pointer is.
-const SETTLE_WAIT: Duration = Duration::from_secs(10);
+/// How long a batch may take to settle where it should, or to settle somewhere else with the
+/// guest quiet after it, which the lane then corrects from.
+const SETTLE_WAIT: Duration = Duration::from_secs(20);
 const CORRECTIONS: usize = 3;
 const EDGE_WAIT: Duration = Duration::from_secs(30);
 /// D2: init restarts a closed or crashed app after 0.5 s; the guest's clock is in whole ms.
@@ -145,6 +149,35 @@ fn last_settled(segment: &str) -> Option<Point> {
         .last()
 }
 
+/// Where a motion batch left the pointer, once that is settled: the expected position, or
+/// another one the guest reported settled and then went quiet at (`[IDLE ] quiet` after it,
+/// so it has read every packet the batch queued).
+///
+/// A batch whose packets the guest reads in more than one drain settles part-way first.
+/// Correcting from that position while the rest is still on its way moves the pointer past the
+/// target: the #349 drag released 100 px (one motion chunk) beyond its target. Only a quiet
+/// guest's position is safe to correct from.
+fn settled_for_batch(segment: &str, expected: Point) -> Result<Point, String> {
+    let complete = complete_lines(segment);
+    let Some(at) = last_settled(complete) else {
+        return Err("no [INPT] pointer settled line since the move".to_owned());
+    };
+    if at == expected {
+        return Ok(at);
+    }
+    let after = complete
+        .rfind(SETTLED)
+        .map_or("", |start| &complete[start..]);
+    if lines(after).skip(1).any(|line| line.contains(QUIET)) {
+        Ok(at)
+    } else {
+        Err(format!(
+            "the pointer last settled at x={} y={} and the guest has not gone quiet since",
+            at.x, at.y
+        ))
+    }
+}
+
 /// The first complete `[INPT] button left <edge>` line in `segment`: its position and hit.
 fn button_edge(segment: &str, edge: &str) -> Option<(Point, String)> {
     let prefix = format!("[INPT] button left {edge} ");
@@ -185,7 +218,7 @@ impl Lane {
     /// Moves the pointer to `target` in batches of at most [`PACKETS_PER_BATCH`] motion
     /// commands, waiting after each for the compositor to report the pointer settled where the
     /// batch should have left it. A batch that settles elsewhere is corrected from the position
-    /// the guest reports.
+    /// the guest reports once it has gone quiet there ([`settled_for_batch`]).
     fn move_to(&mut self, what: &str, target: Point) -> Result<(), XtaskError> {
         let mut corrections = 0;
         loop {
@@ -214,39 +247,32 @@ impl Lane {
                     "{what}: pointer settled at x={} y={}",
                     expected.x, expected.y
                 );
-                let polled =
-                    self.session
-                        .poll(
-                            &waiting,
-                            SETTLE_WAIT,
-                            &mut |segment| match last_settled(segment) {
-                                Some(at) if at == expected => Ok(()),
-                                Some(at) => Err(format!(
-                                    "the pointer last settled at x={} y={}",
-                                    at.x, at.y
-                                )),
-                                None => {
-                                    Err("no [INPT] pointer settled line since the move".to_owned())
-                                }
-                            },
-                        )?;
-                if let Err(reason) = polled {
-                    let Some(at) = last_settled(&self.session.segment()) else {
+                let polled = self.session.poll(&waiting, SETTLE_WAIT, &mut |segment| {
+                    settled_for_batch(segment, expected)
+                })?;
+                match polled {
+                    Ok(at) if at == expected => {}
+                    Ok(at) => {
+                        println!(
+                            "\n[STD ] {waiting}: the pointer settled at x={} y={} and the guest went quiet; correcting",
+                            at.x, at.y
+                        );
+                        corrections += 1;
+                        if corrections > CORRECTIONS {
+                            return self.fail(format!(
+                                "{what}: the pointer did not settle at x={} y={} after {CORRECTIONS} corrections; it is at x={} y={}",
+                                target.x, target.y, at.x, at.y
+                            ));
+                        }
+                        self.pointer = Some(at);
+                        break;
+                    }
+                    Err(reason) => {
                         return self.fail(format!(
-                            "{what}: the guest never reported [INPT] pointer settled after the pointer was moved from x={} y={} towards x={} y={}",
+                            "{what}: the pointer did not settle after it was moved from x={} y={} towards x={} y={}: {reason}",
                             from.x, from.y, expected.x, expected.y
                         ));
-                    };
-                    println!("\n[STD ] {waiting}: {reason}; correcting");
-                    corrections += 1;
-                    if corrections > CORRECTIONS {
-                        return self.fail(format!(
-                            "{what}: the pointer did not settle at x={} y={} after {CORRECTIONS} corrections; it is at x={} y={}",
-                            target.x, target.y, at.x, at.y
-                        ));
                     }
-                    self.pointer = Some(at);
-                    break;
                 }
                 self.pointer = Some(expected);
             }
@@ -336,6 +362,21 @@ impl Lane {
     /// line since the mark) and two dumps in a row are identical, checked later against `window`
     /// and the settled pointer.
     fn capture(&mut self, name: &'static str, window: Option<Point>) -> Result<(), XtaskError> {
+        self.capture_scene(name, window, false)
+    }
+
+    /// [`Self::capture`] of a desktop whose one app window is minimised (#357): off screen and
+    /// marked on the rail.
+    fn capture_minimized(&mut self, name: &'static str) -> Result<(), XtaskError> {
+        self.capture_scene(name, None, true)
+    }
+
+    fn capture_scene(
+        &mut self,
+        name: &'static str,
+        window: Option<Point>,
+        minimized: bool,
+    ) -> Result<(), XtaskError> {
         self.session.wait(
             &format!("screendump `{name}`: quiet"),
             STEP_TIMEOUT,
@@ -384,6 +425,7 @@ impl Lane {
             scene: Scene {
                 tier: self.machine.tier,
                 window,
+                minimized,
                 pointer,
                 output: OUTPUT,
             },
@@ -501,6 +543,7 @@ fn check_whole(transcript: &str, first_app: u64, created: &[Point]) -> Result<()
             line.strip_prefix(&format!("[IPC ] console pid={first_app}: {APP_INPUT}"))
         })
         .collect();
+    let first_input = without_pending_text(&first_input);
     if first_input.len() < EXPECTED_INPUT.len()
         || first_input[..EXPECTED_INPUT.len()] != EXPECTED_INPUT
     {
@@ -525,6 +568,70 @@ fn check_whole(transcript: &str, first_app: u64, created: &[Point]) -> Result<()
         ));
     }
     Ok(())
+}
+
+/// Waits, from `from`, until every one of `expected` has been printed as the end of a line.
+fn await_lines(
+    lane: &mut Lane,
+    what: &str,
+    from: usize,
+    expected: &[String],
+) -> Result<(), XtaskError> {
+    lane.session.mark_at(from);
+    lane.session
+        .wait(what, STEP_TIMEOUT, &mut |segment| match expected
+            .iter()
+            .find(|want| !lines(segment).any(|line| line.ends_with(want.as_str())))
+        {
+            Some(missing) => Err(format!("no {missing:?}")),
+            None => Ok(()),
+        })
+}
+
+/// #357: the minimise control takes the dragged window off screen and the focus with it (it is
+/// the only window), and the rail marks the playground; a click on its rail slot brings the
+/// window back where it was, focused.
+fn minimize_and_restore(lane: &mut Lane, dragged: Point) -> Result<(), XtaskError> {
+    let tier = lane.machine.tier;
+    println!("\n[STD ] step: minimize");
+    let minimize =
+        center(chrome(tier).control_rect(frame_rect(tier, dragged), ChromeControl::Minimize));
+    lane.move_to("minimize", minimize)?;
+    let pressed_at = lane.session.offset();
+    lane.button("minimize", true, &["minimize"])?;
+    lane.button("minimize", false, &["minimize"])?;
+    await_lines(
+        lane,
+        "minimize",
+        pressed_at,
+        &[
+            format!("[WIN ] minimized x={} y={}", dragged.x, dragged.y),
+            "[INPT] focus none".to_owned(),
+        ],
+    )?;
+    lane.capture_minimized("minimized")?;
+
+    println!("\n[STD ] step: restore from the rail");
+    let Some(item) = rail_item(tier, 0) else {
+        return lane.fail("restore: the rail has no slot 0".to_owned());
+    };
+    lane.move_to("restore", center(item))?;
+    let pressed_at = lane.session.offset();
+    lane.button("restore", true, &["surface"])?;
+    lane.button("restore", false, &["surface"])?;
+    await_lines(
+        lane,
+        "restore",
+        pressed_at,
+        &[
+            "[SHELL] rail restore=playground window=1".to_owned(),
+            format!("[WIN ] restored x={} y={}", dragged.x, dragged.y),
+            format!("[INPT] focus window x={} y={}", dragged.x, dragged.y),
+        ],
+    )?;
+    // Off the rail, so the capture shows no hover there.
+    lane.move_to("restore", BACKGROUND_POINT)?;
+    lane.capture("restored", Some(dragged))
 }
 
 /// #309: holds `s` (focus is still app 1) long enough for the compositor to repeat it, then
@@ -654,6 +761,7 @@ fn drive(lane: &mut Lane) -> Result<Vec<Point>, XtaskError> {
         }
     })?;
     lane.capture("dragged", Some(dragged))?;
+    minimize_and_restore(lane, dragged)?;
 
     println!("\n[STD ] step: close");
     let close = center(chrome.control_rect(frame_rect(tier, dragged), ChromeControl::Close));
@@ -786,8 +894,29 @@ pub(crate) fn run() -> Result<(), XtaskError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_rows, last_settled, pointer_report};
+    use super::{check_rows, last_settled, pointer_report, settled_for_batch};
     use clean_slate_graphics::Point;
+
+    #[test]
+    fn a_batch_settled_part_way_is_corrected_only_once_the_guest_is_quiet() {
+        let expected = Point { x: 581, y: 33 };
+        let part_way = "[IPC ] console pid=4: [INPT] pointer settled x=481 y=41\n";
+        assert!(settled_for_batch(part_way, expected)
+            .unwrap_err()
+            .contains("has not gone quiet"));
+        // A quiet stretch before the part-way settle says nothing about the packets after it.
+        let quiet_before = format!("[IDLE ] quiet ms=500 presents=0 seq=4\n{part_way}");
+        assert!(settled_for_batch(&quiet_before, expected).is_err());
+        let quiet_after = format!("{part_way}[IDLE ] quiet ms=500 presents=0 seq=4\n");
+        assert_eq!(
+            settled_for_batch(&quiet_after, expected),
+            Ok(Point { x: 481, y: 41 })
+        );
+        let arrived =
+            format!("{part_way}[IPC ] console pid=4: [INPT] pointer settled x=581 y=33\n");
+        assert_eq!(settled_for_batch(&arrived, expected), Ok(expected));
+        assert!(settled_for_batch("[IDLE ] quiet ms=500 presents=0 seq=4\n", expected).is_err());
+    }
 
     #[test]
     fn a_settled_line_still_being_printed_is_not_read() {

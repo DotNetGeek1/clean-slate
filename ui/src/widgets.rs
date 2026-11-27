@@ -632,6 +632,8 @@ impl<'a> Toggle<'a> {
 
 /// Side of the running dot on a rail item.
 pub const RUNNING_DOT: u32 = 6;
+/// Width of the minimised-window bar on a rail item (#357); it is two pixels high.
+pub const MINIMIZED_BAR: u32 = 10;
 
 /// One app slot on the persistent left rail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -644,6 +646,9 @@ pub struct RailItem<'a> {
     pub selected: bool,
     /// The item's app is running: a dot at the pill's top right.
     pub running: bool,
+    /// The item's app has a minimised window (#357): a bar at the pill's top left, the
+    /// title-bar minimise glyph in the running dot's colour.
+    pub minimized: bool,
 }
 
 impl<'a> RailItem<'a> {
@@ -654,6 +659,7 @@ impl<'a> RailItem<'a> {
             label,
             selected: false,
             running: false,
+            minimized: false,
         }
     }
 
@@ -715,6 +721,20 @@ impl<'a> RailItem<'a> {
                     height: dot,
                 },
                 dot / 2,
+                Corners::ALL,
+                p.accent_cyan,
+            );
+        }
+        if self.minimized {
+            fill_rounded(
+                canvas,
+                Rect {
+                    x: offset(pill.x, t.spacing.xs),
+                    y: offset(pill.y, t.spacing.xs + RUNNING_DOT / 2 - 1),
+                    width: MINIMIZED_BAR,
+                    height: 2,
+                },
+                1,
                 Corners::ALL,
                 p.accent_cyan,
             );

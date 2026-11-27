@@ -570,6 +570,44 @@ impl TrustAnchors {
     }
 }
 
+/// Most bytes [`resolv_conf`] writes: `nameserver 255.255.255.255\n`.
+pub const RESOLV_CONF_MAX_BYTES: usize = 27;
+
+/// The `/etc/resolv.conf` a Linux program reads for `resolver` (#354): one `nameserver` line,
+/// or nothing when there is no resolver. The file has no way to name a port, so a resolver off
+/// port 53 is left out too rather than sending queries to the wrong port. Returns the length.
+pub fn resolv_conf(resolver: Option<SocketAddrV4>, out: &mut [u8; RESOLV_CONF_MAX_BYTES]) -> usize {
+    let Some(resolver) = resolver.filter(|resolver| resolver.port == 53) else {
+        return 0;
+    };
+    let mut len = 0;
+    let mut push = |bytes: &[u8]| {
+        out[len..len + bytes.len()].copy_from_slice(bytes);
+        len += bytes.len();
+    };
+    push(b"nameserver ");
+    for (index, octet) in resolver.addr.octets().into_iter().enumerate() {
+        if index > 0 {
+            push(b".");
+        }
+        let digits = [
+            b'0' + octet / 100,
+            b'0' + octet / 10 % 10,
+            b'0' + octet % 10,
+        ];
+        let skip = if octet >= 100 {
+            0
+        } else if octet >= 10 {
+            1
+        } else {
+            2
+        };
+        push(&digits[skip..]);
+    }
+    push(b"\n");
+    len
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,5 +821,34 @@ mod tests {
         let mut trailing = TrustAnchors::from_ders(&[&one]).unwrap();
         trailing.der[10] = 9;
         assert_eq!(trailing.set().unwrap_err(), ConfigError::BadTrustAnchors);
+    }
+
+    fn resolv_conf_text(resolver: Option<SocketAddrV4>) -> std::string::String {
+        let mut out = [0u8; RESOLV_CONF_MAX_BYTES];
+        let len = resolv_conf(resolver, &mut out);
+        std::string::String::from_utf8(out[..len].to_vec()).unwrap()
+    }
+
+    #[test]
+    fn resolv_conf_names_the_resolver_on_port_53() {
+        let at = |octets, port| Some(SocketAddrV4::new(Ipv4Addr::new(octets), port));
+        assert_eq!(
+            resolv_conf_text(at([10, 77, 0, 1], 53)),
+            "nameserver 10.77.0.1\n"
+        );
+        assert_eq!(
+            resolv_conf_text(at([10, 0, 2, 3], 53)),
+            "nameserver 10.0.2.3\n"
+        );
+        assert_eq!(
+            resolv_conf_text(at([255, 255, 255, 255], 53)).len(),
+            RESOLV_CONF_MAX_BYTES
+        );
+        assert_eq!(
+            resolv_conf_text(at([192, 168, 100, 9], 53)),
+            "nameserver 192.168.100.9\n"
+        );
+        assert_eq!(resolv_conf_text(at([10, 77, 0, 1], 5353)), "");
+        assert_eq!(resolv_conf_text(None), "");
     }
 }

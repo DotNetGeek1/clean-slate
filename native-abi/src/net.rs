@@ -89,9 +89,9 @@ pub const NETWORK_CLIENT_DEVICE_ID: u64 = 2;
 pub const NET_SUBOP_SUBMIT: u64 = 1;
 pub const NET_SUBOP_POLL: u64 = 2;
 /// Waits for a request to complete without consuming it (#353).
-pub const NET_SUBOP_WAIT: u64 = 14;
+pub const NET_SUBOP_WAIT: u64 = 15;
 /// Drops interest in a request's response (#353).
-pub const NET_SUBOP_DISCARD: u64 = 15;
+pub const NET_SUBOP_DISCARD: u64 = 16;
 
 pub const NET_FRAME_BYTES: usize = 64;
 pub const NET_FRAME_MAGIC: u32 = 0x4E45_5431; // "NET1"

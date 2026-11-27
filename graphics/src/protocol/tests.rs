@@ -358,6 +358,12 @@ fn all_events_round_trip() {
         window: Some(WindowHandle(7)),
     });
     round_trip_event(Event::WindowFocused { window: None });
+    for minimized in [false, true] {
+        round_trip_event(Event::WindowMinimized {
+            window: WindowHandle(7),
+            minimized,
+        });
+    }
 }
 
 /// Hand-derived from §2.3 / §3.3 (surface slot 1 gen 1 → `0x0101`, window slot 2 gen 1 → `0x0102`).
@@ -1084,6 +1090,10 @@ fn canonical_event_for_opcode(op: u16) -> [u8; FRAME_BYTES] {
             window: WindowHandle(1),
         },
         OP_WINDOW_FOCUSED => Event::WindowFocused { window: None },
+        OP_WINDOW_MINIMIZED => Event::WindowMinimized {
+            window: WindowHandle(1),
+            minimized: true,
+        },
         OP_OUTPUT_CHANGED => Event::OutputChanged {
             output: OutputInfo {
                 id: OutputId::new(0, 1).unwrap(),
