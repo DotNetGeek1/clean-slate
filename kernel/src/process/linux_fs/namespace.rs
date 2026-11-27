@@ -11,6 +11,8 @@ use clean_slate_linux_abi::{
 };
 use clean_slate_rootfs::{EntryKind, Image};
 
+use crate::service::net_resolver::ResolvConf;
+
 pub const LINUX_FS_MAX_NODES: usize = 64;
 pub const LINUX_FS_MAX_LINK_DEPTH: usize = 2;
 const NAME_MAX: usize = 64;
@@ -39,7 +41,13 @@ enum NodeBackend {
     Home {
         slot: u8,
     },
+    /// `/etc/resolv.conf`, written from the network's resolver at each read (#354), whatever
+    /// the root image holds there.
+    ResolvConf,
 }
+
+/// Served from the network's resolver rather than the root image (#354).
+pub(crate) const RESOLV_CONF_PATH: &[u8] = b"/etc/resolv.conf";
 
 #[derive(Clone, Copy)]
 struct Node {
@@ -195,6 +203,9 @@ impl NodeTable {
                 NodeKind::File,
                 NodeBackend::Home { slot: slot as u8 },
             );
+        }
+        if child_path == RESOLV_CONF_PATH {
+            return self.attach_node(parent.index, name, NodeKind::File, NodeBackend::ResolvConf);
         }
         if let Some(tmp) = tmp_file_lookup_by_path(child_path) {
             return self.attach_tmp_file_node(parent.index, name, tmp);
@@ -472,6 +483,7 @@ impl NodeTable {
                 (len as i64, S_IFREG | 0o644)
             }
             NodeBackend::TmpDir | NodeBackend::HomeDir => (0, S_IFDIR | 0o755),
+            NodeBackend::ResolvConf => (ResolvConf::now().as_bytes().len() as i64, S_IFREG | 0o644),
             NodeBackend::Home { slot } => (
                 home_backend::file_len(slot as usize) as i64,
                 S_IFREG | 0o644,
@@ -505,6 +517,12 @@ impl NodeTable {
             }
             _ => Err(clean_slate_linux_abi::EINVAL),
         }
+    }
+
+    /// Whether `id` is `/etc/resolv.conf` ([`ResolvConf::now`] holds its bytes).
+    pub fn is_resolv_conf(&self, id: NodeId) -> Result<bool, LinuxErrno> {
+        self.check_node(id)?;
+        Ok(self.nodes[id.index as usize].backend == NodeBackend::ResolvConf)
     }
 
     pub fn node_kind(&self, id: NodeId) -> Result<NodeKind, LinuxErrno> {
@@ -850,6 +868,9 @@ pub(crate) fn resolve_executable_bytes<'a>(
             Ok(entry.data)
         }
         NodeBackend::Object { .. } => Err(EACCES),
-        NodeBackend::TmpDir | NodeBackend::HomeDir | NodeBackend::Home { .. } => Err(EACCES),
+        NodeBackend::TmpDir
+        | NodeBackend::HomeDir
+        | NodeBackend::Home { .. }
+        | NodeBackend::ResolvConf => Err(EACCES),
     }
 }

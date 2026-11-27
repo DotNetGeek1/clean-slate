@@ -18,7 +18,7 @@ No host `/etc`, resolver, network, or timestamps participate in the image bytes.
 | `/bin/busybox` | file | frozen ELF bytes |
 | `/bin/<applet>` | link → `/bin/busybox` | BusyBox applet selection uses the **original** path (`argv[0]` / `AT_EXECFN`), not the link target |
 | `/etc/hostname` | file | `m9-fixture\n` |
-| `/etc/resolv.conf` | file | `nameserver 10.77.0.1\n` (matches `nslookup-fixture.strace`) |
+| `/etc/resolv.conf` | file | `nameserver 10.77.0.1\n` (matches `nslookup-fixture.strace`). The kernel does not serve this copy: it writes the file from the network's resolver (#354, see `docs/NETWORK.md`), which on the lab network is the same line |
 | `/tmp` | dir | `writable` flag — projected writable root for #101 (M5/M6-backed persistence) |
 
 ## Verification

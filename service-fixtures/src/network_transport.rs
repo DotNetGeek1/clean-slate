@@ -73,6 +73,13 @@ pub const NET_SUBOP_WAIT_WORK: u64 = 12;
 /// Allowed decisions are not reported: the kernel already records each client's use of its
 /// capability. Returns 0, or `EINVAL` / `EACCES` / `ESTALE`.
 pub const NET_SUBOP_AUDIT_REFUSAL: u64 = 13;
+/// The live service publishes the resolver it uses (#354), so Linux programs read it from
+/// `/etc/resolv.conf`: `rsi` = raw-device handle, `rdx` = 1 with a resolver or 0 for none,
+/// `r10` = its IPv4 address (big-endian octets in the low 32 bits), `r8` = its port. The
+/// service sends it once its network is up (after a DHCP lease, when there is one) and again
+/// whenever the resolver changes. The kernel keeps it while that service instance is live.
+/// Returns 0, or `EINVAL` / `EACCES` / `ESTALE`.
+pub const NET_SUBOP_PUBLISH_RESOLVER: u64 = 14;
 /// Wake for a queued client request or a pending holder-exit notification.
 pub const NET_WAIT_WORK_REQUESTS: u64 = 1 << 0;
 /// Wake when `NET_SUBOP_RAW_RECEIVE` would return a frame.

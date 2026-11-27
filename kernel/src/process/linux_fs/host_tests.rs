@@ -358,3 +358,32 @@ fn home_files_come_from_the_loaded_table() {
     assert_eq!(table.check_node(cfg), Err(EBADF));
     reset_home_for_host_tests();
 }
+
+#[test]
+fn resolv_conf_comes_from_the_network_not_the_image() {
+    use crate::service::net_resolver::ResolvConf;
+    let mut table = fresh_table();
+    let img = image();
+    // The image still ships the fixture file; the namespace answers from the network (#354).
+    assert!(img.lookup(b"/etc/resolv.conf").is_some());
+    let conf = table
+        .lookup_path(b"/etc/resolv.conf", &img, true)
+        .expect("resolv.conf");
+    assert!(table.is_resolv_conf(conf).unwrap());
+    assert!(table.rootfs_entry_data(conf, &img).is_err());
+    assert_eq!(table.node_kind(conf).unwrap(), NodeKind::File);
+    let stat = table.stat_fields(conf, &img, false).unwrap();
+    assert_eq!(stat.st_size as usize, ResolvConf::now().as_bytes().len());
+    assert_eq!(
+        resolve_executable_bytes(&mut table, &img, b"/etc/resolv.conf").unwrap_err(),
+        EACCES
+    );
+    assert_eq!(
+        check_write_allowed(b"/etc/resolv.conf", O_WRONLY).unwrap_err(),
+        EROFS
+    );
+    let hostname = table
+        .lookup_path(b"/etc/hostname", &img, true)
+        .expect("hostname");
+    assert!(!table.is_resolv_conf(hostname).unwrap());
+}
