@@ -8,6 +8,8 @@ description = "Shared M7 network contract, socket model, and hermetic fixture vo
 
 [features]
 alloc = []
+# `network::fixture`, the hermetic M7 lab network. Test kernels and xtask only.
+fixture = []
 std = []
 tls = [
     "dep:embedded-tls",
@@ -21,7 +23,7 @@ tls = [
     "dep:rsa",
     "dep:heapless",
 ]
-host-tls-peer = ["tls", "std", "dep:rustls"]
+host-tls-peer = ["tls", "std", "fixture", "dep:rustls"]
 m7-handshake-trace = ["tls"]
 
 [dependencies]

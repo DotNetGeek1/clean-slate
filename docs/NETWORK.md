@@ -71,7 +71,7 @@ Every `NetworkRequest` / `NetworkResponse` is one fixed 64-byte frame so it fits
 
 ## Hermetic fixture
 
-Constants live in `network/src/fixture.rs`. Acceptance assumes a private `10.77.0.0/24` lab network, fixed DNS answers, echo/TLS ports, and repository-owned certificates under `xtask/fixtures/m7/`. No public Internet, public DNS, external PKI, or host LAN dependencies.
+Constants live in `network/src/fixture.rs`, which only the `fixture` feature of `clean-slate-network` compiles (with the fixture test peers `TestPeer` and `TlsTestPeer`): the M7 test kernels and xtask enable it, the network service does not, and `cargo xtask test-net-acceptance` checks the service's feature tree for it (#355). Acceptance assumes a private `10.77.0.0/24` lab network, fixed DNS answers, echo/TLS ports, and repository-owned certificates under `xtask/fixtures/m7/`. No public Internet, public DNS, external PKI, or host LAN dependencies.
 
 The network service image itself carries none of this (#221 stage D). The kernel writes a launch block beside the service's bootstrap (`NetworkServiceLaunch` at `NETWORK_SERVICE_LAUNCH_OFFSET` in the bootstrap page): a `NetworkConfig` (address, prefix, gateway, optional pinned gateway MAC, resolver, and the name the native TLS session verifies), and, for self-test client-mode probes, a `NetworkProbe` (what to resolve, connect to and expect). `kernel/src/service/net_launch.rs` picks them:
 
@@ -87,6 +87,19 @@ The service checks the block (`NetworkConfig::parse`, `TrustAnchors::set`) and s
 **Keeping the lease (#360).** The client keeps running in the service loop (`pump_dhcp`), timed with the monotonic clock. At T1 (option 58, else half the lease) it unicasts a REQUEST to the server that granted the lease, at the Ethernet address its ACK came from; at T2 (option 59, else 7/8) it broadcasts one to any server; retries wait half the time left, at least 4 s. When the lease ends, or a server NAKs it, the service drops back to unconfigured and the client starts over with DISCOVER, which is also what happens after a launch that got no lease in time. A lease without a lease time is infinite and never renewed. The ingress sets DHCP replies (UDP 67 to 68) aside for the client instead of the UDP stack. Each granted, renewed or lost lease is applied at once (`apply_network`): both stacks move to the new route, DNS queries and the app policies' system resolver follow a changed DNS server, and the service publishes the resolver again for `/etc/resolv.conf`, with a lease report that the kernel logs as `[NET ] dhcp bound|renewed|expired address=a.b.c.d/p resolver=x.x.x.x:53|none`. `max_lease=secs` in `CLEAN_SLATE_NET_DHCP` (at least 4) caps every lease, so a test can watch it renew; QEMU's user network always grants a day. `DhcpClient::release` builds a DHCPRELEASE, unused until the service has a clean shutdown. Not done yet: ARP-probing the offered address.
 
 **Resolver for Linux programs (#354).** Linux programs read the resolver from `/etc/resolv.conf`, and the kernel writes that file at each read instead of serving the root image's copy (`kernel/src/service/net_resolver.rs`): the launch configuration's resolver when it names one, else the one the live service published with `NET_SUBOP_PUBLISH_RESOLVER` once its network was up (the lease's DNS server). The file is one `nameserver a.b.c.d` line, or empty when there is no resolver, or when the resolver is off port 53, which the file cannot express. A publication counts only while the instance that sent it is live, so a stopped or restarted service leaves no stale address. The shells' datagram rule (`SystemResolver`) and the file therefore name the same server. On the lab network both are `10.77.0.1`, the address the frozen traces read.
+
+### DNS over TCP (#355)
+
+`dns=tcp:a.b.c.d[:port]` in `CLEAN_SLATE_NET_STATIC` or `CLEAN_SLATE_NET_DHCP` sets `CONFIG_FLAG_DNS_TCP` (`NetworkConfig::with_dns_over_tcp`; `ServiceNetwork::resolver_tcp`, kept by `with_lease`), and the service sends every query over TCP instead of UDP, with RFC 7766 framing (a two-byte length before each message). It is for networks that carry no UDP, such as QEMU's `-netdev user,restrict=on`. The resolver keeps its cache, query IDs and deadlines, but carries nothing itself (`DnsResolver::set_over_tcp`): `start_tcp_query` hands the service the oldest unsent query as a framed message, and `complete_tcp_query` takes the reply (or the connection's failure) back and parses it like a UDP reply. The service runs one exchange at a time on the shared TCP transport (`pump_dns_over_tcp` in `net-service/src/bin/userspace.rs`): a connection per query from the service's own owner, the query, the reply read up to its length (at most `DNS_TCP_MAX_MESSAGE` = 514 bytes), then a close. Nothing is resent over TCP; a reply that does not check out, a reset, or `DNS_TCP_QUERY_TIMEOUT_TICKS` (3 s, the handshake included) fails the query, and the connection is aborted once the query is no longer waiting (timed out, or its holder exited).
+
+### Acceptance lane on slirp (#355)
+
+`cargo xtask test-net-acceptance` (`xtask/src/net_acceptance.rs`) is #221's acceptance test: the M7.8 converged lane (`net-acceptance-self-test` = `m7-network-self-test` plus the production launch inputs) on QEMU's user network instead of the fixture peer.
+
+- **Network.** `-netdev user,restrict=on`: slirp leases `10.0.2.15` over DHCP and drops every other guest packet, UDP included, except two `guestfwd` rules for `10.0.2.100` port 53 and 443. Each forwarded connection runs `xtask net-acceptance-relay <port>`, which joins it to a server the lane runs on `127.0.0.1`: DNS over TCP (an A record for `net.acceptance.test`, NXDOMAIN otherwise) and HTTPS (TLS 1.3, `GET /` answered with a 41-byte HTTP/1.0 response).
+- **Kernel.** `kernel/build.rs` does not set `cfg(clean_slate_fixture_network)` for this feature, so the service gets `CLEAN_SLATE_NET_DHCP=on,dns=tcp:10.0.2.100:53,tls_name=net.acceptance.test` and the anchors in `CLEAN_SLATE_TRUST_ANCHORS_DIR`, which holds only the lane CA (a P-256 CA generated once into `target/net-acceptance`). The client-mode probe comes from `CLEAN_SLATE_NET_PROBE` (`name=,ipv4=,ttl=,tls_port=,silent=a.b.c.d:p,request=<hex>,response=<hex>`; builds without it, such as clippy, get a probe for `probe.invalid`).
+- **Wall clock.** The server certificate is issued at each run, valid from ten minutes before to one day after, so the guest's chain check passes only with a wall clock near the host's.
+- **Checks.** The M7.8 markers ending in `[NET ] acceptance PASS`; exactly one DNS query and two HTTPS fetches served; the kernel image contains the lane CA's DER and not `xtask/fixtures/m7/ca.crt`; and `cargo tree -p clean-slate-net-service --features userspace -e features` shows no `clean-slate-network feature "fixture"`.
 
 ## M7.7 network capabilities & attribution
 
@@ -170,7 +183,7 @@ Bootstrap grants use `grant_network_authority(holder, rights, NetworkGrantPolicy
 - VLAN tags and jumbo frames
 - Multiple NICs and routing policy
 - Linux socket ABI (M9)
-- DNS-over-TCP and DNSSEC
+- DNS-over-TCP fallback for truncated UDP replies, and DNSSEC (DNS over TCP itself is a launch option, see [DNS over TCP](#dns-over-tcp-355))
 - Arbitrary certificate stores / Web PKI
 
 ## M7.3 network service

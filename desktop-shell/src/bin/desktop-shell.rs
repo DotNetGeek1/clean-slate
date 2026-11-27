@@ -12,18 +12,32 @@
 
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
+extern crate alloc;
+
+use core::alloc::Layout;
 use core::ptr::addr_of_mut;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use clean_slate_desktop_shell::host::Client;
 use clean_slate_desktop_shell::{diag, ExitReason, Outcome, ShellSession};
-use clean_slate_native_abi::desktop::{ConsoleLine, DesktopLaunchPage, DESKTOP_LAUNCH_ADDRESS};
+use clean_slate_native_abi::desktop::{
+    ConsoleLine, DesktopLaunchPage, DESKTOP_LAUNCH_ADDRESS, NO_CONSOLE,
+};
 use clean_slate_native_abi::launcher::LauncherEvent;
 use clean_slate_runtime::console::Console;
+use clean_slate_runtime::heap::{exit_out_of_memory, RuntimeHeap};
 use clean_slate_runtime::launcher::Launcher;
 use clean_slate_runtime::port::{Wait, WorkSet};
 use clean_slate_runtime::{process, Error, Kernel};
 use clean_slate_ui::QualityTier;
+
+#[global_allocator]
+static HEAP: RuntimeHeap = RuntimeHeap::new();
+
+/// The console handle the out-of-memory line goes to, once the launch page is read.
+static LOG_HANDLE: AtomicU64 = AtomicU64::new(NO_CONSOLE);
 
 /// Kept out of the user stack, whose size is the launch policy's choice.
 static mut SESSION: ShellSession = ShellSession::new(QualityTier::Q1);
@@ -217,11 +231,18 @@ pub extern "C" fn _start() -> ! {
     } else {
         QualityTier::Q1
     };
+    LOG_HANDLE.store(boot.console().unwrap_or(NO_CONSOLE), Ordering::Relaxed);
     // SAFETY: single-threaded process; this is the only reference to `SESSION`.
     let session = unsafe { &mut *addr_of_mut!(SESSION) };
     *session = ShellSession::new(tier);
     run(&boot, session);
     process::exit();
+}
+
+#[alloc_error_handler]
+fn out_of_memory(layout: Layout) -> ! {
+    let handle = LOG_HANDLE.load(Ordering::Relaxed);
+    exit_out_of_memory((handle != NO_CONSOLE).then_some(handle), "[SHELL]", layout)
 }
 
 #[panic_handler]

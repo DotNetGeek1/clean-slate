@@ -9,15 +9,25 @@
 //! Authority is exactly what its manifest row grants: `Graphics{GFX_CONNECT}`, and
 //! `Console{CONSOLE_CONNECT | CONSOLE_ATTACH}` on the console port, plus the buffers this
 //! process allocates.
+//!
+//! The screen's rows and scrollback are on the runtime heap (#356), within the row's
+//! `memory_pages`. An allocation the terminal cannot do without that the heap refuses logs
+//! `[TERM] exit reason=out-of-memory` and exits, and the restart policy opens a new terminal.
 
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
+extern crate alloc;
+
+use core::alloc::Layout;
 use core::ptr::addr_of_mut;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use clean_slate_native_abi::console::CONSOLE_FRAME_PAYLOAD;
 use clean_slate_native_abi::desktop::{DesktopLaunchPage, DESKTOP_LAUNCH_ADDRESS, NO_CONSOLE};
 use clean_slate_runtime::console::{Console, ConsoleFrontEnd};
+use clean_slate_runtime::heap::{exit_out_of_memory, RuntimeHeap};
 use clean_slate_runtime::port::{Deadline, Wait, WorkSet};
 use clean_slate_runtime::{process, Error, Kernel};
 use clean_slate_terminal::app::INPUT_CAPACITY;
@@ -29,7 +39,14 @@ const COMPOSITOR_BIT: u32 = 0;
 const CONSOLE_BIT: u32 = 1;
 const ALL_BITS: u32 = (1 << COMPOSITOR_BIT) | (1 << CONSOLE_BIT);
 
-/// Kept out of the user stack: the grid and its scrollback are larger than the stack.
+#[global_allocator]
+static HEAP: RuntimeHeap = RuntimeHeap::new();
+
+/// The console handle the out-of-memory line goes to, once the launch page is read.
+static LOG_HANDLE: AtomicU64 = AtomicU64::new(NO_CONSOLE);
+
+/// The session without its rows (those are on the heap); kept out of the user stack all the
+/// same, with its input queue and line editor.
 static mut SESSION: Session = Session::new();
 
 struct Log(u64);
@@ -175,6 +192,7 @@ pub extern "C" fn _start() -> ! {
     // SAFETY: the launch policy maps and fills the launch page before entry.
     let boot = unsafe { *(DESKTOP_LAUNCH_ADDRESS as *const DesktopLaunchPage) };
     let log = Log(boot.console_handle);
+    LOG_HANDLE.store(boot.console_handle, Ordering::Relaxed);
     // SAFETY: single-threaded process; this is the only reference to `SESSION`.
     let session = unsafe { &mut *addr_of_mut!(SESSION) };
     log.line("[TERM] start\n");
@@ -188,6 +206,12 @@ pub extern "C" fn _start() -> ! {
         End::WaitFailed => log.line("[TERM] exit reason=wait-failed\n"),
     }
     process::exit();
+}
+
+#[alloc_error_handler]
+fn out_of_memory(layout: Layout) -> ! {
+    let handle = LOG_HANDLE.load(Ordering::Relaxed);
+    exit_out_of_memory((handle != NO_CONSOLE).then_some(handle), "[TERM]", layout)
 }
 
 #[panic_handler]

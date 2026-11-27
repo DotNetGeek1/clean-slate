@@ -1551,6 +1551,32 @@ pub(crate) mod tests {
         assert_terminated_nothing_and_base_untouched(&harness);
     }
 
+    /// #356: an app whose heap runs out logs and exits normally (`exit_out_of_memory`), and that
+    /// exit is restarted like any other: every time while it keeps reaching ready, with the
+    /// row's heap budget each time.
+    #[test]
+    fn an_app_that_exits_out_of_memory_is_restarted_with_its_budget() {
+        for service in [DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID] {
+            let spec = clean_slate_service_fixtures::manifest::SYSTEM_DESKTOP_MANIFEST
+                .iter()
+                .find(|spec| spec.id == service)
+                .expect("desktop row");
+            assert!(spec.memory_pages >= 16, "{service:?} has a heap chunk");
+            let mut harness = Harness::boot_desktop_settled();
+            let mut now = 10 * SECOND;
+            for _ in 0..5 {
+                let from = harness.requests().len();
+                harness.report(now, service, LifecycleEventKind::Exited);
+                harness.run_until(now + SECOND / 2);
+                assert_eq!(harness.starts_since(from), [service], "{service:?}");
+                harness.report(now + SECOND, service, LifecycleEventKind::Ready);
+                now += 10 * SECOND;
+            }
+            assert!(harness.lines_with("[INIT] gave up").is_empty());
+            assert_terminated_nothing_and_base_untouched(&harness);
+        }
+    }
+
     /// S6d: a compositor that keeps dying before it is ready is given up after its three
     /// restarts; its clients are given up with it, and the base rows carry on untouched.
     #[test]

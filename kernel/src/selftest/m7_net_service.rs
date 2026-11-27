@@ -63,7 +63,12 @@ use clean_slate_service_lifecycle::{
     ControlRequest, ControlRequestKind, LifecycleMessage, ServiceId,
 };
 
-#[cfg(feature = "m7-network-self-test")]
+#[cfg(feature = "net-acceptance-self-test")]
+const PASS_MARKER: &str = "[NET ] acceptance PASS";
+#[cfg(all(
+    feature = "m7-network-self-test",
+    not(feature = "net-acceptance-self-test")
+))]
 const PASS_MARKER: &str = "[M7.8] PASS";
 #[cfg(not(feature = "m7-network-self-test"))]
 const PASS_MARKER: &str = "[M7.3] PASS";

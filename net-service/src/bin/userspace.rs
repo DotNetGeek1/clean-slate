@@ -20,7 +20,9 @@ use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::config::{ServiceNetwork, TrustAnchorSet, TrustAnchors};
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
 use clean_slate_network::dhcp::{is_dhcp_reply, DhcpClient, DhcpEvent, DhcpLease};
-use clean_slate_network::dns::{DnsResolver, ResolveOutcome};
+use clean_slate_network::dns::{
+    tcp_message_len, DnsError, DnsResolver, DnsTcpQuery, ResolveOutcome, DNS_TCP_MAX_MESSAGE,
+};
 use clean_slate_network::error::{DenialReason, NetworkError};
 use clean_slate_network::ethernet::EthernetFrame;
 use clean_slate_network::ipv4::Ipv4Header;
@@ -760,6 +762,18 @@ static mut SERVICE_STATE: MaybeUninit<ServiceState> = MaybeUninit::uninit();
 static SERVICE_STATE_READY: AtomicBool = AtomicBool::new(false);
 static mut SERVICE_DNS_RESOLVER: Option<Box<DnsResolver<ServiceLink>>> = None;
 static mut SERVICE_TLS_TRANSPORT: MaybeUninit<TcpTransport<ServiceLink>> = MaybeUninit::uninit();
+
+/// The DNS-over-TCP exchange in flight, when the launch configuration asks for DNS over TCP
+/// (`CONFIG_FLAG_DNS_TCP`): one query at a time, each on its own connection from the service.
+struct DnsTcpExchange {
+    query: DnsTcpQuery,
+    connection: SessionId,
+    sent: usize,
+    reply: [u8; DNS_TCP_MAX_MESSAGE],
+    received: usize,
+}
+
+static mut DNS_TCP_EXCHANGE: Option<DnsTcpExchange> = None;
 /// Linux TCP session -> shared-transport connection, owned by the caller that connected it.
 #[derive(Clone, Copy)]
 struct LinuxTcpConnection {
@@ -1105,6 +1119,9 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             DnsResolver::<ServiceLink>::DEFAULT_TICKS_PER_SEC,
             rng.fork(),
         ));
+        if let Some(resolver) = (*service_dns_resolver_slot()).as_deref_mut() {
+            resolver.set_over_tcp(network.resolver_tcp);
+        }
         TcpTransport::init_in_place(
             service_tls_transport_ptr(),
             L3Stack::with_route(
@@ -1171,6 +1188,7 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             finish();
         };
         let progressed = pump_dhcp(&mut ctx, now)
+            | pump_dns_over_tcp(ctx.service_generation, now)
             | pump_parked_requests(&mut ctx, now)
             | pump_tls_job(&mut ctx, &mut tls, now);
         let Ok(found) = service_next(raw_handle, request_buf, payload_buf) else {
@@ -1694,6 +1712,107 @@ fn drain_ingress() {
         }
     }
     let _ = shared_tcp_transport_mut().poll(now);
+}
+
+/// Drives the DNS-over-TCP exchange: starts the next unsent query on a new connection, sends
+/// it, and hands the reply (or the failure) back to the resolver, whose parked resolve then
+/// completes. The resolver's query deadline bounds the exchange: once the query is no longer
+/// waiting (timed out, or its holder exited) the connection is aborted. Returns whether
+/// anything moved.
+fn pump_dns_over_tcp(service_generation: u64, now: u64) -> bool {
+    let Ok(resolver) = udp_resolver() else {
+        return false;
+    };
+    if !resolver.over_tcp() {
+        return false;
+    }
+    let owner = plain_tcp_owner(service_generation);
+    let tcp = shared_tcp_transport_mut();
+    // SAFETY: only the service loop touches the exchange.
+    let slot = unsafe { &mut *core::ptr::addr_of_mut!(DNS_TCP_EXCHANGE) };
+    let mut progressed = false;
+    if let Some(exchange) = slot.as_mut() {
+        let outcome = if !resolver.tcp_query_waiting(exchange.query.query_id) {
+            Some(Err(DnsError::Timeout))
+        } else {
+            step_dns_tcp_exchange(tcp, owner, exchange, now)
+        };
+        if let Some(result) = outcome {
+            if result.is_ok() {
+                let _ = tcp.close(now, exchange.connection, owner);
+            } else {
+                let _ = tcp.abort(exchange.connection, owner);
+            }
+            let message = &exchange.reply[..exchange.received];
+            resolver.complete_tcp_query(exchange.query.query_id, result.map(|()| message), now);
+            *slot = None;
+            progressed = true;
+        }
+    }
+    if slot.is_none() {
+        if let Some(query) = resolver.start_tcp_query() {
+            pin_next_hop(tcp.stack_mut(), query.server.addr, now);
+            match tcp.connect(now, owner, query.server) {
+                Ok(connection) => {
+                    *slot = Some(DnsTcpExchange {
+                        query,
+                        connection,
+                        sent: 0,
+                        reply: [0; DNS_TCP_MAX_MESSAGE],
+                        received: 0,
+                    });
+                }
+                Err(err) => {
+                    resolver.complete_tcp_query(query.query_id, Err(DnsError::Transport(err)), now)
+                }
+            }
+            progressed = true;
+        }
+    }
+    progressed
+}
+
+/// One step of `exchange`: `Some(Ok)` once the whole reply is in, `Some(Err)` when the
+/// connection failed, `None` while it is still under way.
+fn step_dns_tcp_exchange(
+    tcp: &mut TcpTransport<ServiceLink>,
+    owner: clean_slate_network::protocol::TrustedCaller,
+    exchange: &mut DnsTcpExchange,
+    now: u64,
+) -> Option<Result<(), DnsError>> {
+    match tcp.state(exchange.connection, owner) {
+        Ok(TcpState::SynSent | TcpState::SynReceived) => return None,
+        Ok(TcpState::Reset) => return Some(Err(DnsError::Transport(NetworkError::Reset))),
+        Ok(_) => {}
+        Err(err) => return Some(Err(DnsError::Transport(err))),
+    }
+    let message = exchange.query.message();
+    if exchange.sent < message.len() {
+        match tcp.send(now, exchange.connection, owner, &message[exchange.sent..]) {
+            Ok(n) => exchange.sent += n,
+            Err(err) => return Some(Err(DnsError::Transport(err))),
+        }
+    }
+    loop {
+        let want = tcp_message_len(&exchange.reply[..exchange.received])
+            .unwrap_or(2)
+            .min(DNS_TCP_MAX_MESSAGE);
+        if exchange.received >= want {
+            return match tcp_message_len(&exchange.reply[..exchange.received]) {
+                Some(len) if len <= DNS_TCP_MAX_MESSAGE => Some(Ok(())),
+                _ => Some(Err(DnsError::Truncated)),
+            };
+        }
+        match tcp.receive(
+            exchange.connection,
+            owner,
+            &mut exchange.reply[exchange.received..want],
+        ) {
+            Ok(0) => return None,
+            Ok(n) => exchange.received += n,
+            Err(err) => return Some(Err(DnsError::Transport(err))),
+        }
+    }
 }
 
 /// Completes parked requests whose condition now holds (after `drain_ingress` fed the
