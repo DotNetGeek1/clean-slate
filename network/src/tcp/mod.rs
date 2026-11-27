@@ -1,7 +1,10 @@
-//! Bounded client-only TCP (#125) over [`crate::stack::L3Stack`].
+//! Bounded TCP (#125, #221 stage F) over [`crate::stack::L3Stack`].
 //!
-//! In-order delivery, stop-and-go (one outstanding data segment), fixed RTO,
-//! MSS-only options on SYN. Server/listen states are out of scope.
+//! Active and passive open (`listen`/`accept`), a sliding send window bounded by the
+//! peer's window and a congestion window (RFC 5681 slow start, fast retransmit), RFC 6298
+//! retransmission timeouts with exponential backoff and Karn's rule, zero-window probes,
+//! and receive-side reassembly of out-of-order segments inside the advertised window.
+//! Options: MSS only, on SYN.
 
 mod conn;
 mod segment;
@@ -16,8 +19,9 @@ mod test_peer;
 mod tls_test_peer;
 
 pub use conn::{
-    TCP_CONNECT_TIMEOUT_TICKS, TCP_MAX_RETRIES, TCP_RECV_BUFFER_BYTES, TCP_RTO_TICKS,
-    TCP_SEND_BUFFER_BYTES, TCP_TIME_WAIT_TICKS,
+    TcpTimers, TCP_CONNECT_TIMEOUT_MS, TCP_DEFAULT_PEER_MSS, TCP_DUP_ACK_THRESHOLD,
+    TCP_MAX_OOO_RANGES, TCP_MAX_RETRIES, TCP_RECV_BUFFER_BYTES, TCP_RTO_INITIAL_MS, TCP_RTO_MAX_MS,
+    TCP_RTO_MIN_MS, TCP_SEND_BUFFER_BYTES, TCP_SYN_ACK_RETRIES, TCP_TIME_WAIT_MS,
 };
 pub use segment::{
     parse as parse_tcp_segment, write as write_tcp_segment, TcpFlags, TcpSegment, MAX_TCP_PAYLOAD,
@@ -25,7 +29,7 @@ pub use segment::{
 };
 pub use state::TcpState;
 pub use stats::TcpStats;
-pub use transport::{TcpTable, TcpTransport};
+pub use transport::{ListenerId, TcpTable, TcpTransport, MAX_TCP_LISTENERS, TCP_LISTEN_BACKLOG};
 
 #[cfg(any(test, feature = "alloc"))]
 pub use test_peer::TestPeer;
@@ -38,3 +42,6 @@ pub use tls_test_peer::{
 
 #[cfg(all(test, feature = "alloc"))]
 mod tests;
+
+#[cfg(all(test, feature = "alloc"))]
+mod reliability_tests;

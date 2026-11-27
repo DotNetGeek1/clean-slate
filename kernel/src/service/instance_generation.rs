@@ -37,7 +37,7 @@ pub(crate) fn live_network_service_generation() -> Option<InstanceGeneration> {
 /// [`live_network_service_generation`] this is `None` before the first start and between an
 /// instance's death and its replacement. Only the `NetworkClient` paths use it, and they
 /// exist only with the Linux socket layer (which every `clean_slate_system_init` build has).
-#[cfg(any(test, clean_slate_linux_socket))]
+#[cfg(clean_slate_linux_socket)]
 pub(crate) fn live_network_instance_generation() -> Option<InstanceGeneration> {
     live_service_instance_id(NETWORK_LOGICAL_SERVICE).map(|instance| instance.generation)
 }

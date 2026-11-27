@@ -65,6 +65,14 @@ pub const NET_SUBOP_TICK_PERIOD_NS: u64 = 11;
 /// #145 native wait outcome after blocking (woken / timed out / cancelled); callers re-check
 /// state either way. Errors: `EINVAL` (bad mask, TSC uncalibrated), `EACCES`, `ESTALE`.
 pub const NET_SUBOP_WAIT_WORK: u64 = 12;
+/// The live service reports a per-app policy refusal (#221 stage E) for the audit log:
+/// `rsi` = raw-device handle, `rdx` = the refused caller's pid, `r10` = its instance
+/// generation, `r8` = the `clean_slate_capability::NetDestination` encoding, `r9` = the
+/// rights the request needed (a non-empty subset of `NET_RESOLVE | NET_CONNECT | NET_SEND`).
+/// The kernel records it against the caller, who must be a holder the service is serving.
+/// Allowed decisions are not reported: the kernel already records each client's use of its
+/// capability. Returns 0, or `EINVAL` / `EACCES` / `ESTALE`.
+pub const NET_SUBOP_AUDIT_REFUSAL: u64 = 13;
 /// Wake for a queued client request or a pending holder-exit notification.
 pub const NET_WAIT_WORK_REQUESTS: u64 = 1 << 0;
 /// Wake when `NET_SUBOP_RAW_RECEIVE` would return a frame.

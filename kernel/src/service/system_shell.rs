@@ -109,6 +109,7 @@ fn apply_linux_grants(
     pid: u64,
     generation: clean_slate_service_lifecycle::InstanceGeneration,
     wanted: LinuxGrants,
+    row: Option<clean_slate_service_lifecycle::ServiceId>,
 ) -> Result<(), &'static str> {
     if wanted.console {
         linux_fd::grant_console_stdio_for_process(pid, generation)?;
@@ -120,6 +121,10 @@ fn apply_linux_grants(
         linux_fs::grant_linux_tmp_object_capabilities(pid)?;
     }
     if wanted.network_client {
+        // The network service's policy for this process and its children is the row's
+        // (#221 stage E); a row-less launch has none.
+        let row = row.ok_or("system shell: NetworkClient without a manifest row")?;
+        crate::service::net_app::attribute(pid, u64::from(row.0))?;
         grant_network_client(pid)?;
     }
     Ok(())
@@ -167,8 +172,12 @@ pub(crate) fn launch(
             },
         )
         .map_err(|error| error.description())?;
-        if let Err(message) = apply_linux_grants(launched.pid, launched.instance_generation, wanted)
-        {
+        if let Err(message) = apply_linux_grants(
+            launched.pid,
+            launched.instance_generation,
+            wanted,
+            context.spec.map(|spec| spec.id),
+        ) {
             return Err(
                 match teardown_process_by_id(
                     allocator,

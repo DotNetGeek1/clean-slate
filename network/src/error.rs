@@ -12,6 +12,8 @@ pub enum DenialReason {
     StaleGeneration,
     /// Capability was revoked.
     Revoked,
+    /// The caller's app may not reach this destination, or resolve names (#221 stage E).
+    Destination,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +49,7 @@ impl NetworkError {
             Self::SessionExhausted => 12,
             Self::NotFound => 13,
             Self::Closed => 14,
+            Self::Denied(DenialReason::Destination) => 15,
         }
     }
 }
