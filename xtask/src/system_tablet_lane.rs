@@ -73,7 +73,7 @@ fn tablet_value(px: i32, extent: u32) -> Option<i32> {
         .find(|value| guest_pixel(*value, extent) == px)
 }
 
-fn last_settled(segment: &str) -> Option<Point> {
+pub(crate) fn last_settled(segment: &str) -> Option<Point> {
     let complete = segment.rfind('\n').map_or("", |end| &segment[..=end]);
     lines(complete)
         .filter_map(|line| line.find(SETTLED).map(|at| &line[at..]))

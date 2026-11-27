@@ -385,6 +385,7 @@ impl Lane {
                 tier: self.machine.tier,
                 window,
                 pointer,
+                output: OUTPUT,
             },
         });
         Ok(())

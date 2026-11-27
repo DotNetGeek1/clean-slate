@@ -38,6 +38,7 @@ mod system_boot;
 mod system_desktop;
 mod system_desktop_faults;
 mod system_desktop_lane;
+mod system_display_lane;
 mod system_lane;
 mod system_shell;
 mod system_tablet_lane;
@@ -1448,6 +1449,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestSystemDesktop => system_desktop_lane::run(),
         ParsedCommand::TestSystemTerminal => system_terminal_lane::run(),
         ParsedCommand::TestSystemTablet => system_tablet_lane::run(),
+        ParsedCommand::TestSystemDisplay => system_display_lane::run(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -5749,6 +5751,7 @@ fn print_help() {
     println!("  test-m10        M10 milestone gate: every test-m10-* constituent, clean-slate-ui host tests and test-qmp-smoke, then test-m10-desktop; prints [M10 ] PASS (aliases: m10, m10.119)");
     println!("  test-system-terminal #311 system-test-hooks build with fw_cfg opt/clean-slate/desktop=q1 (the default desktop) on a VirtIO-GPU, COM1 and QMP: init settles with ten rows, the terminal shell holds a console session record and the terminal a front-end one, a closed-loop click focuses the terminal, typed echo hello must come back from the terminal's shell through the console session, the window must change, the serial shell still answers, and clicks on the rail's Playground and Terminal slots switch focus through the shell's window list (#237); transcript and screendumps under target/xtask-artifacts/system-terminal; prints [STT ] test-system-terminal PASS (alias: system-terminal)");
     println!("  test-system-tablet  #313 system-test-hooks build on a VirtIO-GPU at q1 plus virtio-keyboard-pci and virtio-tablet-pci: the kernel gives both input slots to virtio, single absolute QMP moves to the tablet must settle exactly on their targets, clicks must hit the expected window at that position, a virtio key reaches the app, and the tablet corners map to the output edges; prints [STB ] test-system-tablet PASS (alias: system-tablet)");
+    println!("  test-system-display  #314 system-test-hooks build with fw_cfg opt/clean-slate/display=1024x768 and a virtio tablet, booted twice: on the -vga std framebuffer (q0-bare) the compositor starts at 1024x768 with the window where the cascade puts it, and a screendump matches the host render at that size; on a VirtIO-GPU (q1-bare) the compositor switches to the configured 1024x768 and a screendump matches, then the kernel hook byte Ctrl-V sets the device's smallest mode (640x480) behind the compositor's back, the compositor reports the output changed, the window's whole frame must be inside the smaller output, and a screendump matches the host render at 640x480; prints [SDP ] test-system-display PASS (alias: system-display)");
     println!("  test-serial-input #218 S4 serial receive lane: COM1 on a private loopback socket; the host types a script (plain line, backspace/delete, Ctrl-U, an overlong line, a burst, a full committed buffer, Ctrl-D on a non-empty and an empty line) and checks the echo and every committed read byte for byte; prints [TTY ] PASS (aliases: serial-input)");
     println!("  test-system-boot #218 S3b default image: boots it twice on a fresh lane-owned data disk with the network fixture peer; init starts storage then network, the kernel checks every launched pid holds exactly its manifest grants and reports ready from that pid, boot 1 formats and boot 2 mounts, and the idle thread halts while init waits; prints [SYS ] PASS (aliases: system-boot)");
     println!("  test-system-shell #218 S5 default image to its serial-console shell: COM1 on a private loopback socket, a fresh lane-owned data disk and the network fixture peer; the host types echo, ls /bin, a pipeline, a /tmp write and read and a backspace edit and checks output only execution produces, then exit and Ctrl-D, each followed by a new shell one generation on with a new prompt; prints [SHL ] PASS (aliases: system-shell)");
@@ -5912,6 +5915,7 @@ enum ParsedCommand {
     TestSystemDesktop,
     TestSystemTerminal,
     TestSystemTablet,
+    TestSystemDisplay,
     TestM10Desktop,
     TestM10,
     RunM10Desktop,
@@ -6109,6 +6113,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-system-tablet" || cmd == "system-tablet" => {
             ParsedCommand::TestSystemTablet
+        }
+        Some(cmd) if cmd == "test-system-display" || cmd == "system-display" => {
+            ParsedCommand::TestSystemDisplay
         }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
@@ -6852,6 +6859,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestSystemTablet
+            );
+        }
+        for alias in ["test-system-display", "system-display"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestSystemDisplay
             );
         }
         assert_eq!(

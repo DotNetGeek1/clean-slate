@@ -648,6 +648,25 @@ pub(crate) fn with_active_display<R>(f: impl FnOnce(Option<&mut ActiveDisplay>) 
     without_interrupts(|| f(unsafe { (*ACTIVE_DISPLAY.get()).as_mut() }))
 }
 
+/// `system-test-hooks` (#314): asks for the smallest settable mode other than the current one,
+/// as the bound presenter would. `None` without a display or a presenter, or when no other mode
+/// is settable; otherwise the size asked for and `SET_MODE`'s answer.
+#[cfg(feature = "system-test-hooks")]
+pub(crate) fn hook_set_smallest_mode() -> Option<((u32, u32), Result<(), DisplayError>)> {
+    with_active_display(|display| {
+        let display = display?;
+        let holder = display.presenter.holder()?;
+        let modes = display.modes();
+        let target = modes
+            .as_slice()
+            .iter()
+            .filter(|entry| entry.is(ModeFlags::SETTABLE) && !entry.is(ModeFlags::CURRENT))
+            .min_by_key(|entry| (entry.area(), entry.width_px))?;
+        let size = (target.width_px, target.height_px);
+        Some((size, display.set_mode(holder, size.0, size.1)))
+    })
+}
+
 /// 1 when `holder` is bound as the display presenter, else 0.
 #[cfg(clean_slate_system_init)]
 pub(crate) fn presenter_bindings_for(holder: HolderId) -> usize {

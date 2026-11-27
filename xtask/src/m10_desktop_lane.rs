@@ -225,6 +225,7 @@ mod tests {
                 tier,
                 window: Some(window),
                 pointer: BACKGROUND_POINT,
+                output: OUTPUT,
             },
         })
         .to_vec()
