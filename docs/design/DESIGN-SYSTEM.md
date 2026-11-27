@@ -147,7 +147,7 @@ The window manager (#115, `compositor::wm`) owns decoration behaviour: hit testi
 | Title bar height | 32 (inside the border) |
 | Border | 1 |
 | Top corner radius | 8 (the bottom corners are square, so the client surface is never clipped) |
-| Controls | 24×24, 4 px apart, 6 px from the right edge; order Minimize, Maximize/Restore, Close |
+| Controls | 24×24, 6 px from the right edge; Close only (Minimize and Maximize return with a minimized-window list in the rail, #115) |
 | Title padding | 12 (title left-aligned, truncated before the controls) |
 | Resize margin | 6, invisible and outside the border |
 

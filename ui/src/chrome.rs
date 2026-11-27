@@ -14,28 +14,28 @@ use crate::quality::Style;
 use crate::text;
 use crate::tokens::{ChromeMetrics, Rgba, ShadowToken};
 
-/// Window control buttons, right to left order is Close, Maximize, Minimize.
+/// Window control buttons, right to left in the title bar.
+///
+/// Only controls that act are drawn and hit-tested. Minimise and maximise were removed in #115
+/// while they did nothing; they come back with a minimised-window list in the rail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChromeControl {
-    /// Minimise.
-    Minimize,
-    /// Maximise or restore.
-    Maximize,
     /// Close.
     Close,
 }
 
 impl ChromeControl {
     /// Left-to-right order in the title bar.
-    pub const ALL: [Self; 3] = [Self::Minimize, Self::Maximize, Self::Close];
+    pub const ALL: [Self; 1] = [Self::Close];
 
     const fn slot_from_right(self) -> u32 {
         match self {
             Self::Close => 0,
-            Self::Maximize => 1,
-            Self::Minimize => 2,
         }
     }
+
+    /// The control furthest left, where the title must stop.
+    pub const LEFTMOST: Self = Self::ALL[0];
 }
 
 /// Visual state of one window frame, supplied by the window manager.
@@ -47,8 +47,6 @@ pub struct ChromeState {
     pub hovered: Option<ChromeControl>,
     /// Control held by the pointer.
     pub pressed: Option<ChromeControl>,
-    /// Maximised (the maximise glyph shows "restore").
-    pub maximized: bool,
 }
 
 /// The narrow chrome boundary between the theme and the window manager.
@@ -225,51 +223,15 @@ impl<'t> CleanSlateChrome<'t> {
             width: 10,
             height: 10,
         });
-        paint_control_glyph(canvas, glyph, control, state.maximized, fg);
+        paint_control_glyph(canvas, glyph, control, fg);
     }
 }
 
-fn paint_control_glyph(
-    canvas: &mut Canvas<'_>,
-    g: Rect,
-    control: ChromeControl,
-    maximized: bool,
-    color: Rgba,
-) {
+fn paint_control_glyph(canvas: &mut Canvas<'_>, g: Rect, control: ChromeControl, color: Rgba) {
     let c = color.premultiplied();
     let x1 = offset(g.x, g.width - 1);
     let y1 = offset(g.y, g.height - 1);
     match control {
-        ChromeControl::Minimize => {
-            fill(
-                canvas,
-                Rect {
-                    x: g.x,
-                    y: offset(g.y, g.height / 2),
-                    width: g.width,
-                    height: 1,
-                },
-                color,
-            );
-        }
-        ChromeControl::Maximize if maximized => {
-            let back = Rect {
-                x: offset(g.x, 2),
-                y: g.y,
-                width: g.width - 2,
-                height: g.height - 2,
-            };
-            let front = Rect {
-                x: g.x,
-                y: offset(g.y, 2),
-                width: g.width - 2,
-                height: g.height - 2,
-            };
-            canvas.hline(back.x, back.right() - 1, back.y, c);
-            canvas.vline(back.right() - 1, back.y, back.bottom() - 1, c);
-            canvas.stroke_rect(front, 1, c);
-        }
-        ChromeControl::Maximize => canvas.stroke_rect(g, 1, c),
         ChromeControl::Close => {
             canvas.line((g.x, g.y), (x1, y1), c);
             canvas.line((g.x, y1), (x1, g.y), c);
@@ -348,7 +310,7 @@ impl ChromeStyle for CleanSlateChrome<'_> {
             border_color,
         );
 
-        let leftmost = self.control_rect(frame, ChromeControl::Minimize);
+        let leftmost = self.control_rect(frame, ChromeControl::LEFTMOST);
         let title_style = if state.focused {
             t.type_scale.heading
         } else {
@@ -415,8 +377,10 @@ mod tests {
             assert!(r.x >= bar.x && r.right() <= bar.right());
             assert!(r.y >= bar.y && r.bottom() <= bar.bottom());
         }
-        assert!(rects[0].right() <= rects[1].x && rects[1].right() <= rects[2].x);
-        assert_eq!(rects[2].right(), bar.right() - 6);
+        for pair in rects.windows(2) {
+            assert!(pair[0].right() <= pair[1].x);
+        }
+        assert_eq!(rects[rects.len() - 1].right(), bar.right() - 6);
     }
 
     #[test]
