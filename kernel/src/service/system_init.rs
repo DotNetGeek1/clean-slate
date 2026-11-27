@@ -251,8 +251,8 @@ impl HeldAuthority {
     /// What an instance of `image` started from a manifest row with `grants` must hold. Services
     /// get no lifecycle control, and a console only through `Grant::Console`; the network grant
     /// also binds the raw network link. A Linux image is a Linux-personality process.
-    /// `Grant::NetworkClient` always means one entitlement, and one instance-bound client
-    /// capability exactly when `network_instance_live`. `Grant::GraphicsPort` is one
+    /// `Grant::NetworkClient` or `Grant::NativeNetworkClient` always means one entitlement, and
+    /// one instance-bound client capability exactly when `network_instance_live`. `Grant::GraphicsPort` is one
     /// registered port as well as its `GFX_SERVE` record. Before the process has run it has
     /// bound no presenter or input consumer and opened no connection, so those stay 0 here.
     pub(crate) fn for_grants(
@@ -263,14 +263,15 @@ impl HeldAuthority {
         use crate::process::linux_fs::object_backend::LINUX_FILE_OBJECT_GRANTS;
 
         let held = |grant: Grant| usize::from(grants.contains(&grant));
+        let network_client = held(Grant::NetworkClient) + held(Grant::NativeNetworkClient);
         Self {
             console: held(Grant::Console),
             console_records: held(Grant::Console),
             block_device: held(Grant::BlockDevice),
             object_service_role: held(Grant::ObjectServiceRole),
             network: held(Grant::NetworkService),
-            network_client: held(Grant::NetworkClient) * usize::from(network_instance_live),
-            network_client_entitlement: held(Grant::NetworkClient),
+            network_client: network_client * usize::from(network_instance_live),
+            network_client_entitlement: network_client,
             tmp_objects: held(Grant::TmpObjects) * LINUX_FILE_OBJECT_GRANTS,
             graphics_serve: held(Grant::GraphicsPort),
             graphics_shell: held(Grant::GraphicsShellRole),

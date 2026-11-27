@@ -55,6 +55,10 @@ pub(crate) trait InstanceGrantAuthority {
     ) -> Result<(), &'static str>;
     /// `LAUNCH_CONNECT` on init's launcher port (#237).
     fn grant_launcher_client(&mut self, pid: u64) -> Result<(), &'static str>;
+    /// The network client entitlement and, when a network instance is live, a client
+    /// capability bound to it; the instance is attributed to its row for the per-app network
+    /// policy (#353).
+    fn grant_native_network_client(&mut self, pid: u64) -> Result<(), &'static str>;
 }
 
 /// Which console port client a row is (#310, #311).
@@ -126,7 +130,8 @@ pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
             | Grant::ConsoleClient
             | Grant::ConsoleSession
             | Grant::ConsoleFrontEnd
-            | Grant::LauncherClient => {}
+            | Grant::LauncherClient
+            | Grant::NativeNetworkClient => {}
             // Applied by the Linux launch path while it builds the process.
             Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {}
         }
@@ -158,6 +163,7 @@ pub(crate) fn apply_instance_grants<A: InstanceGrantAuthority>(
                 authority.grant_console_client(pid, ConsoleClientRole::FrontEnd)
             }
             Grant::LauncherClient => authority.grant_launcher_client(pid),
+            Grant::NativeNetworkClient => authority.grant_native_network_client(pid),
             Grant::ObjectServiceRole
             | Grant::AuditReader
             | Grant::AuditStore
@@ -195,6 +201,7 @@ mod tests {
         ConsoleService(u64),
         ConsoleClient(u64, ConsoleClientRole),
         LauncherClient(u64),
+        NativeNetworkClient(u64),
     }
 
     #[derive(Default)]
@@ -294,6 +301,11 @@ mod tests {
         fn grant_launcher_client(&mut self, pid: u64) -> Result<(), &'static str> {
             self.calls.push(Call::LauncherClient(pid));
             self.outcome(Grant::LauncherClient)
+        }
+
+        fn grant_native_network_client(&mut self, pid: u64) -> Result<(), &'static str> {
+            self.calls.push(Call::NativeNetworkClient(pid));
+            self.outcome(Grant::NativeNetworkClient)
         }
     }
 
@@ -528,6 +540,19 @@ mod tests {
             .grant,
             Grant::GraphicsAppRole
         );
+    }
+
+    /// A native network client gets its authority after the spawn, like the other native
+    /// instance grants; nothing goes in its bootstrap page.
+    #[test]
+    fn a_native_network_client_reaches_its_one_call_after_the_spawn() {
+        let mut recorder = Recorder::default();
+        let handles = apply_both(&[Grant::Console, Grant::NativeNetworkClient], &mut recorder);
+        assert_eq!(
+            recorder.calls,
+            [Call::Console(7), Call::NativeNetworkClient(7)]
+        );
+        assert_eq!(handles.console, Some(0xc0e5));
     }
 
     #[test]

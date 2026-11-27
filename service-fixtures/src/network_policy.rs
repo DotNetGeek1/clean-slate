@@ -5,10 +5,11 @@
 //! for a self-test kernel's own clients, and [`APP_UNATTRIBUTED`] otherwise. The network
 //! service looks the app up in [`NETWORK_POLICIES`] and lets it resolve names and reach only the
 //! destinations its entry names. An app without an entry may not open, resolve or connect at
-//! all, so a row that gains `Grant::NetworkClient` without a policy gets nothing.
+//! all, so a row that gains `Grant::NetworkClient` or `Grant::NativeNetworkClient` without a
+//! policy gets nothing.
 //!
 //! Policies are compiled in beside the manifest; the manifest tests require every row that
-//! holds `Grant::NetworkClient` to have exactly one entry, and every entry to name such a row.
+//! holds either grant to have exactly one entry, and every entry to name such a row.
 
 use clean_slate_capability::{NetDestination, NetTransport};
 use clean_slate_network::addr::{Ipv4Addr, SocketAddrV4};
@@ -273,8 +274,7 @@ impl RefusalReports {
 mod tests {
     use super::*;
     use crate::manifest::{
-        Grant, ServiceSpec, SYSTEM_DESKTOP_MANIFEST, SYSTEM_MANIFEST,
-        SYSTEM_TERMINAL_DESKTOP_MANIFEST,
+        ServiceSpec, SYSTEM_DESKTOP_MANIFEST, SYSTEM_MANIFEST, SYSTEM_TERMINAL_DESKTOP_MANIFEST,
     };
 
     const MANIFESTS: [&[ServiceSpec]; 3] = [
@@ -405,7 +405,7 @@ mod tests {
         for spec in rows() {
             let app = u64::from(spec.id.0);
             let entries = NETWORK_POLICIES.iter().filter(|p| p.app == app).count();
-            let expected = usize::from(spec.grants(Grant::NetworkClient));
+            let expected = usize::from(spec.is_network_client());
             assert_eq!(entries, expected, "row {:#x}", spec.id.0);
         }
         for policy in NETWORK_POLICIES {
@@ -413,9 +413,7 @@ mod tests {
                 continue;
             }
             assert!(
-                rows()
-                    .any(|spec| u64::from(spec.id.0) == policy.app
-                        && spec.grants(Grant::NetworkClient)),
+                rows().any(|spec| u64::from(spec.id.0) == policy.app && spec.is_network_client()),
                 "policy {:#x} names no NetworkClient row",
                 policy.app
             );

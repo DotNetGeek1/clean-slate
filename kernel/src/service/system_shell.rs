@@ -81,7 +81,8 @@ impl LinuxGrants {
                 | Grant::GraphicsAppRole
                 | Grant::ConsoleService
                 | Grant::ConsoleFrontEnd
-                | Grant::LauncherClient => {
+                | Grant::LauncherClient
+                | Grant::NativeNetworkClient => {
                     return Err("system shell: native grant on a Linux row");
                 }
             }
