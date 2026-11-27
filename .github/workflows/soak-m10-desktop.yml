@@ -1,5 +1,5 @@
-# Temporary #315 soak: 30 runs of `cargo xtask test-m10-desktop` under stress-ng CPU load,
-# the same load as the #240 soak that found the fault (stress-ng --cpu 6 on a 4-vCPU host).
+# Temporary #315 soak: 30 runs of `cargo xtask test-m10-desktop` under stress-ng CPU load.
+# Run 1 matched the #240 soak load (stress-ng --cpu 6 on a 4-vCPU host); run 2 uses STRESS_CPUS.
 # Not for merge; the branch's PR exists only to run this.
 name: Soak test-m10-desktop (#315)
 
@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: soak-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   soak:
     name: soak shard ${{ matrix.shard }}
@@ -23,6 +27,9 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6]
     env:
       RUNS_PER_SHARD: 5
+      # Run 1 used 6 (the #240 load); every loaded run then failed on the VirtIO-GPU machine
+      # before the compositor fault (drag overshoot, pointer never settled, boot timeout).
+      STRESS_CPUS: 4
     steps:
       - uses: actions/checkout@v4
 
@@ -38,7 +45,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf stress-ng
           qemu-system-x86_64 --version
-          nproc
+          echo "nproc=$(nproc)"; ls -l /dev/kvm || echo "no /dev/kvm"
 
       # One unloaded warm-up run builds everything, so the loaded runs time the lane, not cargo.
       - name: Warm-up build and run (no load, not counted)
@@ -48,7 +55,7 @@ jobs:
         run: |
           set -u
           mkdir -p soak
-          stress-ng --cpu 6 --timeout 0 --quiet &
+          stress-ng --cpu "$STRESS_CPUS" --timeout 0 --quiet &
           STRESS=$!
           trap 'kill $STRESS 2>/dev/null || true' EXIT
           sleep 5
@@ -56,6 +63,8 @@ jobs:
           for i in $(seq 1 "$RUNS_PER_SHARD"); do
             run="s${{ matrix.shard }}r$i"
             start=$(date +%s)
+            # A machine that never boots must not leave an earlier run's serial log behind.
+            rm -rf target/xtask-artifacts/m10-desktop-virtio-gpu target/xtask-artifacts/m10-desktop-framebuffer
             if cargo xtask test-m10-desktop > "soak/$run.log" 2>&1; then
               result=PASS; pass=$((pass + 1))
             else
