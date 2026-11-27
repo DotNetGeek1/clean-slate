@@ -85,6 +85,14 @@ pub(crate) fn rail(tier: QualityTier) -> Rect {
     shell(tier).zones().rail
 }
 
+/// Rail slot `slot` in output coordinates (the rail surface sits at the output's origin).
+pub(crate) fn rail_item(tier: QualityTier, slot: usize) -> Option<Rect> {
+    shell(tier)
+        .rail_layout()
+        .item(slot)
+        .filter(|r| !r.is_empty())
+}
+
 /// Content origin of the `step`th toplevel the compositor placed since it started.
 pub(crate) fn window_origin(tier: QualityTier, step: u32) -> Point {
     sized_window_origin(tier, PANEL_SIZE, step)
