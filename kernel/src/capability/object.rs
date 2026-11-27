@@ -9,12 +9,13 @@ use clean_slate_capability::{
 };
 use clean_slate_native_abi::status::STATUS_ETIMEDOUT;
 use clean_slate_service_fixtures::{
-    ObjectServiceRequest, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_DELETE, OBJECT_OP_READ,
-    OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE, OBJECT_OP_WRITE_AT,
-    OBJECT_POLL_NO_DEADLINE, OBJECT_REQUEST_SLOTS, OBJECT_SERVICE_REQUEST_BYTES,
-    OBJECT_SERVICE_ROLE_ID, OBJECT_STATUS_PENDING, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT,
-    OBJECT_SUBOP_POLL, OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT,
-    OBJECT_SUBOP_SUBMIT,
+    object_status_to_native, ObjectServiceRequest, ObjectSubmitAt, OBJECT_MAX_PAYLOAD_BYTES,
+    OBJECT_OP_COMMIT, OBJECT_OP_DELETE, OBJECT_OP_READ, OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE,
+    OBJECT_OP_WRITE, OBJECT_OP_WRITE_AT, OBJECT_POLL_NO_DEADLINE, OBJECT_REQUEST_SLOTS,
+    OBJECT_SERVICE_REQUEST_BYTES, OBJECT_SERVICE_ROLE_ID, OBJECT_STATUS_PENDING,
+    OBJECT_SUBMIT_AT_BYTES, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, OBJECT_SUBOP_POLL,
+    OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT, OBJECT_SUBOP_SUBMIT,
+    OBJECT_SUBOP_SUBMIT_AT,
 };
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
@@ -55,6 +56,9 @@ struct ObjectRequestSlot {
     len: usize,
     payload: [u8; OBJECT_MAX_PAYLOAD_BYTES],
     status: u64,
+    /// Submitted through `OBJECT_SUBOP_SUBMIT_AT`: a failure polls as a native status
+    /// ([`object_status_to_native`]), never as a small number a read length could be.
+    native_statuses: bool,
 }
 
 impl ObjectRequestSlot {
@@ -70,6 +74,7 @@ impl ObjectRequestSlot {
             len: 0,
             payload: [0; OBJECT_MAX_PAYLOAD_BYTES],
             status: 0,
+            native_statuses: false,
         }
     }
 }
@@ -137,6 +142,28 @@ impl ObjectRequestQueue {
         Ok(request_id)
     }
 
+    /// [`submit_at`](Self::submit_at) for `OBJECT_SUBOP_SUBMIT_AT`: a failure polls as a
+    /// native status.
+    pub fn submit_native_at(
+        &mut self,
+        client: HolderId,
+        op: u64,
+        object_id: u64,
+        epoch: u64,
+        offset: u64,
+        payload: &[u8],
+    ) -> Result<u64, SyscallQueueError> {
+        let request_id = self.submit_at(client, op, object_id, epoch, offset, payload)?;
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.request_id == request_id)
+        {
+            slot.native_statuses = true;
+        }
+        Ok(request_id)
+    }
+
     pub fn poll(
         &mut self,
         client: HolderId,
@@ -158,6 +185,11 @@ impl ObjectRequestQueue {
                 let status = slot.status;
                 if status != 0 {
                     // Error completions still consume the client's poll; free so ENOSPC cannot stick.
+                    let status = if slot.native_statuses {
+                        object_status_to_native(status)
+                    } else {
+                        status
+                    };
                     self.slots[index] = ObjectRequestSlot::free();
                     return Err(SyscallQueueError::CompletionStatus(status));
                 }
@@ -254,21 +286,21 @@ pub(crate) fn object_request_wait_key(request_id: u64) -> WaitKey {
     WaitKey(0x46_u64 << 56 | (request_id & 0x00FF_FFFF_FFFF_FFFF))
 }
 
-/// The right an object op needs. Deleting or truncating an object needs `WRITE`, like
-/// changing its bytes.
+/// The right an object op needs. Deleting, truncating or committing an object needs
+/// `WRITE`, like changing its bytes.
 fn required_rights(op: u64) -> Option<Rights> {
     match op {
         OBJECT_OP_READ | OBJECT_OP_READ_AT => Some(Rights::READ),
-        OBJECT_OP_WRITE | OBJECT_OP_DELETE | OBJECT_OP_WRITE_AT | OBJECT_OP_TRUNCATE => {
-            Some(Rights::WRITE)
-        }
+        OBJECT_OP_WRITE | OBJECT_OP_DELETE | OBJECT_OP_WRITE_AT | OBJECT_OP_TRUNCATE
+        | OBJECT_OP_COMMIT => Some(Rights::WRITE),
         _ => None,
     }
 }
 
-/// Ops a native client may submit through `OBJECT_SUBOP_SUBMIT`. The offset ops carry an
-/// offset the native ABI has no register for, so only the kernel's Linux `/home`
-/// projection submits them (#304).
+/// Ops a native client may submit through `OBJECT_SUBOP_SUBMIT`: the whole-object ops. The
+/// offset ops and the commit go through `OBJECT_SUBOP_SUBMIT_AT` (#312), whose descriptor
+/// carries the offset that `SUBMIT` has no register for; [`ObjectSubmitAt::decode`] decides
+/// which ops it takes.
 fn native_submit_op(op: u64) -> bool {
     matches!(op, OBJECT_OP_READ | OBJECT_OP_WRITE | OBJECT_OP_DELETE)
 }
@@ -451,6 +483,10 @@ fn op_name(op: u64) -> &'static str {
         OBJECT_OP_READ => "read",
         OBJECT_OP_WRITE => "write",
         OBJECT_OP_DELETE => "delete",
+        OBJECT_OP_READ_AT => "read-at",
+        OBJECT_OP_WRITE_AT => "write-at",
+        OBJECT_OP_TRUNCATE => "truncate",
+        OBJECT_OP_COMMIT => "commit",
         _ => "unknown",
     }
 }
@@ -579,6 +615,7 @@ fn authorize_service_role(raw_handle: u64) -> Result<(), CapabilityError> {
 pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     match frame.rdi {
         OBJECT_SUBOP_SUBMIT => handle_submit(frame),
+        OBJECT_SUBOP_SUBMIT_AT => handle_submit_at(frame),
         OBJECT_SUBOP_POLL => handle_poll(frame),
         OBJECT_SUBOP_SERVICE_NEXT => handle_service_next(frame),
         OBJECT_SUBOP_SERVICE_COMPLETE => handle_service_complete(frame),
@@ -643,6 +680,73 @@ fn handle_submit(frame: &mut SyscallContext) {
     match queue_mut().submit(holder, op, object_id, epoch, &payload[..len]) {
         Ok(request_id) => frame.rax = request_id,
         Err(error) => frame.rax = error.syscall_status(),
+    }
+}
+
+/// `OBJECT_SUBOP_SUBMIT_AT` (#312): a native holder's offset op or commit, under the same
+/// rights and epoch rules as `SUBMIT`. The storage service applies the live-byte budget
+/// (`NO_SPACE`) and the staging rules the Linux `/home` projection already uses.
+fn handle_submit_at(frame: &mut SyscallContext) {
+    let raw_handle = frame.rsi;
+    if frame.r10 != OBJECT_SUBMIT_AT_BYTES as u64
+        || validate_user_pointer_range(frame.rdx, frame.r10).is_err()
+    {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let mut descriptor = [0u8; OBJECT_SUBMIT_AT_BYTES];
+    if copy_from_user(&mut descriptor, frame.rdx).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let Ok(submit) = ObjectSubmitAt::decode(&descriptor) else {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    };
+    let payload_len = submit.payload_len();
+    if payload_len > 0 && validate_user_pointer_range(submit.data, submit.len).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let holder = match current_holder() {
+        Ok(holder) => holder,
+        Err(_) => {
+            frame.rax = SYSCALL_EACCES;
+            return;
+        }
+    };
+    let epoch = match authorize_object_op(raw_handle, submit.object_id, submit.op) {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            log_deny(holder, submit.object_id, submit.op, error);
+            frame.rax = error.syscall_status();
+            return;
+        }
+    };
+    let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
+    if payload_len > 0 && copy_from_user(&mut payload[..payload_len], submit.data).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    match queue_mut().submit_native_at(
+        holder,
+        submit.op,
+        submit.object_id,
+        epoch,
+        submit.offset,
+        &payload[..queued_len(&submit)],
+    ) {
+        Ok(request_id) => frame.rax = request_id,
+        Err(error) => frame.rax = error.syscall_status(),
+    }
+}
+
+/// The request length queued for a decoded `SUBMIT_AT`: the bytes a `READ_AT` asks for or a
+/// `WRITE_AT` carries, 0 for a truncate or a commit.
+fn queued_len(submit: &ObjectSubmitAt) -> usize {
+    match submit.op {
+        OBJECT_OP_READ_AT | OBJECT_OP_WRITE_AT => submit.len as usize,
+        _ => 0,
     }
 }
 
@@ -933,10 +1037,124 @@ mod tests {
         assert_eq!(required_rights(OBJECT_OP_READ_AT), Some(Rights::READ));
         assert_eq!(required_rights(OBJECT_OP_WRITE_AT), Some(Rights::WRITE));
         assert_eq!(required_rights(OBJECT_OP_TRUNCATE), Some(Rights::WRITE));
+        assert_eq!(required_rights(OBJECT_OP_COMMIT), Some(Rights::WRITE));
         assert!(native_submit_op(OBJECT_OP_WRITE));
         assert!(!native_submit_op(OBJECT_OP_WRITE_AT));
         assert!(!native_submit_op(OBJECT_OP_READ_AT));
         assert!(!native_submit_op(OBJECT_OP_TRUNCATE));
+        assert!(!native_submit_op(OBJECT_OP_COMMIT));
+    }
+
+    fn decoded(op: u64, offset: u64, len: u64) -> ObjectSubmitAt {
+        ObjectSubmitAt::decode(
+            &ObjectSubmitAt {
+                op,
+                object_id: 7,
+                offset,
+                len,
+                data: 0x4000_0000,
+                ..Default::default()
+            }
+            .encode(),
+        )
+        .expect("decode")
+    }
+
+    #[test]
+    fn native_offset_ops_need_their_rights() {
+        let mut table = CapabilityTable::<8>::new();
+        let client = HolderId(3);
+        let read_only = grant_read(&mut table, client, 7);
+        assert!(authorize_submit(&table, client, read_only, 7, OBJECT_OP_READ_AT).is_ok());
+        for op in [OBJECT_OP_WRITE_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_COMMIT] {
+            assert_eq!(
+                authorize_submit(&table, client, read_only, 7, op),
+                Err(CapabilityError::MissingRight)
+            );
+        }
+        let read_write = grant_write_read(&mut table, client, 8);
+        for op in [
+            OBJECT_OP_READ_AT,
+            OBJECT_OP_WRITE_AT,
+            OBJECT_OP_TRUNCATE,
+            OBJECT_OP_COMMIT,
+        ] {
+            assert!(authorize_submit(&table, client, read_write, 8, op).is_ok());
+            assert_eq!(
+                authorize_submit(&table, client, read_write, 7, op),
+                Err(CapabilityError::WrongResource)
+            );
+            assert_eq!(
+                authorize_submit(&table, HolderId(4), read_write, 8, op),
+                Err(CapabilityError::UnauthorizedHolder)
+            );
+        }
+    }
+
+    #[test]
+    fn a_native_submit_at_queues_its_offset_length_and_epoch() {
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(3);
+        for (submit, epoch) in [
+            (decoded(OBJECT_OP_WRITE_AT, 0x8_0000, 4), 0x42),
+            (decoded(OBJECT_OP_READ_AT, 0x8_0000, 512), 0x42),
+            (decoded(OBJECT_OP_TRUNCATE, 0x10_0000, 0), 0),
+            (decoded(OBJECT_OP_COMMIT, 0, 0), 0),
+        ] {
+            let payload = [0xAB; OBJECT_MAX_PAYLOAD_BYTES];
+            queue
+                .submit_native_at(
+                    client,
+                    submit.op,
+                    submit.object_id,
+                    epoch,
+                    submit.offset,
+                    &payload[..queued_len(&submit)],
+                )
+                .unwrap();
+            let request = queue.service_next().unwrap();
+            assert_eq!(
+                (request.op, request.offset, request.len, request.epoch),
+                (submit.op, submit.offset, queued_len(&submit) as u64, epoch)
+            );
+            queue.service_complete(request.request_id, 0, &[]).unwrap();
+            assert_eq!(queue.poll(client, request.request_id, &mut []), Ok(0));
+        }
+        assert_eq!(decoded(OBJECT_OP_READ_AT, 0, 512).payload_len(), 0);
+    }
+
+    #[test]
+    fn a_native_submit_at_failure_polls_as_a_status_not_a_length() {
+        use clean_slate_native_abi::status::{STATUS_ENOENT, STATUS_ENOSPC, STATUS_ESTALE};
+        use clean_slate_service_fixtures::{OBJECT_STATUS_NO_SPACE, OBJECT_STATUS_STALE};
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(3);
+        for (status, native) in [
+            (OBJECT_STATUS_NOT_FOUND, STATUS_ENOENT),
+            (OBJECT_STATUS_NO_SPACE, STATUS_ENOSPC),
+            (OBJECT_STATUS_STALE, STATUS_ESTALE),
+        ] {
+            let id = queue
+                .submit_native_at(client, OBJECT_OP_WRITE_AT, 7, 0, 0, b"x")
+                .unwrap();
+            queue.service_next().unwrap();
+            queue.service_complete(id, status, &[]).unwrap();
+            assert_eq!(
+                queue.poll(client, id, &mut []),
+                Err(SyscallQueueError::CompletionStatus(native))
+            );
+        }
+        // `SUBMIT`'s requests keep the raw object status.
+        let id = queue.submit(client, OBJECT_OP_READ, 7, 0, &[]).unwrap();
+        queue.service_next().unwrap();
+        queue
+            .service_complete(id, OBJECT_STATUS_NOT_FOUND, &[])
+            .unwrap();
+        assert_eq!(
+            queue.poll(client, id, &mut []),
+            Err(SyscallQueueError::CompletionStatus(OBJECT_STATUS_NOT_FOUND))
+        );
+        assert_eq!(decoded(OBJECT_OP_WRITE_AT, 0, 4).payload_len(), 4);
     }
 
     #[test]
