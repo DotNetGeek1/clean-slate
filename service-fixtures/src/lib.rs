@@ -18,6 +18,8 @@ pub mod init_bootstrap;
 pub mod m6_fixture;
 /// #218 shared service manifest (kernel grants, init start order and restart policy).
 pub mod manifest;
+/// #353 native network probe row, policy and lane checks.
+pub mod net_probe;
 pub mod network_policy;
 mod network_service;
 mod network_transport;

@@ -54,6 +54,8 @@ pub enum ServiceImage {
     Console,
     /// `clean-slate-terminal-userspace`, the terminal window (#311).
     Terminal,
+    /// `clean-slate-net-probe-userspace`, the native network probe (#353).
+    NetProbe,
 }
 
 impl ServiceImage {
@@ -72,7 +74,8 @@ impl ServiceImage {
             | Self::Playground
             | Self::Audit
             | Self::Console
-            | Self::Terminal => false,
+            | Self::Terminal
+            | Self::NetProbe => false,
         }
     }
 
@@ -89,7 +92,7 @@ impl ServiceImage {
 ///
 /// `ConsoleInput`, `TmpObjects` and `NetworkClient` are Linux-personality grants: the kernel
 /// applies them while it builds the Linux process, so only a [`ServiceImage::LinuxShell`] row
-/// may hold them. `Console` is valid on that row, on the desktop images, whose console handle
+/// may hold them. `NativeNetworkClient` is their native counterpart for network access. `Console` is valid on that row, on the desktop images, whose console handle
 /// is written into their launch page, and on the audit image, which reads it from its
 /// bootstrap page.
 ///

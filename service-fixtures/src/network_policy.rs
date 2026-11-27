@@ -131,6 +131,7 @@ pub const NETWORK_POLICIES: &[AppNetworkPolicy] = &[
         resolve: true,
         destinations: SHELL_DESTINATIONS,
     },
+    crate::net_probe::NET_PROBE_POLICY,
     AppNetworkPolicy {
         app: APP_SELF_TEST,
         resolve: true,
@@ -277,10 +278,11 @@ mod tests {
         ServiceSpec, SYSTEM_DESKTOP_MANIFEST, SYSTEM_MANIFEST, SYSTEM_TERMINAL_DESKTOP_MANIFEST,
     };
 
-    const MANIFESTS: [&[ServiceSpec]; 3] = [
+    const MANIFESTS: [&[ServiceSpec]; 4] = [
         SYSTEM_MANIFEST,
         SYSTEM_DESKTOP_MANIFEST,
         SYSTEM_TERMINAL_DESKTOP_MANIFEST,
+        crate::net_probe::NET_PROBE_MANIFEST,
     ];
 
     const RESOLVER: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new([10, 77, 0, 1]), 53);
