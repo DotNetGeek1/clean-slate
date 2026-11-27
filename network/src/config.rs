@@ -108,7 +108,7 @@ pub struct NetworkConfig {
     /// The name the native TLS session verifies the server certificate against, until the
     /// connect request carries one per connection.
     pub tls_peer_name: [u8; MAX_REQUEST_HOSTNAME_LEN],
-    /// [`CONFIG_FLAG_DHCP`]; other bits are reserved (zero).
+    /// [`CONFIG_FLAG_DHCP`], [`CONFIG_FLAG_DNS_TCP`]; other bits are reserved (zero).
     pub flags: u8,
     pub _reserved: [u8; 6],
 }
@@ -116,6 +116,13 @@ pub struct NetworkConfig {
 /// [`NetworkConfig::flags`]: lease the address, prefix, gateway and (unless the config names
 /// one) the resolver with DHCP ([`crate::dhcp`]) instead of configuring them statically.
 pub const CONFIG_FLAG_DHCP: u8 = 1 << 0;
+
+/// [`NetworkConfig::flags`]: send DNS queries over TCP (RFC 7766) instead of UDP, to the
+/// configured or leased resolver. For networks that carry no UDP, such as QEMU's restricted
+/// slirp (#355).
+pub const CONFIG_FLAG_DNS_TCP: u8 = 1 << 1;
+
+const CONFIG_FLAGS_KNOWN: u8 = CONFIG_FLAG_DHCP | CONFIG_FLAG_DNS_TCP;
 
 // No padding: the struct crosses the user/kernel boundary as bytes.
 const _: () = assert!(core::mem::size_of::<NetworkConfig>() == 88);
@@ -156,6 +163,8 @@ pub struct ServiceNetwork {
     /// The route is still to be leased with DHCP: until [`Self::with_lease`] it is
     /// unconfigured.
     pub dhcp: bool,
+    /// DNS goes over TCP ([`CONFIG_FLAG_DNS_TCP`]).
+    pub resolver_tcp: bool,
 }
 
 impl ServiceNetwork {
@@ -166,6 +175,7 @@ impl ServiceNetwork {
         resolver: None,
         tls_peer_name: None,
         dhcp: false,
+        resolver_tcp: false,
     };
 
     /// This DHCP network with `lease` applied: the leased route, and the leased resolver
@@ -184,7 +194,11 @@ impl ServiceNetwork {
             prefix_len: lease.prefix_len,
             gateway: lease.router,
         };
-        NetworkConfig::new_static(route, None, resolver, name).parse()
+        let leased = NetworkConfig::new_static(route, None, resolver, name).parse()?;
+        Ok(Self {
+            resolver_tcp: self.resolver_tcp,
+            ..leased
+        })
     }
 
     /// The MAC to pin for `dst`'s next hop, when the configuration names one: the gateway's
@@ -224,6 +238,12 @@ impl NetworkConfig {
         config
     }
 
+    /// This configuration with DNS over TCP ([`CONFIG_FLAG_DNS_TCP`]).
+    pub const fn with_dns_over_tcp(mut self) -> Self {
+        self.flags |= CONFIG_FLAG_DNS_TCP;
+        self
+    }
+
     /// A static configuration. `tls_peer_name` longer than
     /// [`MAX_REQUEST_HOSTNAME_LEN`] is truncated, which [`Self::parse`] then refuses only if
     /// the truncation leaves an invalid name.
@@ -259,7 +279,7 @@ impl NetworkConfig {
 
     /// Checks the configuration. An unconfigured one gives [`ServiceNetwork::UNCONFIGURED`].
     pub fn parse(&self) -> Result<ServiceNetwork, ConfigError> {
-        if self._reserved != [0; 6] || self.flags & !CONFIG_FLAG_DHCP != 0 {
+        if self._reserved != [0; 6] || self.flags & !CONFIG_FLAGS_KNOWN != 0 {
             return Err(ConfigError::Reserved);
         }
         if self.version == 0 && *self == Self::UNCONFIGURED {
@@ -319,6 +339,7 @@ impl NetworkConfig {
             resolver,
             tls_peer_name,
             dhcp: false,
+            resolver_tcp: self.flags & CONFIG_FLAG_DNS_TCP != 0,
         })
     }
 }
@@ -349,6 +370,7 @@ impl NetworkConfig {
             resolver,
             tls_peer_name: self.parse_tls_peer_name()?,
             dhcp: true,
+            resolver_tcp: self.flags & CONFIG_FLAG_DNS_TCP != 0,
         })
     }
 
@@ -780,6 +802,34 @@ mod tests {
         let mut unknown = NetworkConfig::new_dhcp(None, "");
         unknown.flags |= 1 << 3;
         assert_eq!(unknown.parse(), Err(ConfigError::Reserved));
+    }
+
+    #[test]
+    fn dns_over_tcp_is_a_flag_that_survives_the_lease() {
+        let resolver = SocketAddrV4::new(Ipv4Addr::new([10, 0, 2, 100]), 53);
+        let udp = NetworkConfig::new_dhcp(Some(resolver), "").parse().unwrap();
+        assert!(!udp.resolver_tcp);
+        let tcp = NetworkConfig::new_dhcp(Some(resolver), "")
+            .with_dns_over_tcp()
+            .parse()
+            .unwrap();
+        assert!(tcp.resolver_tcp && tcp.dhcp);
+        let lease = crate::dhcp::DhcpLease {
+            address: Ipv4Addr::new([10, 0, 2, 15]),
+            prefix_len: 24,
+            router: Some(Ipv4Addr::new([10, 0, 2, 2])),
+            dns: Some(Ipv4Addr::new([10, 0, 2, 3])),
+            server: Ipv4Addr::new([10, 0, 2, 2]),
+            lease_secs: 86_400,
+        };
+        let leased = tcp.with_lease(&lease).unwrap();
+        assert!(leased.resolver_tcp);
+        assert_eq!(leased.resolver, Some(resolver));
+        let static_tcp = NetworkConfig::new_static(route(), None, Some(resolver), "")
+            .with_dns_over_tcp()
+            .parse()
+            .unwrap();
+        assert!(static_tcp.resolver_tcp && !static_tcp.dhcp);
     }
 
     #[test]

@@ -32,6 +32,7 @@ mod m8_fixture;
 mod m9_fixture;
 mod m9_userspace_validate;
 mod marker_spec;
+mod net_acceptance;
 mod ovmf_vars;
 mod qmp;
 mod raster_font;
@@ -1438,6 +1439,13 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
         ParsedCommand::TestM10NativeMemory => run_m10_native_memory_acceptance(),
         ParsedCommand::TestM10Clock => m10_clock::run(),
+        ParsedCommand::TestNetAcceptance => net_acceptance::run(),
+        ParsedCommand::NetAcceptanceRelay => match trailing_args.as_slice() {
+            [port] => net_acceptance::run_relay(&port.to_string_lossy()),
+            _ => Err(XtaskError::InvalidOption(
+                "net-acceptance-relay takes one port".to_owned(),
+            )),
+        },
         ParsedCommand::TestM10Storage => m10_storage::run(),
         ParsedCommand::TestM10Net => m10_net::run(),
         ParsedCommand::TestQmpSmoke => run_qmp_smoke_acceptance(),
@@ -3007,6 +3015,17 @@ fn run_m10_compositor_acceptance() -> Result<(), XtaskError> {
     Ok(())
 }
 
+/// The `-Z build-std` set for a native package: `alloc` for the apps on the runtime heap
+/// (#356), as `kernel/build.rs` `userspace_embed_recipe` and the workflow build them.
+fn native_build_std(package: &str) -> &'static str {
+    match package {
+        "clean-slate-desktop-shell" | "clean-slate-playground" | "clean-slate-terminal" => {
+            "build-std=core,alloc,compiler_builtins"
+        }
+        _ => "build-std=core,compiler_builtins",
+    }
+}
+
 /// Release CPL3 build of one `userspace`-feature binary (what `kernel/build.rs` embeds).
 fn build_native_userspace_bin(package: &str, bin: &str) -> Result<(), XtaskError> {
     let mut cmd = Command::new("cargo");
@@ -3021,7 +3040,7 @@ fn build_native_userspace_bin(package: &str, bin: &str) -> Result<(), XtaskError
         .arg("--target")
         .arg("x86_64-unknown-none")
         .arg("-Z")
-        .arg("build-std=core,compiler_builtins")
+        .arg(native_build_std(package))
         .arg("--release")
         .env("RUSTC_BOOTSTRAP", "1");
     run_build_command(&mut cmd)
@@ -5737,6 +5756,9 @@ fn print_help() {
         "  test-m10-net  #353 native network client: network client host tests, then one m10-net-client-self-test QEMU boot against the M7 fixture peer: a native app with only the NativeNetworkClient grant resolves a name, fetches a page over TCP and over TLS, makes a UDP round trip, and is refused a destination its policy does not name, with the refusal in the audit log; prints [M10.net] lane PASS (aliases: m10-net, m10.353)"
     );
     println!(
+        "  test-net-acceptance  #355 network acceptance: the M7.8 converged lane on QEMU slirp (restrict=on, DHCP) with a lane-generated CA as the only trust anchor; DNS over TCP and two HTTPS fetches through loopback guestfwd, wall-clock certificate time, no M7 test CA in the image, no network::fixture in the net service; prints [NET ] test-net-acceptance PASS (alias: net-acceptance)"
+    );
+    println!(
         "  test-m10-storage  #312 native storage: storage host tests, then three m10-storage-self-test QEMU boots on one disk: a native app writes a named 1 MiB entry through a shared buffer and commits, reads it back by name and truncates it, then reads the 4 KiB back and unlinks it; prints [M10.storage] lane PASS (aliases: m10-storage, m10.312)"
     );
     println!(
@@ -5913,6 +5935,8 @@ enum ParsedCommand {
     TestM10Port,
     TestM10NativeMemory,
     TestM10Clock,
+    TestNetAcceptance,
+    NetAcceptanceRelay,
     TestM10Storage,
     TestM10Net,
     TestQmpSmoke,
@@ -6083,6 +6107,10 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m10-clock" || cmd == "m10-clock" || cmd == "m10.308" => {
             ParsedCommand::TestM10Clock
         }
+        Some(cmd) if cmd == "test-net-acceptance" || cmd == "net-acceptance" => {
+            ParsedCommand::TestNetAcceptance
+        }
+        Some(cmd) if cmd == net_acceptance::RELAY_COMMAND => ParsedCommand::NetAcceptanceRelay,
         Some(cmd) if cmd == "test-m10-storage" || cmd == "m10-storage" || cmd == "m10.312" => {
             ParsedCommand::TestM10Storage
         }
@@ -6891,6 +6919,16 @@ mod tests {
                 ParsedCommand::TestSystemDisplay
             );
         }
+        for alias in ["test-net-acceptance", "net-acceptance"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestNetAcceptance
+            );
+        }
+        assert_eq!(
+            parse_command(Some(net_acceptance::RELAY_COMMAND.as_ref())),
+            ParsedCommand::NetAcceptanceRelay
+        );
         assert_eq!(
             parse_command(Some("run-m10-desktop".as_ref())),
             ParsedCommand::RunM10Desktop

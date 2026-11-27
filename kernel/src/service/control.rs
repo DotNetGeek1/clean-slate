@@ -701,9 +701,18 @@ impl ServiceLifecycleController {
         }
         let memory_pages = context.spec.map_or(0, |spec| spec.memory_pages);
         if memory_pages != 0 {
-            if let Err(message) =
-                crate::process::native_mem::set_budget(spawned.pid, generation, memory_pages)
-            {
+            // The record is keyed by the process's own instance generation, which syscall 23
+            // and teardown look up; the service generation above is a different counter.
+            let budget = crate::process::live_instance_generation(spawned.pid)
+                .ok_or("native memory budget: process has no instance generation")
+                .and_then(|process_generation| {
+                    crate::process::native_mem::set_budget(
+                        spawned.pid,
+                        process_generation,
+                        memory_pages,
+                    )
+                });
+            if let Err(message) = budget {
                 kernel_log_fmt(format_args!(
                     "[FAIL] service={} pid={} memory budget={memory_pages} refused\n",
                     service_id.0, spawned.pid

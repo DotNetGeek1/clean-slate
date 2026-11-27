@@ -397,14 +397,20 @@ const FIXTURE_NETWORK_FEATURES: &[&str] = &[
 /// - `production_network.rs`: `CLEAN_SLATE_NET_STATIC` as `PRODUCTION_NETWORK`, a static
 ///   configuration `local/prefix[,gw=a.b.c.d][,gw_mac=xx:..][,dns=a.b.c.d[:port]][,tls_name=n]`,
 ///   or `CLEAN_SLATE_NET_DHCP` as a DHCP configuration `on[,dns=a.b.c.d[:port]][,tls_name=n]`
-///   (a `dns` here is used instead of the leased resolver). Setting both is an error; neither
+///   (a `dns` here is used instead of the leased resolver). `dns=tcp:a.b.c.d[:port]` sends the
+///   queries over TCP. Setting both is an error; neither
 ///   is an unconfigured network.
 fn emit_network_launch_inputs() {
     println!("cargo::rustc-check-cfg=cfg(clean_slate_fixture_network)");
-    if any_feature_enabled(FIXTURE_NETWORK_FEATURES) {
+    // #355: the acceptance kernel runs the M7.8 lane (so it has fixture features) but must be
+    // launched like production, with no fixture network and no test CA.
+    if any_feature_enabled(FIXTURE_NETWORK_FEATURES)
+        && !any_feature_enabled(&[NET_ACCEPTANCE_FEATURE])
+    {
         println!("cargo::rustc-cfg=clean_slate_fixture_network");
     }
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    emit_acceptance_probe(&out_dir);
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
 
     println!("cargo::rerun-if-env-changed=CLEAN_SLATE_TRUST_ANCHORS_DIR");
@@ -454,6 +460,86 @@ fn emit_network_launch_inputs() {
     .expect("write production_network.rs");
 }
 
+/// The kernel feature of `cargo xtask test-net-acceptance` (#355).
+const NET_ACCEPTANCE_FEATURE: &str = "net-acceptance-self-test";
+
+const PLACEHOLDER_ACCEPTANCE_PROBE: &str =
+    "name=probe.invalid,ipv4=0.0.0.0,ttl=0,tls_port=443,silent=0.0.0.0:9,request=00,response=00";
+
+/// `acceptance_probe.rs`: what the acceptance kernel's client-mode probe resolves, fetches and
+/// expects, from `CLEAN_SLATE_NET_PROBE`
+/// (`name=n,ipv4=a.b.c.d,ttl=s,tls_port=p,silent=a.b.c.d:p,request=<hex>,response=<hex>`).
+/// Read only by the acceptance kernel.
+fn emit_acceptance_probe(out_dir: &Path) {
+    println!("cargo::rerun-if-env-changed=CLEAN_SLATE_NET_PROBE");
+    let code = if any_feature_enabled(&[NET_ACCEPTANCE_FEATURE]) {
+        // Clippy and the kernel host tests build this feature set without the lane; their probe
+        // names a reserved name (RFC 2606) that nothing answers.
+        let spec = env::var("CLEAN_SLATE_NET_PROBE")
+            .ok()
+            .filter(|spec| !spec.trim().is_empty())
+            .unwrap_or_else(|| PLACEHOLDER_ACCEPTANCE_PROBE.to_string());
+        acceptance_probe_code(spec.trim())
+            .unwrap_or_else(|err| panic!("CLEAN_SLATE_NET_PROBE={spec:?}: {err}"))
+    } else {
+        String::new()
+    };
+    std::fs::write(out_dir.join("acceptance_probe.rs"), code).expect("write acceptance_probe.rs");
+}
+
+fn parse_hex(text: &str) -> Result<Vec<u8>, String> {
+    if text.len() % 2 != 0 {
+        return Err(format!("odd-length hex {text:?}"));
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).map_err(|_| format!("bad hex {text:?}")))
+        .collect()
+}
+
+fn acceptance_probe_code(spec: &str) -> Result<String, String> {
+    let (mut name, mut ipv4, mut ttl, mut tls_port, mut silent) = (None, None, None, None, None);
+    let (mut request, mut response) = (None, None);
+    for field in spec.split(',').map(str::trim) {
+        let (key, value) = field
+            .split_once('=')
+            .ok_or(format!("bad field {field:?}"))?;
+        match key {
+            "name" => name = Some(value.to_string()),
+            "ipv4" => ipv4 = Some(parse_ipv4(value)?),
+            "ttl" => ttl = Some(value.parse::<u32>().map_err(|_| "bad ttl")?),
+            "tls_port" => tls_port = Some(value.parse::<u16>().map_err(|_| "bad tls_port")?),
+            "silent" => {
+                let (addr, port) = value.split_once(':').ok_or("silent needs a:b:c:d:port")?;
+                silent = Some((
+                    parse_ipv4(addr)?,
+                    port.parse::<u16>().map_err(|_| "bad silent port")?,
+                ));
+            }
+            "request" => request = Some(parse_hex(value)?),
+            "response" => response = Some(parse_hex(value)?),
+            other => return Err(format!("unknown field {other:?}")),
+        }
+    }
+    let missing = |what: &str| format!("missing {what}");
+    let name = name.ok_or_else(|| missing("name"))?;
+    let (silent_addr, silent_port) = silent.ok_or_else(|| missing("silent"))?;
+    Ok(format!(
+        "pub(super) const PROBE_NAME: &[u8] = {name:?}.as_bytes();\n\
+         pub(super) const PROBE_IPV4: [u8; 4] = {:?};\n\
+         pub(super) const PROBE_TTL: u32 = {};\n\
+         pub(super) const PROBE_TLS_PORT: u16 = {};\n\
+         pub(super) const PROBE_SILENT: ([u8; 4], u16) = ({silent_addr:?}, {silent_port});\n\
+         pub(super) const PROBE_REQUEST: &[u8] = &{:?};\n\
+         pub(super) const PROBE_RESPONSE: &[u8] = &{:?};\n",
+        ipv4.ok_or_else(|| missing("ipv4"))?,
+        ttl.ok_or_else(|| missing("ttl"))?,
+        tls_port.ok_or_else(|| missing("tls_port"))?,
+        request.ok_or_else(|| missing("request"))?,
+        response.ok_or_else(|| missing("response"))?,
+    ))
+}
+
 fn parse_ipv4(text: &str) -> Result<[u8; 4], String> {
     let octets: Vec<u8> = text
         .split('.')
@@ -467,8 +553,17 @@ fn parse_ipv4(text: &str) -> Result<[u8; 4], String> {
         .map_err(|_| format!("bad IPv4 address {text:?}"))
 }
 
-/// `dns=a.b.c.d[:port]` as `(address, port)`.
-fn parse_dns(value: &str) -> Result<([u8; 4], u16), String> {
+/// `dns=[tcp:]a.b.c.d[:port]` as `(address, port)`, and whether `tcp:` asked for DNS over
+/// TCP (#355).
+fn parse_dns(value: &str) -> Result<(([u8; 4], u16), bool), String> {
+    let (value, tcp) = match value.strip_prefix("tcp:") {
+        Some(rest) => (rest, true),
+        None => (value, false),
+    };
+    Ok((parse_dns_addr(value)?, tcp))
+}
+
+fn parse_dns_addr(value: &str) -> Result<([u8; 4], u16), String> {
     let (addr, port) = match value.split_once(':') {
         Some((addr, port)) => (addr, port.parse::<u16>().map_err(|_| "bad dns port")?),
         None => (value, 53),
@@ -480,6 +575,13 @@ fn dns_code(dns: Option<([u8; 4], u16)>) -> String {
     dns.map_or("None".to_string(), |(a, p)| {
         format!("Some(SocketAddrV4::new(Ipv4Addr::new({a:?}), {p}))")
     })
+}
+
+fn dns_tcp_suffix(dns: Option<(([u8; 4], u16), bool)>) -> &'static str {
+    match dns {
+        Some((_, true)) => ".with_dns_over_tcp()",
+        _ => "",
+    }
 }
 
 /// Rust for a `NetworkConfig::new_dhcp` call from `CLEAN_SLATE_NET_DHCP` (see
@@ -502,8 +604,9 @@ fn dhcp_network_code(spec: &str) -> Result<String, String> {
         }
     }
     Ok(format!(
-        "NetworkConfig::new_dhcp({}, {tls_name:?})",
-        dns_code(dns)
+        "NetworkConfig::new_dhcp({}, {tls_name:?}){}",
+        dns_code(dns.map(|(addr, _)| addr)),
+        dns_tcp_suffix(dns)
     ))
 }
 
@@ -544,9 +647,10 @@ fn static_network_code(spec: &str) -> Result<String, String> {
     });
     let gateway_mac =
         gateway_mac.map_or("None".to_string(), |m| format!("Some(MacAddr::new({m:?}))"));
-    let dns = dns_code(dns);
+    let tcp = dns_tcp_suffix(dns);
+    let dns = dns_code(dns.map(|(addr, _)| addr));
     Ok(format!(
-        "NetworkConfig::new_static(Ipv4Route {{ local: Ipv4Addr::new({local:?}), prefix_len: {prefix}, gateway: {gateway} }}, {gateway_mac}, {dns}, {tls_name:?})"
+        "NetworkConfig::new_static(Ipv4Route {{ local: Ipv4Addr::new({local:?}), prefix_len: {prefix}, gateway: {gateway} }}, {gateway_mac}, {dns}, {tls_name:?}){tcp}"
     ))
 }
 
@@ -864,7 +968,8 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 }
 
 /// Package and `-Z build-std` set for an embedded userspace bin.
-/// Storage and network are not the supervisor package, and they need `alloc`.
+/// Storage and network are not the supervisor package, and they need `alloc`, as do the
+/// desktop shell, playground and terminal, which run on the runtime heap (#356).
 fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
     match bin_name {
         "clean-slate-supervisor-userspace"
@@ -885,10 +990,14 @@ fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
         }
         "clean-slate-compositor-userspace" => ("clean-slate-compositor", "core,compiler_builtins"),
         "clean-slate-desktop-shell-userspace" => {
-            ("clean-slate-desktop-shell", "core,compiler_builtins")
+            ("clean-slate-desktop-shell", "core,alloc,compiler_builtins")
         }
-        "clean-slate-playground-userspace" => ("clean-slate-playground", "core,compiler_builtins"),
-        "clean-slate-terminal-userspace" => ("clean-slate-terminal", "core,compiler_builtins"),
+        "clean-slate-playground-userspace" => {
+            ("clean-slate-playground", "core,alloc,compiler_builtins")
+        }
+        "clean-slate-terminal-userspace" => {
+            ("clean-slate-terminal", "core,alloc,compiler_builtins")
+        }
         _ => panic!("unexpected userspace bin {bin_name}"),
     }
 }

@@ -45,6 +45,7 @@
       system-terminal / test-system-terminal
       system-tablet / test-system-tablet
       system-display / test-system-display
+      net-acceptance / test-net-acceptance
 
 .PARAMETER Exhaustive
     Run every known test (milestone gates plus each individual constituent
@@ -196,6 +197,7 @@ $AllTests = [ordered]@{
     "test-system-shell"         = @{ Aliases = @("system-shell"); Description = "#218 S5 default image to its serial-console shell over a private loopback socket: typed commands checked by output only execution produces, then exit and Ctrl-D each relaunch the shell one generation on"; Role = "Constituent" }
     "test-system"               = @{ Aliases = @("system"); Description = "#218 S7b system-test-hooks build (the default image plus COM1 fault hooks: Ctrl-\ network, Ctrl-] compositor, Ctrl-^ desktop shell, Ctrl-_ app), plus two short boots with fw_cfg opt/clean-slate/desktop=q1 (one with a VirtIO-GPU, where the compositor, desktop shell and app rows launch, hold exactly their grants and report ready with their bindings and a presented frame, then the compositor, desktop shell and app are each faulted over COM1 and must come back in dependency order, clients exiting compositor-gone, the old port generation refused as stale and resources matching the baseline after each, with no pointer or keyboard input; one with no display, which boots base), then the shell boot: a shell wget blocked in a TCP read wakes with ECONNRESET when the network service faults, init restarts network once, the shell's client capability is re-issued for generation 2 and nslookup and wget work again from the same shell, each wget's request received and answered by the fixture"; Role = "Constituent" }
     "test-system-desktop"       = @{ Aliases = @("system-desktop"); Description = "#218 S6e system-test-hooks build with fw_cfg opt/clean-slate/desktop=q1 on a VirtIO-GPU, COM1 and QMP: the seven-row boot, the serial shell, the M10 click/key/drag/close script driven closed-loop on the compositor's pointer and button lines, app close and fault, desktop shell fault and compositor fault each restarted by init with input working after, then whole-transcript counts and screendump checks (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-net-acceptance"       = @{ Aliases = @("net-acceptance"); Description = "#355 #221 acceptance: the M7.8 converged lane on QEMU slirp (restrict=on, DHCP) with a lane-generated CA as the only trust anchor; DNS over TCP and two HTTPS fetches through loopback guestfwd, no M7 test CA in the image, no network::fixture in the net service"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {
