@@ -21,8 +21,9 @@
 //!
 //! An allocation the program cannot do without (anything but a `try_reserve`) that the heap
 //! refuses ends in the program's `#[alloc_error_handler]`. Native apps call
-//! [`exit_out_of_memory`] there: one console line, then a normal exit, so the row's restart
-//! policy starts a fresh instance instead of the kernel tearing down a faulted one.
+//! [`exit_out_of_memory`] there: one console line saying why, then the exit gate
+//! ([`process::exit`]) rather than a null dereference, and the row's restart policy starts a
+//! fresh instance.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
