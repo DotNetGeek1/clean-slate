@@ -14,7 +14,7 @@ clean-slate-desktop-shell = { path = "../desktop-shell" }
 clean-slate-raster = { path = "../raster" }
 clean-slate-ui = { path = "../ui" }
 clean-slate-rootfs = { path = "../rootfs", features = ["std"] }
-clean-slate-network = { path = "../network" }
+clean-slate-network = { path = "../network", features = ["fixture"] }
 clean-slate-block = { path = "../block", features = ["alloc"] }
 clean-slate-store = { path = "../store" }
 clean-slate-native-abi = { path = "../native-abi" }

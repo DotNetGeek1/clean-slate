@@ -40,6 +40,7 @@ m5-block-self-test = []
 # #111: boot-context GOP framebuffer lane (kernel-internal present + aperture readback).
 m10-framebuffer-self-test = []
 m7-tls-self-test = [
+    "clean-slate-network/fixture",
     "clean-slate-network/tls",
     "clean-slate-network/m7-handshake-trace",
 ]
@@ -61,11 +62,16 @@ m6-revocation-self-test = ["m3-entry-self-test"]
 m6-audit-self-test = ["m3-entry-self-test"]
 m6-capabilities-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
 m6-fixture-smoke-self-test = ["m3-entry-self-test"]
-m7-net-service-self-test = ["m3-entry-self-test"]
+# The M7 lanes run against the hermetic fixture peer, so they compile `network::fixture`.
+m7-net-service-self-test = ["m3-entry-self-test", "clean-slate-network/fixture"]
 m7-network-self-test = ["m7-net-service-self-test"]
-m7-net-caps-self-test = ["m3-entry-self-test"]
-m7-dns-self-test = ["m3-entry-self-test"]
-m7-net-device-self-test = ["m3-entry-self-test"]
+# #355: the M7.8 converged lane on QEMU slirp (`cargo xtask test-net-acceptance`), with the
+# production launch inputs: a DHCP network, the lane's own CA as the only trust anchor, and the
+# probe from `CLEAN_SLATE_NET_PROBE`. Not a fixture-network kernel (see kernel/build.rs).
+net-acceptance-self-test = ["m7-network-self-test"]
+m7-net-caps-self-test = ["m3-entry-self-test", "clean-slate-network/fixture"]
+m7-dns-self-test = ["m3-entry-self-test", "clean-slate-network/fixture"]
+m7-net-device-self-test = ["m3-entry-self-test", "clean-slate-network/fixture"]
 # M10 #196: modern-only virtio-blk (and virtio-gpu) transport probe in boot context.
 m10-virtio-modern-self-test = ["m3-entry-self-test", "m10-timeout-introspection"]
 # M10 #114: VirtIO-GPU 2D scanout create/attach/transfer/flush/release probe in boot context.

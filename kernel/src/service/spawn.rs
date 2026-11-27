@@ -1759,7 +1759,7 @@ pub(crate) fn launch_network_aux_process(
         kernel_stack_top,
         scheduler_slot,
         bootstrap,
-        crate::service::net_launch::m7_fixture_probe(),
+        crate::service::net_launch::self_test_probe(),
     )
 }
 

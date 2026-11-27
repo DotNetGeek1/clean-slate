@@ -71,7 +71,7 @@ Every `NetworkRequest` / `NetworkResponse` is one fixed 64-byte frame so it fits
 
 ## Hermetic fixture
 
-Constants live in `network/src/fixture.rs`. Acceptance assumes a private `10.77.0.0/24` lab network, fixed DNS answers, echo/TLS ports, and repository-owned certificates under `xtask/fixtures/m7/`. No public Internet, public DNS, external PKI, or host LAN dependencies.
+Constants live in `network/src/fixture.rs`, which only the `fixture` feature of `clean-slate-network` compiles (with the fixture test peers `TestPeer` and `TlsTestPeer`): the M7 test kernels and xtask enable it, the network service does not, and `cargo xtask test-net-acceptance` checks the service's feature tree for it (#355). Acceptance assumes a private `10.77.0.0/24` lab network, fixed DNS answers, echo/TLS ports, and repository-owned certificates under `xtask/fixtures/m7/`. No public Internet, public DNS, external PKI, or host LAN dependencies.
 
 The network service image itself carries none of this (#221 stage D). The kernel writes a launch block beside the service's bootstrap (`NetworkServiceLaunch` at `NETWORK_SERVICE_LAUNCH_OFFSET` in the bootstrap page): a `NetworkConfig` (address, prefix, gateway, optional pinned gateway MAC, resolver, and the name the native TLS session verifies), and, for self-test client-mode probes, a `NetworkProbe` (what to resolve, connect to and expect). `kernel/src/service/net_launch.rs` picks them:
 
@@ -83,6 +83,19 @@ The trust store does not fit the bootstrap page, so the kernel packs it at build
 The service checks the block (`NetworkConfig::parse`, `TrustAnchors::set`) and stops before it is ready, with `aux_status` `NETWORK_SERVICE_AUX_BAD_LAUNCH`, when it does not check out. `L3Stack::with_route` routes off-prefix destinations through the gateway; the service pins the gateway's MAC only when the configuration names one, and otherwise resolves it with ARP.
 
 **DHCP.** A build can ask for a DHCP lease instead of a static address with `CLEAN_SLATE_NET_DHCP=on[,dns=a.b.c.d[:port]][,tls_name=name]` (refused together with `CLEAN_SLATE_NET_STATIC`; `cargo xtask` leaves the lab network out when it is set). The launch block then carries `CONFIG_FLAG_DHCP` and no address, prefix, gateway or gateway MAC. Before either stack exists the service runs `clean_slate_network::dhcp::DhcpClient` over the raw NIC (DISCOVER, OFFER, REQUEST, ACK from `0.0.0.0` to the broadcast address, retransmitting after 1, 2 and 4 s) and applies the lease with `ServiceNetwork::with_lease`, which checks it like a static configuration: leased address and prefix, the first router if it is on the leased prefix, and the first leased DNS server on port 53 unless the build named a `dns`. The lease has to arrive within 6 s (`DHCP_LAUNCH_BUDGET_MS`), because init stops a service that is not ready in 10 s; without one the service comes up unconfigured. Its ready line then ends `dhcp-lease=a.b.c.d` (`NetworkReadyDetail::leased`) when it got a lease. Not done yet: renewing the lease (T1/T2), releasing it, and ARP-probing the offered address.
+
+### DNS over TCP (#355)
+
+`dns=tcp:a.b.c.d[:port]` in `CLEAN_SLATE_NET_STATIC` or `CLEAN_SLATE_NET_DHCP` sets `CONFIG_FLAG_DNS_TCP` (`NetworkConfig::with_dns_over_tcp`; `ServiceNetwork::resolver_tcp`, kept by `with_lease`), and the service sends every query over TCP instead of UDP, with RFC 7766 framing (a two-byte length before each message). It is for networks that carry no UDP, such as QEMU's `-netdev user,restrict=on`. The resolver keeps its cache, query IDs and deadlines, but carries nothing itself (`DnsResolver::set_over_tcp`): `start_tcp_query` hands the service the oldest unsent query as a framed message, and `complete_tcp_query` takes the reply (or the connection's failure) back and parses it like a UDP reply. The service runs one exchange at a time on the shared TCP transport (`pump_dns_over_tcp` in `net-service/src/bin/userspace.rs`): a connection per query from the service's own owner, the query, the reply read up to its length (at most `DNS_TCP_MAX_MESSAGE` = 514 bytes), then a close. Nothing is resent over TCP; a reply that does not check out, a reset, or `DNS_TCP_QUERY_TIMEOUT_TICKS` (3 s, the handshake included) fails the query, and the connection is aborted once the query is no longer waiting (timed out, or its holder exited).
+
+### Acceptance lane on slirp (#355)
+
+`cargo xtask test-net-acceptance` (`xtask/src/net_acceptance.rs`) is #221's acceptance test: the M7.8 converged lane (`net-acceptance-self-test` = `m7-network-self-test` plus the production launch inputs) on QEMU's user network instead of the fixture peer.
+
+- **Network.** `-netdev user,restrict=on`: slirp leases `10.0.2.15` over DHCP and drops every other guest packet, UDP included, except two `guestfwd` rules for `10.0.2.100` port 53 and 443. Each forwarded connection runs `xtask net-acceptance-relay <port>`, which joins it to a server the lane runs on `127.0.0.1`: DNS over TCP (an A record for `net.acceptance.test`, NXDOMAIN otherwise) and HTTPS (TLS 1.3, `GET /` answered with a 41-byte HTTP/1.0 response).
+- **Kernel.** `kernel/build.rs` does not set `cfg(clean_slate_fixture_network)` for this feature, so the service gets `CLEAN_SLATE_NET_DHCP=on,dns=tcp:10.0.2.100:53,tls_name=net.acceptance.test` and the anchors in `CLEAN_SLATE_TRUST_ANCHORS_DIR`, which holds only the lane CA (a P-256 CA generated once into `target/net-acceptance`). The client-mode probe comes from `CLEAN_SLATE_NET_PROBE` (`name=,ipv4=,ttl=,tls_port=,silent=a.b.c.d:p,request=<hex>,response=<hex>`; builds without it, such as clippy, get a probe for `probe.invalid`).
+- **Wall clock.** The server certificate is issued at each run, valid from ten minutes before to one day after, so the guest's chain check passes only with a wall clock near the host's.
+- **Checks.** The M7.8 markers ending in `[NET ] acceptance PASS`; exactly one DNS query and two HTTPS fetches served; the kernel image contains the lane CA's DER and not `xtask/fixtures/m7/ca.crt`; and `cargo tree -p clean-slate-net-service --features userspace -e features` shows no `clean-slate-network feature "fixture"`.
 
 ## M7.7 network capabilities & attribution
 
@@ -166,7 +179,7 @@ Bootstrap grants use `grant_network_authority(holder, rights, NetworkGrantPolicy
 - VLAN tags and jumbo frames
 - Multiple NICs and routing policy
 - Linux socket ABI (M9)
-- DNS-over-TCP and DNSSEC
+- DNS-over-TCP fallback for truncated UDP replies, and DNSSEC (DNS over TCP itself is a launch option, see [DNS over TCP](#dns-over-tcp-355))
 - Arbitrary certificate stores / Web PKI
 
 ## M7.3 network service
