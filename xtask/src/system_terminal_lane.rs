@@ -1,5 +1,5 @@
 //! `cargo xtask test-system-terminal` (#311): the terminal window on the system image's desktop,
-//! driven over QMP and COM1 on the hooks build, with `opt/clean-slate/desktop=q1-terminal` on a
+//! driven over QMP and COM1 on the hooks build, with `opt/clean-slate/desktop=q1` (the default desktop) on a
 //! modern-only VirtIO-GPU.
 //!
 //! 1. **Boot**: init settles with its ten rows, the terminal's shell holds a console session
