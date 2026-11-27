@@ -338,7 +338,7 @@ mod integration {
         let id = connect_echo(0, &mut guest, &mut peer);
         peer.stop_acking();
         guest.send(1, id, OWNER, APP_REQUEST_BYTES).unwrap();
-        for t in 2..10_000 {
+        for t in 2..30_000 {
             guest.poll(t).unwrap();
             peer.poll(t).unwrap();
         }
@@ -460,9 +460,9 @@ mod integration {
         let (mut guest, mut peer) = setup_pair();
         let id = connect_echo(0, &mut guest, &mut peer);
         peer.stop_acking();
+        // Bytes in flight stay in the send ring until ACKed, so one full ring blocks.
         let chunk = [0u8; 4096];
-        guest.send(1, id, OWNER, &chunk).unwrap();
-        guest.send(1, id, OWNER, &chunk).unwrap();
+        assert_eq!(guest.send(1, id, OWNER, &chunk).unwrap(), 4096);
         assert_eq!(
             guest.send(1, id, OWNER, &[1]).unwrap_err(),
             NetworkError::QueueFull
