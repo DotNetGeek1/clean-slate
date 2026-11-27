@@ -653,6 +653,7 @@ fn widgets_paint_only_inside_their_bounds() {
                     label: "Settings and more",
                     selected: true,
                     running: true,
+                    minimized: true,
                 }
                 .paint(c, style, b, state)
             });
@@ -910,12 +911,19 @@ fn golden_cases() -> Vec<Case> {
             Text::caption("Caption").paint(c, q0(), rect(120, 94, 120, 22));
         }),
     ));
-    for (name, state, selected, running) in [
-        ("rail.item.rest", WidgetState::REST, false, false),
-        ("rail.item.hover", WidgetState::HOVERED, false, false),
-        ("rail.item.selected", WidgetState::REST, true, false),
-        ("rail.item.focused", WidgetState::FOCUSED, false, false),
-        ("rail.item.running", WidgetState::REST, false, true),
+    for (name, state, selected, running, minimized) in [
+        ("rail.item.rest", WidgetState::REST, false, false, false),
+        ("rail.item.hover", WidgetState::HOVERED, false, false, false),
+        ("rail.item.selected", WidgetState::REST, true, false, false),
+        (
+            "rail.item.focused",
+            WidgetState::FOCUSED,
+            false,
+            false,
+            false,
+        ),
+        ("rail.item.running", WidgetState::REST, false, true, false),
+        ("rail.item.minimized", WidgetState::REST, false, true, true),
     ] {
         cases.push((
             name,
@@ -928,6 +936,7 @@ fn golden_cases() -> Vec<Case> {
                     label: "Home",
                     selected,
                     running,
+                    minimized,
                 }
                 .paint(c, q0(), b(88, 60), state)
             }),
@@ -1046,9 +1055,10 @@ const GOLDENS: &[(&str, u32)] = &[
     ("rail.item.selected", 0x4DD636C3),
     ("rail.item.focused", 0x2F4A8B31),
     ("rail.item.running", 0x82B8EB47),
-    ("chrome.focused.q0", 0xAFFBC855),
-    ("chrome.inactive.q0", 0x5894DF96),
-    ("chrome.focused.q1", 0x1917F6FF),
+    ("rail.item.minimized", 0x600CD946),
+    ("chrome.focused.q0", 0xCF0DF736),
+    ("chrome.inactive.q0", 0xA8677FF0),
+    ("chrome.focused.q1", 0x79E1C99C),
     ("cursor.arrow", 0xE40C4E42),
     ("icons", 0x1B10B562),
     ("search.field", 0xAD241DA3),

@@ -23,9 +23,17 @@ pub struct Rows {
     pub windows: usize,
 }
 
+/// A mapped window as last reported: where it is and whether it is minimised (#357).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Reported {
+    key: SurfaceKey,
+    origin: Point,
+    minimized: bool,
+}
+
 /// Remembers what was last reported.
 pub struct DiagTracker {
-    windows: [Option<(SurfaceKey, Point)>; MAX_WINDOWS],
+    windows: [Option<Reported>; MAX_WINDOWS],
     focus: Option<SurfaceKey>,
     rows: Option<Rows>,
     output_changes: u64,
@@ -60,7 +68,8 @@ pub fn exit_line(reason: &str) -> ConsoleLine {
 
 /// A line that reports one pointer or focus change. Printed on serial only when the launch
 /// page has [`clean_slate_native_abi::desktop::LAUNCH_FLAG_INPUT_TRACE`]. Lifecycle lines
-/// (`started`, `exit`, `[WIN ] created` / `closed`, `[COMP] rows`) are not in this set.
+/// (`started`, `exit`, `[WIN ] created` / `closed` / `minimized` / `restored`, `[COMP] rows`)
+/// are not in this set.
 pub fn is_per_input_line(line: &str) -> bool {
     [
         "[WIN ] moved",
@@ -153,7 +162,7 @@ impl DiagTracker {
         };
 
         for slot in &mut self.windows {
-            let Some((key, _)) = *slot else {
+            let Some(Reported { key, .. }) = *slot else {
                 continue;
             };
             if !wm.mapped.iter().flatten().any(|k| *k == key) {
@@ -168,18 +177,33 @@ impl DiagTracker {
             let Some(origin) = toplevel_origin(key) else {
                 continue;
             };
-            match self.windows.iter_mut().flatten().find(|(k, _)| *k == key) {
-                Some((_, last)) if *last != origin => {
-                    *last = origin;
-                    emit(ConsoleLine::format(format_args!(
-                        "[WIN ] moved x={} y={}",
-                        origin.x, origin.y
-                    )));
+            let minimized = compositor.is_minimized(key);
+            match self.windows.iter_mut().flatten().find(|r| r.key == key) {
+                Some(last) => {
+                    if last.origin != origin {
+                        last.origin = origin;
+                        emit(ConsoleLine::format(format_args!(
+                            "[WIN ] moved x={} y={}",
+                            origin.x, origin.y
+                        )));
+                    }
+                    if last.minimized != minimized {
+                        last.minimized = minimized;
+                        emit(ConsoleLine::format(format_args!(
+                            "[WIN ] {} x={} y={}",
+                            if minimized { "minimized" } else { "restored" },
+                            origin.x,
+                            origin.y
+                        )));
+                    }
                 }
-                Some(_) => {}
                 None => {
                     if let Some(slot) = self.windows.iter_mut().find(|s| s.is_none()) {
-                        *slot = Some((key, origin));
+                        *slot = Some(Reported {
+                            key,
+                            origin,
+                            minimized,
+                        });
                     }
                     let count = wm.mapped.iter().flatten().count();
                     emit(ConsoleLine::format(format_args!(
@@ -230,6 +254,8 @@ mod tests {
             "[COMP] exit reason=service-error",
             "[WIN ] created x=1 y=2 windows=1",
             "[WIN ] closed windows=0",
+            "[WIN ] minimized x=1 y=2",
+            "[WIN ] restored x=1 y=2",
             "[COMP] rows clients=1 surfaces=2 windows=1",
             "[COMP] output changed output=1024x768",
         ];

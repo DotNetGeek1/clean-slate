@@ -6,6 +6,7 @@ use crate::process::linux_fs::home_backend::{self as home, Flow};
 use crate::process::linux_fs::object_backend::{object_read_sync, object_write_sync, ObjectIo};
 use crate::process::linux_fs::table_mut;
 use crate::process::linux_rootfs;
+use crate::service::net_resolver::ResolvConf;
 use crate::syscall::linux::table::LinuxSyscallContext;
 use crate::syscall::linux::user_copy::{copy_user_bytes, LINUX_USER_COPY_MAX_BYTES};
 use clean_slate_linux_abi::{
@@ -41,7 +42,12 @@ pub(crate) fn read_file_fd(
     let table = table_mut();
     table.check_node(file.node)?;
     let img = image();
-    if let Ok(data) = table.rootfs_entry_data(file.node, &img) {
+    let resolv_conf = table.is_resolv_conf(file.node)?.then(ResolvConf::now);
+    let rootfs_data = match &resolv_conf {
+        Some(conf) => Ok(conf.as_bytes()),
+        None => table.rootfs_entry_data(file.node, &img),
+    };
+    if let Ok(data) = rootfs_data {
         let start = desc.offset as usize;
         if start >= data.len() {
             return Ok(0);
@@ -116,7 +122,7 @@ pub(crate) fn write_file_fd(
     };
     let table = table_mut();
     table.check_node(file.node)?;
-    if table.rootfs_entry_data(file.node, &image()).is_ok() {
+    if table.rootfs_entry_data(file.node, &image()).is_ok() || table.is_resolv_conf(file.node)? {
         return Err(EBADF);
     }
     let object_id = table.object_id_for_node(file.node)?;
@@ -160,7 +166,7 @@ pub(crate) fn write_file_fd_user(
     };
     let table = table_mut();
     table.check_node(file.node)?;
-    if table.rootfs_entry_data(file.node, &image()).is_ok() {
+    if table.rootfs_entry_data(file.node, &image()).is_ok() || table.is_resolv_conf(file.node)? {
         return Err(EBADF);
     }
     if let Ok(slot) = table.home_slot_for_node(file.node) {
@@ -219,7 +225,9 @@ pub(crate) fn lseek_file_fd(
     let img = image();
     let table = table_mut();
     table.check_node(file.node)?;
-    let size = if let Ok(data) = table.rootfs_entry_data(file.node, &img) {
+    let size = if table.is_resolv_conf(file.node)? {
+        ResolvConf::now().as_bytes().len() as i64
+    } else if let Ok(data) = table.rootfs_entry_data(file.node, &img) {
         data.len() as i64
     } else if let Ok(slot) = table.home_slot_for_node(file.node) {
         home::file_len(slot) as i64

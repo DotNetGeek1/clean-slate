@@ -39,8 +39,11 @@ pub(crate) const DOCK_BAND_ROWS: u32 = 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Scene {
     pub(crate) tier: QualityTier,
-    /// Content origin of the one app window, if mapped.
+    /// Content origin of the one app window, if shown.
     pub(crate) window: Option<Point>,
+    /// The app's one window is minimised (#357): not drawn (`window` is `None`) and marked on
+    /// the rail, which then selects nothing.
+    pub(crate) minimized: bool,
     /// Pointer hotspot (the software cursor is drawn there).
     pub(crate) pointer: Point,
     /// The output size: [`OUTPUT`] except in the display-mode lane (#314).
@@ -71,9 +74,10 @@ pub(crate) fn window_origin_at(tier: QualityTier, output: Size, step: u32) -> Po
 }
 
 /// The desktop lanes' manifest names one launchable row, the playground, running at boot
-/// (#237). The rail shows it running, and selected while its window has focus. Built with the
-/// shell's own model from what init and the compositor tell it.
-fn desktop_rail(window_focused: bool) -> RailApps {
+/// (#237). The rail shows it running, selected while its window has focus, and marked while
+/// its window is minimised (#357). Built with the shell's own model from what init and the
+/// compositor tell it.
+fn desktop_rail(window_focused: bool, minimized: bool) -> RailApps {
     const PID: u64 = 1;
     let mut apps = Apps::new();
     apps.on_launcher(&LauncherEvent::Entry(AppEntry {
@@ -83,11 +87,19 @@ fn desktop_rail(window_focused: bool) -> RailApps {
         pid: PID,
         name: AppName::new(b"playground").expect("name"),
     }));
-    if window_focused {
-        let window = WindowHandle(1);
+    let window = WindowHandle(1);
+    if window_focused || minimized {
         apps.on_window(&Event::WindowAdded { window, pid: PID });
+    }
+    if window_focused {
         apps.on_window(&Event::WindowFocused {
             window: Some(window),
+        });
+    }
+    if minimized {
+        apps.on_window(&Event::WindowMinimized {
+            window,
+            minimized: true,
         });
     }
     apps.rail()
@@ -198,7 +210,7 @@ pub(crate) fn render(scene: &Scene, layers: Layers) -> Render {
     // selected whenever there is a window; `focused` varies only the chrome, which is what the
     // focus check compares.
     if matches!(layers, Layers::Desktop { .. }) {
-        shell.set_apps(desktop_rail(scene.window.is_some()));
+        shell.set_apps(desktop_rail(scene.window.is_some(), scene.minimized));
     }
     let layout = output_layout(scene.output);
     let mut bytes = vec![0u8; layout.byte_len()];
@@ -381,6 +393,21 @@ pub(crate) fn check_scene(shot: &Screenshot, scene: &Scene) -> Result<(), String
     if !rail_diff.within(RAIL_BUDGET) {
         return Err(rail_diff.describe("left rail"));
     }
+    // The app's rail item exactly, unless the pointer is on the rail (the host render has no
+    // hover): its markers are a few pixels, well inside the rail's budget (#357).
+    if let Some(item) = shell_at(scene.tier, output).rail_layout().item(0) {
+        if !rail.contains(scene.pointer) {
+            let item_diff = diff(shot, &focused, item, &[cursor]);
+            if item_diff.mismatched != 0 {
+                let what = if scene.minimized {
+                    "the app's rail item (minimised-window marker expected)"
+                } else {
+                    "the app's rail item"
+                };
+                return Err(item_diff.describe(what));
+            }
+        }
+    }
     if differing_per_million(shot, &background, rail, &[cursor]) < 900_000 {
         return Err("left rail is not visible: its pixels match the bare wallpaper".into());
     }
@@ -504,6 +531,7 @@ mod tests {
         Scene {
             tier,
             window: Some(window_origin(tier, 0)),
+            minimized: false,
             pointer: Point { x: 1279, y: 799 },
             output: OUTPUT,
         }
@@ -536,6 +564,37 @@ mod tests {
                 ..scene
             };
             assert_eq!(check_scene(&passing_shot(&bare), &bare), Ok(()), "{tier:?}");
+            let minimized = Scene {
+                minimized: true,
+                ..bare
+            };
+            assert_eq!(
+                check_scene(&passing_shot(&minimized), &minimized),
+                Ok(()),
+                "{tier:?}"
+            );
+        }
+    }
+
+    /// #357: the rail marker is a handful of pixels, so the rail's budget alone would pass a
+    /// capture without it (or with it left over after a restore); the app's item is exact.
+    #[test]
+    fn the_minimised_marker_must_be_there_and_only_then() {
+        for tier in [QualityTier::Q0, QualityTier::Q1] {
+            let bare = Scene {
+                window: None,
+                ..scene(tier)
+            };
+            let minimized = Scene {
+                minimized: true,
+                ..bare
+            };
+            let err = check_scene(&passing_shot(&bare), &minimized).unwrap_err();
+            assert!(err.contains("minimised-window marker"), "{tier:?}: {err}");
+            let err = check_scene(&passing_shot(&minimized), &bare).unwrap_err();
+            assert!(err.contains("rail item"), "{tier:?}: {err}");
+            let focused = scene(tier);
+            assert!(check_scene(&passing_shot(&minimized), &focused).is_err());
         }
     }
 

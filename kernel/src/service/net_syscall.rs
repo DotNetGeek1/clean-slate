@@ -7,6 +7,7 @@ use clean_slate_capability::{
     AuditEvent, AuditKind, CapabilityState, HolderId, NetDestination, PolicyRefusal, ResourceClass,
     ResourceRef, Rights,
 };
+use clean_slate_network::addr::{Ipv4Addr, SocketAddrV4};
 use clean_slate_network::error::DenialReason;
 use clean_slate_network::protocol::{
     NetworkRequest, NetworkResponse, NETWORK_REQUEST_BYTES, NETWORK_RESPONSE_BYTES,
@@ -17,9 +18,10 @@ use clean_slate_service_fixtures::{
     NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_NEXT_METADATA_BYTES,
     NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT,
     NET_SUBOP_AUDIT_REFUSAL, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT,
-    NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT,
-    NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS,
-    NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_MASK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
+    NET_SUBOP_PUBLISH_RESOLVER, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
+    NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
+    NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_MASK, NET_WAIT_WORK_REQUESTS,
+    NET_WAIT_WORK_RX,
 };
 
 use crate::arch::x86_64::cpu::without_interrupts;
@@ -148,7 +150,7 @@ fn session_generation_for_request(request: &NetworkRequest) -> Option<SessionGen
     }
 }
 
-fn live_network_service_pid() -> Option<u64> {
+pub(crate) fn live_network_service_pid() -> Option<u64> {
     unsafe { service_lifecycle_controller_mut().live_pid(NETWORK_SERVICE_ID) }
 }
 
@@ -202,6 +204,7 @@ pub(crate) fn handle_syscall_network_request(frame: &mut SyscallContext) {
         NET_SUBOP_POP_HOLDER_EXIT => handle_pop_holder_exit(frame),
         NET_SUBOP_ACK_HOLDER_EXIT => handle_ack_holder_exit(frame),
         NET_SUBOP_AUDIT_REFUSAL => handle_audit_refusal(frame),
+        NET_SUBOP_PUBLISH_RESOLVER => handle_publish_resolver(frame),
         NET_SUBOP_MONOTONIC_TICKS => handle_monotonic_ticks(frame),
         NET_SUBOP_TICK_PERIOD_NS => handle_tick_period_ns(frame),
         NET_SUBOP_WAIT_WORK => handle_wait_work(frame),
@@ -696,6 +699,38 @@ fn handle_audit_refusal(frame: &mut SyscallContext) {
         )
         .refused(PolicyRefusal::DestinationDenied),
     );
+    frame.rax = 0;
+}
+
+/// `NET_SUBOP_PUBLISH_RESOLVER` (#354): the live service names the resolver it uses, for
+/// `/etc/resolv.conf`. Kept only while this instance is live.
+fn handle_publish_resolver(frame: &mut SyscallContext) {
+    let holder = match current_holder() {
+        Ok(holder) => holder,
+        Err(status) => {
+            frame.rax = status;
+            return;
+        }
+    };
+    if live_network_service_pid() != Some(holder.0) {
+        frame.rax = SYSCALL_EACCES;
+        return;
+    }
+    if let Err(reason) = authorize_network_op(holder, frame.rsi, NetworkOp::RawDevice, None) {
+        frame.rax = denial_status(reason);
+        return;
+    }
+    let resolver = match (frame.rdx, u32::try_from(frame.r10), u16::try_from(frame.r8)) {
+        (0, Ok(0), Ok(0)) => None,
+        (1, Ok(addr), Ok(port)) if addr != 0 && port != 0 => {
+            Some(SocketAddrV4::new(Ipv4Addr::new(addr.to_be_bytes()), port))
+        }
+        _ => {
+            frame.rax = SYSCALL_EINVAL;
+            return;
+        }
+    };
+    crate::service::net_resolver::publish(holder.0, resolver);
     frame.rax = 0;
 }
 

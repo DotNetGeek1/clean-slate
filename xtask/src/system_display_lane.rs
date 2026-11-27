@@ -353,6 +353,7 @@ impl Lane {
             Scene {
                 tier: self.run.machine.tier,
                 window: Some(window),
+                minimized: false,
                 pointer,
                 output: state.output,
             },
@@ -539,6 +540,7 @@ mod tests {
             let scene = Scene {
                 tier: run.machine.tier,
                 window: state.window,
+                minimized: false,
                 pointer: Point {
                     x: output.width as i32 - 1,
                     y: output.height as i32 - 1,

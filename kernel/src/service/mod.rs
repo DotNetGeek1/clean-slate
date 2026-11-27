@@ -31,6 +31,7 @@ pub(crate) mod net_bridge;
 )))]
 pub(crate) mod net_launch;
 pub(crate) mod net_request_wake;
+pub(crate) mod net_resolver;
 pub(crate) mod net_syscall;
 pub(crate) mod port;
 pub(crate) mod port_syscall;
