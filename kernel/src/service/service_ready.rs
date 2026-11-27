@@ -68,11 +68,17 @@ fn log_ready(instance: ServiceInstanceId, block_write_requests: u64, detail: u64
         ));
     } else if instance.service == NETWORK_SERVICE_ID {
         let claim = NetworkReadyDetail::decode(detail);
-        kernel_log_fmt(format_args!(
-            "[SVC ] ready service={service} pid={pid} gen={generation} source=live-instance kernel-observed raw-backend={} service-reported link-up={}\n",
-            crate::service::net_bridge::net_bridge_mut().raw_backend_name(),
-            u8::from(claim.link_up)
-        ));
+        let raw_backend = crate::service::net_bridge::net_bridge_mut().raw_backend_name();
+        match claim.leased {
+            None => kernel_log_fmt(format_args!(
+                "[SVC ] ready service={service} pid={pid} gen={generation} source=live-instance kernel-observed raw-backend={raw_backend} service-reported link-up={}\n",
+                u8::from(claim.link_up)
+            )),
+            Some([a, b, c, d]) => kernel_log_fmt(format_args!(
+                "[SVC ] ready service={service} pid={pid} gen={generation} source=live-instance kernel-observed raw-backend={raw_backend} service-reported link-up={} dhcp-lease={a}.{b}.{c}.{d}\n",
+                u8::from(claim.link_up)
+            )),
+        }
     } else if instance.service == AUDIT_SERVICE_ID {
         // The audit service reports ready after its first drain, so the log must already
         // show a reader past sequence 0.

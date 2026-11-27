@@ -1335,7 +1335,8 @@ const M10_MILESTONE_STEPS: [M9MilestoneStep; 17] = [
 ];
 
 /// The network every image xtask builds is launched with, unless `CLEAN_SLATE_NET_STATIC` is
-/// already set (set it empty for an unconfigured network). The QEMU lanes and `cargo xtask run
+/// already set (set it empty for an unconfigured network) or `CLEAN_SLATE_NET_DHCP` asks for
+/// a DHCP lease instead. The QEMU lanes and `cargo xtask run
 /// --net` put the guest on the hermetic M7 lab network (`network::fixture`), so the default
 /// image's network service gets that network at launch (#221 stage D). This is an address, not
 /// trust: only the M7 test kernels trust the test CA.
@@ -1343,7 +1344,9 @@ const XTASK_LAB_NETWORK: &str =
     "10.77.0.2/24,gw=10.77.0.1,gw_mac=52:54:00:ab:cd:ef,dns=10.77.0.1:53,tls_name=m7.fixture.test";
 
 fn main() -> ExitCode {
-    if env::var_os("CLEAN_SLATE_NET_STATIC").is_none() {
+    if env::var_os("CLEAN_SLATE_NET_STATIC").is_none()
+        && env::var_os("CLEAN_SLATE_NET_DHCP").is_none()
+    {
         env::set_var("CLEAN_SLATE_NET_STATIC", XTASK_LAB_NETWORK);
     }
     match run(env::args_os()) {

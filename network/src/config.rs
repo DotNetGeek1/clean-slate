@@ -104,8 +104,14 @@ pub struct NetworkConfig {
     /// The name the native TLS session verifies the server certificate against, until the
     /// connect request carries one per connection.
     pub tls_peer_name: [u8; MAX_REQUEST_HOSTNAME_LEN],
-    pub _reserved: [u8; 7],
+    /// [`CONFIG_FLAG_DHCP`]; other bits are reserved (zero).
+    pub flags: u8,
+    pub _reserved: [u8; 6],
 }
+
+/// [`NetworkConfig::flags`]: lease the address, prefix, gateway and (unless the config names
+/// one) the resolver with DHCP ([`crate::dhcp`]) instead of configuring them statically.
+pub const CONFIG_FLAG_DHCP: u8 = 1 << 0;
 
 // No padding: the struct crosses the user/kernel boundary as bytes.
 const _: () = assert!(core::mem::size_of::<NetworkConfig>() == 88);
@@ -126,6 +132,8 @@ pub enum ConfigError {
     BadTlsPeerName,
     /// A static MAC that is multicast or broadcast.
     BadGatewayMac,
+    /// A DHCP configuration that also names a static address, prefix, gateway or gateway MAC.
+    DhcpWithStaticAddress,
     /// The anchor count or lengths do not fit the store.
     BadTrustAnchors,
     /// Reserved bytes are not zero.
@@ -141,6 +149,9 @@ pub struct ServiceNetwork {
     pub gateway_mac: Option<MacAddr>,
     pub resolver: Option<SocketAddrV4>,
     pub tls_peer_name: Option<BoundedHostname>,
+    /// The route is still to be leased with DHCP: until [`Self::with_lease`] it is
+    /// unconfigured.
+    pub dhcp: bool,
 }
 
 impl ServiceNetwork {
@@ -150,7 +161,27 @@ impl ServiceNetwork {
         gateway_mac: None,
         resolver: None,
         tls_peer_name: None,
+        dhcp: false,
     };
+
+    /// This DHCP network with `lease` applied: the leased route, and the leased resolver
+    /// (port 53) unless the configuration named one. The result is checked like a static
+    /// configuration, so a lease that would not pass as one is refused.
+    pub fn with_lease(&self, lease: &crate::dhcp::DhcpLease) -> Result<Self, ConfigError> {
+        let resolver = self
+            .resolver
+            .or_else(|| lease.dns.map(|dns| SocketAddrV4::new(dns, 53)));
+        let name = match &self.tls_peer_name {
+            Some(name) => name.as_str().map_err(|_| ConfigError::BadTlsPeerName)?,
+            None => "",
+        };
+        let route = Ipv4Route {
+            local: lease.address,
+            prefix_len: lease.prefix_len,
+            gateway: lease.router,
+        };
+        NetworkConfig::new_static(route, None, resolver, name).parse()
+    }
 
     /// The MAC to pin for `dst`'s next hop, when the configuration names one: the gateway's
     /// MAC for a routed destination, or for an on-link peer on a network without a gateway.
@@ -177,8 +208,17 @@ impl NetworkConfig {
         prefix_len: 0,
         tls_peer_name_len: 0,
         tls_peer_name: [0; MAX_REQUEST_HOSTNAME_LEN],
-        _reserved: [0; 7],
+        flags: 0,
+        _reserved: [0; 6],
     };
+
+    /// A DHCP configuration: the route is leased at launch. `resolver`, when given, is used
+    /// instead of the leased one. `tls_peer_name` as in [`Self::new_static`].
+    pub const fn new_dhcp(resolver: Option<SocketAddrV4>, tls_peer_name: &str) -> Self {
+        let mut config = Self::new_static(Ipv4Route::UNCONFIGURED, None, resolver, tls_peer_name);
+        config.flags = CONFIG_FLAG_DHCP;
+        config
+    }
 
     /// A static configuration. `tls_peer_name` longer than
     /// [`MAX_REQUEST_HOSTNAME_LEN`] is truncated, which [`Self::parse`] then refuses only if
@@ -215,7 +255,7 @@ impl NetworkConfig {
 
     /// Checks the configuration. An unconfigured one gives [`ServiceNetwork::UNCONFIGURED`].
     pub fn parse(&self) -> Result<ServiceNetwork, ConfigError> {
-        if self._reserved != [0; 7] {
+        if self._reserved != [0; 6] || self.flags & !CONFIG_FLAG_DHCP != 0 {
             return Err(ConfigError::Reserved);
         }
         if self.version == 0 && *self == Self::UNCONFIGURED {
@@ -223,6 +263,9 @@ impl NetworkConfig {
         }
         if self.version != NETWORK_CONFIG_VERSION {
             return Err(ConfigError::UnsupportedVersion);
+        }
+        if self.flags & CONFIG_FLAG_DHCP != 0 {
+            return self.parse_dhcp();
         }
         if self.prefix_len == 0 || self.prefix_len > 32 {
             return Err(ConfigError::BadPrefix);
@@ -262,9 +305,53 @@ impl NetworkConfig {
                 Some(SocketAddrV4::new(addr, port))
             }
         };
-        let tls_peer_name = match self.tls_peer_name_len {
-            0 if self.tls_peer_name == [0; MAX_REQUEST_HOSTNAME_LEN] => None,
-            0 => return Err(ConfigError::BadTlsPeerName),
+        let tls_peer_name = self.parse_tls_peer_name()?;
+        Ok(ServiceNetwork {
+            route: Ipv4Route {
+                gateway,
+                ..route_on_link
+            },
+            gateway_mac,
+            resolver,
+            tls_peer_name,
+            dhcp: false,
+        })
+    }
+}
+
+impl NetworkConfig {
+    fn parse_dhcp(&self) -> Result<ServiceNetwork, ConfigError> {
+        if self.local_ipv4 != [0; 4]
+            || self.gateway_ipv4 != [0; 4]
+            || self.gateway_mac != [0; 6]
+            || self.prefix_len != 0
+        {
+            return Err(ConfigError::DhcpWithStaticAddress);
+        }
+        let resolver = match (self.dns_ipv4, self.dns_port) {
+            ([0, 0, 0, 0], 0) => None,
+            ([0, 0, 0, 0], _) | (_, 0) => return Err(ConfigError::BadResolver),
+            (raw, port) => {
+                let addr = Ipv4Addr::new(raw);
+                if !unicast(addr) {
+                    return Err(ConfigError::BadResolver);
+                }
+                Some(SocketAddrV4::new(addr, port))
+            }
+        };
+        Ok(ServiceNetwork {
+            route: Ipv4Route::UNCONFIGURED,
+            gateway_mac: None,
+            resolver,
+            tls_peer_name: self.parse_tls_peer_name()?,
+            dhcp: true,
+        })
+    }
+
+    fn parse_tls_peer_name(&self) -> Result<Option<BoundedHostname>, ConfigError> {
+        match self.tls_peer_name_len {
+            0 if self.tls_peer_name == [0; MAX_REQUEST_HOSTNAME_LEN] => Ok(None),
+            0 => Err(ConfigError::BadTlsPeerName),
             len => {
                 let len = usize::from(len);
                 if len > MAX_REQUEST_HOSTNAME_LEN
@@ -277,18 +364,11 @@ impl NetworkConfig {
                     return Err(ConfigError::BadTlsPeerName);
                 }
                 let name = core::str::from_utf8(name).map_err(|_| ConfigError::BadTlsPeerName)?;
-                Some(BoundedHostname::try_from_str(name).map_err(|_| ConfigError::BadTlsPeerName)?)
+                Ok(Some(
+                    BoundedHostname::try_from_str(name).map_err(|_| ConfigError::BadTlsPeerName)?,
+                ))
             }
-        };
-        Ok(ServiceNetwork {
-            route: Ipv4Route {
-                gateway,
-                ..route_on_link
-            },
-            gateway_mac,
-            resolver,
-            tls_peer_name,
-        })
+        }
     }
 }
 
@@ -562,6 +642,60 @@ mod tests {
         bad_name.tls_peer_name_len = 3;
         bad_name.tls_peer_name[..3].copy_from_slice(b"a b");
         assert_eq!(bad_name.parse(), Err(ConfigError::BadTlsPeerName));
+    }
+
+    #[test]
+    fn dhcp_config_takes_its_route_from_the_lease() {
+        let config = NetworkConfig::new_dhcp(None, "example.test");
+        let network = config.parse().unwrap();
+        assert!(network.dhcp);
+        assert_eq!(network.route, Ipv4Route::UNCONFIGURED);
+        let lease = crate::dhcp::DhcpLease {
+            address: LOCAL,
+            prefix_len: 24,
+            router: Some(GATEWAY),
+            dns: Some(DNS.addr),
+            server: GATEWAY,
+            lease_secs: 3_600,
+        };
+        let leased = network.with_lease(&lease).unwrap();
+        assert!(!leased.dhcp);
+        assert_eq!(leased.route, route());
+        assert_eq!(leased.resolver, Some(DNS));
+        assert_eq!(leased.gateway_mac, None);
+        assert_eq!(
+            leased.tls_peer_name.unwrap().as_str().unwrap(),
+            "example.test"
+        );
+        // A configured resolver wins over the leased one.
+        let own = SocketAddrV4::new(Ipv4Addr::new([192, 0, 2, 53]), 5353);
+        let pinned = NetworkConfig::new_dhcp(Some(own), "").parse().unwrap();
+        assert_eq!(pinned.with_lease(&lease).unwrap().resolver, Some(own));
+        // A lease that would not pass as a static configuration is refused.
+        let broadcast = crate::dhcp::DhcpLease {
+            address: Ipv4Addr::new([10, 0, 2, 255]),
+            ..lease
+        };
+        assert_eq!(
+            network.with_lease(&broadcast),
+            Err(ConfigError::BadLocalAddress)
+        );
+    }
+
+    #[test]
+    fn dhcp_config_refuses_static_fields_and_unknown_flags() {
+        let mut with_address = NetworkConfig::new_dhcp(None, "");
+        with_address.local_ipv4 = LOCAL.octets();
+        assert_eq!(
+            with_address.parse(),
+            Err(ConfigError::DhcpWithStaticAddress)
+        );
+        let mut with_mac = NetworkConfig::new_dhcp(None, "");
+        with_mac.gateway_mac = MAC.octets();
+        assert_eq!(with_mac.parse(), Err(ConfigError::DhcpWithStaticAddress));
+        let mut unknown = NetworkConfig::new_dhcp(None, "");
+        unknown.flags |= 1 << 3;
+        assert_eq!(unknown.parse(), Err(ConfigError::Reserved));
     }
 
     #[test]

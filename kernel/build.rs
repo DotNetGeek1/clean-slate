@@ -56,34 +56,40 @@ const VIRTIO_GPU_WITHOUT_BOOT_TAIL_FEATURES: &[&str] = &["m10-virtio-gpu-self-te
 /// other build leaves COM1 output-only, so input on the line is never echoed.
 const SERIAL_CONSOLE_FEATURES: &[&str] = &["serial-input-self-test"];
 
-/// Self-tests whose boot-path dispatch arm runs instead of the userspace dispatch block, which
-/// `m3-entry-self-test` (a dependency of most userspace self-tests) otherwise selects. Without
-/// any of these, `m3-entry-self-test` builds select an arm of that block.
-const USERSPACE_DISPATCH_OVERRIDE_FEATURES: &[&str] = &[
-    "m10-nxe-self-test",
-    "m10-shared-buffer-self-test",
-    "m8-linux-dispatch-self-test",
-    "m8-linux-hello-self-test",
-    "m9-syscall-fail-closed-self-test",
-    "m9-block-wake-self-test",
-    "m9-low-va-self-test",
-    "m9-linux-exec-self-test",
-    "m9-linux-runtime-self-test",
-    "m9-linux-socket-self-test",
-    "m9-linux-proc-self-test",
-    "m9-linux-trace-self-test",
-    "m9-rootfs-self-test",
-    "m9-linux-fs-self-test",
-    "m9-userspace-self-test",
-    "m9-fd-core-self-test",
-    "m10-input-self-test",
+/// The boot-path dispatch arms in `run_inner` that run instead of the userspace dispatch block,
+/// which `m3-entry-self-test` (a dependency of most userspace self-tests) otherwise selects.
+/// They are listed in priority order: in a build with features of several arms, the first arm
+/// with one of its features sets `clean_slate_boot_selftest="<arm>"`, and that arm alone is
+/// compiled. A build with any of these features selects no arm of the userspace dispatch block.
+/// A new boot-path arm is a row here and its own `cfg`.
+const BOOT_DISPATCH_ARMS: &[(&str, &[&str])] = &[
+    ("m9-userspace", &["m9-userspace-self-test"]),
+    ("m9-linux-socket", &["m9-linux-socket-self-test"]),
+    ("m9-linux-proc", &["m9-linux-proc-self-test"]),
+    ("m9-linux-runtime", &["m9-linux-runtime-self-test"]),
+    ("m9-linux-fs", &["m9-linux-fs-self-test"]),
+    ("m9-rootfs", &["m9-rootfs-self-test"]),
+    ("m9-linux-exec", &["m9-linux-exec-self-test"]),
+    ("m9-low-va", &["m9-low-va-self-test"]),
+    ("m8-linux-hello", &["m8-linux-hello-self-test"]),
+    ("m9-block-wake", &["m9-block-wake-self-test"]),
+    ("m9-linux-trace", &["m9-linux-trace-self-test"]),
+    ("m9-fd-core", &["m9-fd-core-self-test"]),
+    (
+        "m9-syscall-fail-closed",
+        &["m9-syscall-fail-closed-self-test"],
+    ),
+    ("m8-linux-dispatch", &["m8-linux-dispatch-self-test"]),
+    ("m10-nxe", &["m10-nxe-self-test"]),
+    ("m10-shared-buffer", &["m10-shared-buffer-self-test"]),
+    ("m10-input", &["m10-input-self-test"]),
 ];
 
 /// The arms of the userspace dispatch block, in priority order. Lanes enable several of these
 /// features through Cargo dependencies, so the most specific arm must come first;
-/// `m3-entry-self-test` is the fallback. [`USERSPACE_DISPATCH_OVERRIDE_FEATURES`] (including
-/// `m9-linux-fs-self-test` and `m9-userspace-self-test`) are tested before this list. In an
-/// `m3-entry-self-test` build without one of those, the first arm with one of its features sets
+/// `m3-entry-self-test` is the fallback. [`BOOT_DISPATCH_ARMS`] (including `m9-linux-fs` and
+/// `m9-userspace`) are tested before this list. In an `m3-entry-self-test` build with no
+/// boot-path arm, the first arm with one of its features sets
 /// `clean_slate_userspace_selftest="<arm>"`, and that arm alone is compiled. A new arm in the
 /// block is a row here and its own `cfg`.
 const USERSPACE_DISPATCH_ARMS: &[(&str, &[&str])] = &[
@@ -213,24 +219,31 @@ fn emit_boot_tail_cfgs(system_init: bool) {
     }
 }
 
-fn emit_userspace_dispatch_cfgs() -> Option<&'static str> {
-    let arms: Vec<String> = USERSPACE_DISPATCH_ARMS
-        .iter()
-        .map(|(arm, _)| format!("\"{arm}\""))
-        .collect();
+/// Declares a `cfg(<name>, values(...))` over the arm names of `arms`, and returns the first arm
+/// with an enabled feature.
+fn declare_dispatch_arms(name: &str, arms: &[(&'static str, &[&str])]) -> Option<&'static str> {
+    let values: Vec<String> = arms.iter().map(|(arm, _)| format!("\"{arm}\"")).collect();
     println!(
-        "cargo::rustc-check-cfg=cfg(clean_slate_userspace_selftest, values({}))",
-        arms.join(", ")
+        "cargo::rustc-check-cfg=cfg({name}, values({}))",
+        values.join(", ")
     );
-    if !any_feature_enabled(&["m3-entry-self-test"])
-        || any_feature_enabled(USERSPACE_DISPATCH_OVERRIDE_FEATURES)
-    {
+    arms.iter()
+        .find(|(_, features)| any_feature_enabled(features))
+        .map(|(arm, _)| *arm)
+}
+
+/// Sets `clean_slate_boot_selftest` by [`BOOT_DISPATCH_ARMS`] and, in a build without one,
+/// `clean_slate_userspace_selftest` by [`USERSPACE_DISPATCH_ARMS`]. Returns the userspace arm.
+fn emit_userspace_dispatch_cfgs() -> Option<&'static str> {
+    let boot_arm = declare_dispatch_arms("clean_slate_boot_selftest", BOOT_DISPATCH_ARMS);
+    let selected = declare_dispatch_arms("clean_slate_userspace_selftest", USERSPACE_DISPATCH_ARMS);
+    if let Some(arm) = boot_arm {
+        println!("cargo::rustc-cfg=clean_slate_boot_selftest=\"{arm}\"");
         return None;
     }
-    let selected = USERSPACE_DISPATCH_ARMS
-        .iter()
-        .find(|(_, features)| any_feature_enabled(features))
-        .map(|(arm, _)| *arm);
+    if !any_feature_enabled(&["m3-entry-self-test"]) {
+        return None;
+    }
     if let Some(arm) = selected {
         if arm.starts_with("m3-") && any_feature_enabled(M3_ARM_OVERRIDE_FEATURES) {
             return None;
@@ -378,8 +391,10 @@ const FIXTURE_NETWORK_FEATURES: &[&str] = &[
 /// - `production_trust_anchors.rs`: every `*.der` file in `CLEAN_SLATE_TRUST_ANCHORS_DIR`
 ///   (default `kernel/trust-anchors`), in name order, as `PRODUCTION_TRUST_ANCHORS`.
 /// - `production_network.rs`: `CLEAN_SLATE_NET_STATIC` as `PRODUCTION_NETWORK`, a static
-///   configuration `local/prefix[,gw=a.b.c.d][,gw_mac=xx:..][,dns=a.b.c.d[:port]][,tls_name=n]`;
-///   unset is an unconfigured network.
+///   configuration `local/prefix[,gw=a.b.c.d][,gw_mac=xx:..][,dns=a.b.c.d[:port]][,tls_name=n]`,
+///   or `CLEAN_SLATE_NET_DHCP` as a DHCP configuration `on[,dns=a.b.c.d[:port]][,tls_name=n]`
+///   (a `dns` here is used instead of the leased resolver). Setting both is an error; neither
+///   is an unconfigured network.
 fn emit_network_launch_inputs() {
     println!("cargo::rustc-check-cfg=cfg(clean_slate_fixture_network)");
     if any_feature_enabled(FIXTURE_NETWORK_FEATURES) {
@@ -416,10 +431,17 @@ fn emit_network_launch_inputs() {
         .expect("write production_trust_anchors.rs");
 
     println!("cargo::rerun-if-env-changed=CLEAN_SLATE_NET_STATIC");
-    let network = match env::var("CLEAN_SLATE_NET_STATIC") {
-        Ok(spec) if !spec.trim().is_empty() => static_network_code(spec.trim())
+    println!("cargo::rerun-if-env-changed=CLEAN_SLATE_NET_DHCP");
+    let set = |name| env::var(name).ok().filter(|spec| !spec.trim().is_empty());
+    let network = match (set("CLEAN_SLATE_NET_STATIC"), set("CLEAN_SLATE_NET_DHCP")) {
+        (Some(_), Some(_)) => {
+            panic!("CLEAN_SLATE_NET_STATIC and CLEAN_SLATE_NET_DHCP are both set; pick one")
+        }
+        (Some(spec), None) => static_network_code(spec.trim())
             .unwrap_or_else(|err| panic!("CLEAN_SLATE_NET_STATIC={spec:?}: {err}")),
-        _ => "NetworkConfig::UNCONFIGURED".to_string(),
+        (None, Some(spec)) => dhcp_network_code(spec.trim())
+            .unwrap_or_else(|err| panic!("CLEAN_SLATE_NET_DHCP={spec:?}: {err}")),
+        (None, None) => "NetworkConfig::UNCONFIGURED".to_string(),
     };
     std::fs::write(
         out_dir.join("production_network.rs"),
@@ -439,6 +461,46 @@ fn parse_ipv4(text: &str) -> Result<[u8; 4], String> {
     octets
         .try_into()
         .map_err(|_| format!("bad IPv4 address {text:?}"))
+}
+
+/// `dns=a.b.c.d[:port]` as `(address, port)`.
+fn parse_dns(value: &str) -> Result<([u8; 4], u16), String> {
+    let (addr, port) = match value.split_once(':') {
+        Some((addr, port)) => (addr, port.parse::<u16>().map_err(|_| "bad dns port")?),
+        None => (value, 53),
+    };
+    Ok((parse_ipv4(addr)?, port))
+}
+
+fn dns_code(dns: Option<([u8; 4], u16)>) -> String {
+    dns.map_or("None".to_string(), |(a, p)| {
+        format!("Some(SocketAddrV4::new(Ipv4Addr::new({a:?}), {p}))")
+    })
+}
+
+/// Rust for a `NetworkConfig::new_dhcp` call from `CLEAN_SLATE_NET_DHCP` (see
+/// [`emit_network_launch_inputs`]).
+fn dhcp_network_code(spec: &str) -> Result<String, String> {
+    let mut fields = spec.split(',').map(str::trim);
+    match fields.next() {
+        Some("on" | "1") => {}
+        _ => return Err("must start with `on`".to_string()),
+    }
+    let (mut dns, mut tls_name) = (None, String::new());
+    for field in fields {
+        let (key, value) = field
+            .split_once('=')
+            .ok_or(format!("bad field {field:?}"))?;
+        match key {
+            "dns" => dns = Some(parse_dns(value)?),
+            "tls_name" => tls_name = value.to_string(),
+            other => return Err(format!("unknown field {other:?}")),
+        }
+    }
+    Ok(format!(
+        "NetworkConfig::new_dhcp({}, {tls_name:?})",
+        dns_code(dns)
+    ))
 }
 
 /// Rust for a `NetworkConfig::new_static` call from `CLEAN_SLATE_NET_STATIC` (see
@@ -468,13 +530,7 @@ fn static_network_code(spec: &str) -> Result<String, String> {
                 let octets: [u8; 6] = octets.try_into().map_err(|_| "bad gw_mac")?;
                 gateway_mac = Some(octets);
             }
-            "dns" => {
-                let (addr, port) = match value.split_once(':') {
-                    Some((addr, port)) => (addr, port.parse::<u16>().map_err(|_| "bad dns port")?),
-                    None => (value, 53),
-                };
-                dns = Some((parse_ipv4(addr)?, port));
-            }
+            "dns" => dns = Some(parse_dns(value)?),
             "tls_name" => tls_name = value.to_string(),
             other => return Err(format!("unknown field {other:?}")),
         }
@@ -484,9 +540,7 @@ fn static_network_code(spec: &str) -> Result<String, String> {
     });
     let gateway_mac =
         gateway_mac.map_or("None".to_string(), |m| format!("Some(MacAddr::new({m:?}))"));
-    let dns = dns.map_or("None".to_string(), |(a, p)| {
-        format!("Some(SocketAddrV4::new(Ipv4Addr::new({a:?}), {p}))")
-    });
+    let dns = dns_code(dns);
     Ok(format!(
         "NetworkConfig::new_static(Ipv4Route {{ local: Ipv4Addr::new({local:?}), prefix_len: {prefix}, gateway: {gateway} }}, {gateway_mac}, {dns}, {tls_name:?})"
     ))
@@ -837,21 +891,34 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
 
     if !elf.is_file() {
         let (package, build_std) = userspace_embed_recipe(bin_name);
-        // The cargo line builds `--release`. `userspace_elf` also accepts the active
-        // profile, but when neither file exists it returns that profile's path.
-        let release_elf = manifest_dir
-            .join("..")
-            .join(target_dir)
-            .join("x86_64-unknown-none")
-            .join("release")
-            .join(bin_name);
+        // When neither copy exists `userspace_elf` returns the release path, which is
+        // what the cargo line below builds.
         panic!(
             "missing userspace ELF at {}; run `cargo xtask build`, or:\n  \
              RUSTC_BOOTSTRAP=1 cargo build -p {package} \
              --bin {bin_name} --features userspace \
              --target x86_64-unknown-none -Z build-std={build_std} --release",
-            release_elf.display(),
+            elf.display(),
         );
+    }
+
+    // Say which file went in, so a lane result can be traced to the program it tested.
+    // Every build logs it; a non-release copy is also a cargo warning, since `xtask`
+    // never makes one and it is probably stale.
+    println!("embedding userspace ELF {}", elf.display());
+    if elf.parent().and_then(Path::file_name) != Some("release".as_ref()) {
+        println!(
+            "cargo:warning=embedding non-release userspace ELF {} (no release copy found)",
+            elf.display()
+        );
+        // Rebuild once the release copy appears, so it replaces this one.
+        let release_elf = elf
+            .parent()
+            .and_then(Path::parent)
+            .map(|base| base.join("release").join(bin_name));
+        if let Some(release_elf) = release_elf {
+            println!("cargo:rerun-if-changed={}", release_elf.display());
+        }
     }
 
     let elf_bytes = fs::read(&elf).expect("failed to read userspace ELF");
@@ -1235,12 +1302,16 @@ fn read_cstr(table: &[u8], offset: usize) -> Result<&str, String> {
     std::str::from_utf8(&tail[..end]).map_err(|_| "section name was not valid UTF-8".into())
 }
 
+/// `xtask` builds every embedded program `--release`, so the release copy wins. The active
+/// profile's copy is only a fallback for a hand-built tree with no release copy (#245); a
+/// stray debug build must never shadow the one `xtask` just made. When neither exists this
+/// returns the release path, which the caller names in its "missing" message.
 fn userspace_elf(manifest_dir: &Path, target_dir: &str, profile: &str, bin_name: &str) -> PathBuf {
     let base = manifest_dir
         .join("..")
         .join(target_dir)
         .join("x86_64-unknown-none");
-    for profile in [profile, "release"] {
+    for profile in ["release", profile] {
         let candidate = base.join(profile).join(bin_name);
         if candidate.is_file() {
             return candidate;
@@ -1253,5 +1324,5 @@ fn userspace_elf(manifest_dir: &Path, target_dir: &str, profile: &str, bin_name:
             }
         }
     }
-    base.join(profile).join(bin_name)
+    base.join("release").join(bin_name)
 }

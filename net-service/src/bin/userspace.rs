@@ -13,10 +13,13 @@ use clean_slate_native_abi::clock::{
     decode_wall, CLOCK_SUBOP_WALL, NANOS_PER_SECOND, SYSCALL_NR_CLOCK,
 };
 use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
-use clean_slate_network::addr::{BoundedHostname, EtherType, IpProtocol, Ipv4Addr, SocketAddrV4};
+use clean_slate_network::addr::{
+    BoundedHostname, EtherType, IpProtocol, Ipv4Addr, MacAddr, SocketAddrV4,
+};
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::config::{ServiceNetwork, TrustAnchorSet};
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
+use clean_slate_network::dhcp::{DhcpClient, DhcpEvent};
 use clean_slate_network::dns::{DnsResolver, ResolveOutcome};
 use clean_slate_network::error::{DenialReason, NetworkError};
 use clean_slate_network::ethernet::EthernetFrame;
@@ -955,6 +958,18 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     nic_ingress_init(raw_handle);
     let raw_link = DemuxLink::raw_geometry();
     let raw_mac = raw_link.mac;
+    // A DHCP launch leases its route before either stack exists; without a lease the service
+    // still comes up, unconfigured (every send unreachable).
+    let (network, leased) = if network.dhcp {
+        let network = lease_network(&network, raw_mac, &mut rng);
+        unsafe {
+            *core::ptr::addr_of_mut!(SERVICE_NETWORK) = network;
+        }
+        let leased = network.route.is_configured();
+        (network, leased.then_some(network.route.local.octets()))
+    } else {
+        (network, None)
+    };
     unsafe {
         // #221 stage E: each caller reaches what its app's policy names, judged against the
         // launch configuration's resolver.
@@ -1023,6 +1038,7 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         [
             NetworkReadyDetail {
                 link_up: raw_link.link_up,
+                leased,
             }
             .encode(),
             0,
@@ -1068,6 +1084,58 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             ctx.complete(request_id, response, out_len);
         }
     }
+}
+
+/// How long the DHCP client may take at launch before the service gives up and comes up
+/// unconfigured. Init stops a service that is not ready within 10 s
+/// (`INIT_READY_TIMEOUT_NS`), so the lease has to arrive well inside that: with the client's
+/// backoff this is a DISCOVER at 0, 1 and 3 s.
+const DHCP_LAUNCH_BUDGET_MS: u64 = 6_000;
+
+/// Leases `network`'s route with DHCP over the raw NIC (no stack exists yet). Frames that
+/// are not a reply for this client are dropped. Gives `network` unconfigured, no longer
+/// marked DHCP, when no usable lease arrives within [`DHCP_LAUNCH_BUDGET_MS`].
+fn lease_network(network: &ServiceNetwork, mac: MacAddr, rng: &mut NetRng) -> ServiceNetwork {
+    let unconfigured = ServiceNetwork {
+        dhcp: false,
+        ..*network
+    };
+    let Ok(started) = monotonic_ticks() else {
+        return unconfigured;
+    };
+    let give_up = started.saturating_add(ms_to_irq_ticks(DHCP_LAUNCH_BUDGET_MS));
+    let mut client = DhcpClient::new(mac, rng.next_u32());
+    let mut link = DemuxLink::for_udp();
+    'send: while let Some(frame) = client.frame() {
+        let _ = link.transmit(frame);
+        let Ok(sent_at) = monotonic_ticks() else {
+            return unconfigured;
+        };
+        let deadline = sent_at
+            .saturating_add(ms_to_irq_ticks(client.retransmit_delay_ms()))
+            .min(give_up);
+        loop {
+            while let Ok(Some(frame)) = nic_ingress_read_raw() {
+                match client.handle_frame(frame.as_slice()) {
+                    DhcpEvent::Bound(lease) => {
+                        return network.with_lease(&lease).unwrap_or(unconfigured);
+                    }
+                    DhcpEvent::Offered | DhcpEvent::Restarted => continue 'send,
+                    DhcpEvent::Ignored => {}
+                }
+            }
+            let Ok(now) = monotonic_ticks() else {
+                return unconfigured;
+            };
+            if now >= give_up {
+                return unconfigured;
+            }
+            if now >= deadline || wait_net_work(NET_WAIT_WORK_RX, now, Some(deadline)).is_err() {
+                continue 'send;
+            }
+        }
+    }
+    unconfigured
 }
 
 /// State every request handler needs; built once by `run_service_loop`.
