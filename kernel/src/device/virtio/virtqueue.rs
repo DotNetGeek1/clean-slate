@@ -321,6 +321,8 @@ impl SplitQueue {
             .take(usize::from(self.size))
             .flatten()
             .map(|request| request.deadline_ns)
+            // `modern::NO_DEADLINE`: held by the device with no timeout.
+            .filter(|deadline_ns| *deadline_ns != u64::MAX)
             .min()
     }
 

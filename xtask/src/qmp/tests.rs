@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use super::client::{EVENT_RING_CAPACITY, MAX_LINE_BYTES};
 use super::fake::{self, Act};
 use super::image::Screenshot;
-use super::input::MAX_EVENTS_PER_COMMAND;
+use super::input::{MAX_EVENTS_PER_COMMAND, QEMU_ABS_MAX};
 use super::json::{JsonError, JsonErrorKind, JsonValue};
 use super::script::MAX_SERIAL_LINE_BYTES;
 use super::{InputAction, MouseButton, QCode, QmpClient, QmpEndpoint, QmpError, QmpTimeouts};
@@ -487,6 +487,32 @@ fn input_events_use_the_qmp_input_event_schema() {
             r#"{"type":"rel","data":{"axis":"x","value":5}},"#,
             r#"{"type":"rel","data":{"axis":"y","value":-5}},"#,
             r#"{"type":"btn","data":{"down":true,"button":"middle"}}"#,
+            r#"]}"#
+        )
+    );
+}
+
+#[test]
+fn absolute_moves_use_the_abs_event_type() {
+    let (mut client, peer) = connected(vec![Act::returns("input-send-event", "{}")]);
+    let mut actions = InputAction::move_abs(0, QEMU_ABS_MAX).to_vec();
+    actions.push(InputAction::Button {
+        button: MouseButton::Left,
+        down: false,
+    });
+    client
+        .send_input(&actions, GENEROUS.command)
+        .expect("input");
+    drop(client);
+    let requests = requests(peer);
+    let input = requests[2].get("arguments").expect("arguments").to_json();
+    assert_eq!(
+        input,
+        concat!(
+            r#"{"events":["#,
+            r#"{"type":"abs","data":{"axis":"x","value":0}},"#,
+            r#"{"type":"abs","data":{"axis":"y","value":32767}},"#,
+            r#"{"type":"btn","data":{"down":false,"button":"left"}}"#,
             r#"]}"#
         )
     );

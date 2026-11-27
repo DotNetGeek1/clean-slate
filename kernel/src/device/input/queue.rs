@@ -77,6 +77,23 @@ impl<const N: usize> RawInputQueue<N> {
             }
         }
 
+        if let RawInputKind::AbsMotion { x, y } = kind {
+            if self.pending_dropped == 0 && self.len >= RAW_INPUT_COALESCE_HIGH_WATER {
+                let tail_idx = (self.head + self.len - 1) % N;
+                if let Some(tail) = &mut self.ring[tail_idx] {
+                    if tail.device == device && matches!(tail.kind, RawInputKind::AbsMotion { .. })
+                    {
+                        // A position supersedes the one before it.
+                        tail.kind = RawInputKind::AbsMotion { x, y };
+                        tail.time_ns = now;
+                        outcome.coalesced = true;
+                        outcome.queued_into_empty = was_empty && appended;
+                        return outcome;
+                    }
+                }
+            }
+        }
+
         if self.len < N {
             self.push_record(device, kind, now);
             appended = true;

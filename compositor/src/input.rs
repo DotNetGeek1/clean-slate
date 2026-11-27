@@ -10,7 +10,7 @@ use clean_slate_graphics::input::{
     reset_seat, AxisValue120, ButtonTracker, KeyState, KeyUsage, ModifierTracker, Modifiers,
     PointerButton,
 };
-use clean_slate_graphics::raw_input::{RawInputKind, RawInputRecord};
+use clean_slate_graphics::raw_input::{scale_abs_to_output, RawInputKind, RawInputRecord};
 
 use crate::scene::SurfaceKey;
 
@@ -90,7 +90,7 @@ impl Seat {
     }
 
     /// Places the pointer at `to`, clamped to `output` (start-up placement only; input moves
-    /// it relatively).
+    /// it relatively, or places it directly from an absolute pointer).
     pub fn warp(&mut self, to: Point, output: Size) {
         let clamp =
             |v: i32, extent: u32| v.clamp(0, extent.saturating_sub(1).min(i32::MAX as u32) as i32);
@@ -131,6 +131,21 @@ impl Seat {
                 let next = Point {
                     x: clamp(self.pointer.x, dx, output.width),
                     y: clamp(self.pointer.y, dy, output.height),
+                };
+                if next == self.pointer {
+                    return (out, 0);
+                }
+                self.pointer = next;
+                out[0] = Some(SeatEvent::PointerMotion {
+                    time_ns,
+                    position: next,
+                });
+                (out, 1)
+            }
+            RawInputKind::AbsMotion { x, y } => {
+                let next = Point {
+                    x: scale_abs_to_output(x, output.width),
+                    y: scale_abs_to_output(y, output.height),
                 };
                 if next == self.pointer {
                     return (out, 0);

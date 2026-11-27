@@ -431,6 +431,52 @@ fn seat_clamps_pointer_and_resets_on_overflow() {
 }
 
 #[test]
+fn seat_places_the_pointer_directly_from_absolute_motion() {
+    use clean_slate_graphics::geometry::Size;
+    use clean_slate_graphics::ids::{InputDeviceId, MOUSE_INDEX};
+    use clean_slate_graphics::raw_input::{RawInputKind, RawInputRecord, ABS_POINTER_MAX};
+
+    let output = Size {
+        width: 1280,
+        height: 800,
+    };
+    let record = |x, y| RawInputRecord {
+        seq: 1,
+        time_ns: 5,
+        device: InputDeviceId::new(MOUSE_INDEX, 1).unwrap(),
+        kind: RawInputKind::AbsMotion { x, y },
+    };
+    let mut seat = Seat::new();
+    let (events, n) = seat.fold(&record(ABS_POINTER_MAX, ABS_POINTER_MAX), output);
+    assert_eq!(n, 1);
+    assert_eq!(seat.pointer(), Point { x: 1279, y: 799 });
+    assert_eq!(
+        events[0],
+        Some(SeatEvent::PointerMotion {
+            time_ns: 5,
+            position: Point { x: 1279, y: 799 }
+        })
+    );
+    // Absolute moves ignore where the pointer was.
+    seat.fold(&record(0, 0), output);
+    assert_eq!(seat.pointer(), Point { x: 0, y: 0 });
+    seat.fold(&record(ABS_POINTER_MAX / 2, ABS_POINTER_MAX / 4), output);
+    assert_eq!(seat.pointer(), Point { x: 639, y: 200 });
+    let (_, n) = seat.fold(&record(ABS_POINTER_MAX / 2, ABS_POINTER_MAX / 4), output);
+    assert_eq!(n, 0, "an unchanged position is not an event");
+    // Relative motion still works from the absolute position.
+    seat.fold(&record(0, 0), output);
+    seat.fold(
+        &RawInputRecord {
+            kind: RawInputKind::RelMotion { dx: 3, dy: 4 },
+            ..record(0, 0)
+        },
+        output,
+    );
+    assert_eq!(seat.pointer(), Point { x: 3, y: 4 });
+}
+
+#[test]
 fn compositor_has_no_device_specific_dependencies() {
     let sources = [
         include_str!("../backend.rs"),

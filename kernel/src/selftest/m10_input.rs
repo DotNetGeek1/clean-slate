@@ -531,6 +531,7 @@ impl core::fmt::Display for RecordBody<'_> {
                 write!(f, "{device} key=0x{:02x} {}", usage.0, state_name(state))
             }
             RawInputKind::RelMotion { dx, dy } => write!(f, "{device} motion dx={dx} dy={dy}"),
+            RawInputKind::AbsMotion { x, y } => write!(f, "{device} abs x={x} y={y}"),
             RawInputKind::Button { button, state } => {
                 write!(f, "{device} button={} {}", button as u16, state_name(state))
             }
