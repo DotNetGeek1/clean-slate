@@ -10,7 +10,9 @@
 //!    `[INPT] pointer settled` at the target, and every button edge for its `[INPT] button` line
 //!    with the expected position and hit, before the next input is sent. Increment, toggle, a
 //!    background click, key `a` (delivered by focus), `s` held for a second so the compositor
-//!    repeats it and stops at the release (#309), a title-bar drag and the close control.
+//!    repeats it and stops at the release (#309), a title-bar drag, the minimise control (the
+//!    window leaves the screen and the rail marks the app) and a rail click that restores it
+//!    where it was (#357), then the close control.
 //! 4. **App closed** and 5. **app fault** (`0x1F`): init brings the app back, and after a fault
 //!    not before about half a second (D2).
 //! 6. **Desktop shell fault** (`0x1E`): the app keeps its pid and a click still reaches it.
@@ -34,7 +36,9 @@ use crate::m10_desktop_lane::{
     check_held_key, is_held_key_line, motion_chunks, validate_captures, PlannedCapture,
     BACKGROUND_POINT, DRAG, EXPECTED_INPUT, HELD_KEY_HOLD, HELD_KEY_MIN_REPEATS,
 };
-use crate::m10_desktop_visual::{center, chrome, frame_rect, panel, translate, window_origin};
+use crate::m10_desktop_visual::{
+    center, chrome, frame_rect, panel, rail_item, translate, window_origin,
+};
 use crate::m10_desktop_visual::{Scene, OUTPUT};
 use crate::qmp::lane::Capture;
 use crate::qmp::{InputAction, MouseButton, QCode};
@@ -336,6 +340,21 @@ impl Lane {
     /// line since the mark) and two dumps in a row are identical, checked later against `window`
     /// and the settled pointer.
     fn capture(&mut self, name: &'static str, window: Option<Point>) -> Result<(), XtaskError> {
+        self.capture_scene(name, window, false)
+    }
+
+    /// [`Self::capture`] of a desktop whose one app window is minimised (#357): off screen and
+    /// marked on the rail.
+    fn capture_minimized(&mut self, name: &'static str) -> Result<(), XtaskError> {
+        self.capture_scene(name, None, true)
+    }
+
+    fn capture_scene(
+        &mut self,
+        name: &'static str,
+        window: Option<Point>,
+        minimized: bool,
+    ) -> Result<(), XtaskError> {
         self.session.wait(
             &format!("screendump `{name}`: quiet"),
             STEP_TIMEOUT,
@@ -384,6 +403,7 @@ impl Lane {
             scene: Scene {
                 tier: self.machine.tier,
                 window,
+                minimized,
                 pointer,
                 output: OUTPUT,
             },
@@ -527,6 +547,70 @@ fn check_whole(transcript: &str, first_app: u64, created: &[Point]) -> Result<()
     Ok(())
 }
 
+/// Waits, from `from`, until every one of `expected` has been printed as the end of a line.
+fn await_lines(
+    lane: &mut Lane,
+    what: &str,
+    from: usize,
+    expected: &[String],
+) -> Result<(), XtaskError> {
+    lane.session.mark_at(from);
+    lane.session
+        .wait(what, STEP_TIMEOUT, &mut |segment| match expected
+            .iter()
+            .find(|want| !lines(segment).any(|line| line.ends_with(want.as_str())))
+        {
+            Some(missing) => Err(format!("no {missing:?}")),
+            None => Ok(()),
+        })
+}
+
+/// #357: the minimise control takes the dragged window off screen and the focus with it (it is
+/// the only window), and the rail marks the playground; a click on its rail slot brings the
+/// window back where it was, focused.
+fn minimize_and_restore(lane: &mut Lane, dragged: Point) -> Result<(), XtaskError> {
+    let tier = lane.machine.tier;
+    println!("\n[STD ] step: minimize");
+    let minimize =
+        center(chrome(tier).control_rect(frame_rect(tier, dragged), ChromeControl::Minimize));
+    lane.move_to("minimize", minimize)?;
+    let pressed_at = lane.session.offset();
+    lane.button("minimize", true, &["minimize"])?;
+    lane.button("minimize", false, &["minimize"])?;
+    await_lines(
+        lane,
+        "minimize",
+        pressed_at,
+        &[
+            format!("[WIN ] minimized x={} y={}", dragged.x, dragged.y),
+            "[INPT] focus none".to_owned(),
+        ],
+    )?;
+    lane.capture_minimized("minimized")?;
+
+    println!("\n[STD ] step: restore from the rail");
+    let Some(item) = rail_item(tier, 0) else {
+        return lane.fail("restore: the rail has no slot 0".to_owned());
+    };
+    lane.move_to("restore", center(item))?;
+    let pressed_at = lane.session.offset();
+    lane.button("restore", true, &["surface"])?;
+    lane.button("restore", false, &["surface"])?;
+    await_lines(
+        lane,
+        "restore",
+        pressed_at,
+        &[
+            "[SHELL] rail restore=playground window=1".to_owned(),
+            format!("[WIN ] restored x={} y={}", dragged.x, dragged.y),
+            format!("[INPT] focus window x={} y={}", dragged.x, dragged.y),
+        ],
+    )?;
+    // Off the rail, so the capture shows no hover there.
+    lane.move_to("restore", BACKGROUND_POINT)?;
+    lane.capture("restored", Some(dragged))
+}
+
 /// #309: holds `s` (focus is still app 1) long enough for the compositor to repeat it, then
 /// checks the repeats stop with the release.
 fn hold_key(lane: &mut Lane) -> Result<(), XtaskError> {
@@ -654,6 +738,7 @@ fn drive(lane: &mut Lane) -> Result<Vec<Point>, XtaskError> {
         }
     })?;
     lane.capture("dragged", Some(dragged))?;
+    minimize_and_restore(lane, dragged)?;
 
     println!("\n[STD ] step: close");
     let close = center(chrome.control_rect(frame_rect(tier, dragged), ChromeControl::Close));

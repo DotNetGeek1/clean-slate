@@ -12,7 +12,7 @@ use clean_slate_graphics::window::{WindowConfig, WindowStates};
 use clean_slate_native_abi::ConnectionId;
 use clean_slate_ui::chrome::ChromeControl;
 
-use super::{send_configure, surface_visible, Compositor, UNSOLICITED_TAG};
+use super::{send_configure, surface_shown, surface_visible, Compositor, UNSOLICITED_TAG};
 use crate::input::SeatEvent;
 use crate::scene::SurfaceKey;
 use crate::trace::ButtonHit;
@@ -57,6 +57,29 @@ impl<P: WindowPolicy> Compositor<P> {
         let window = entry.window?;
         (self.scene.entry(key).is_some() && surface_visible(&self.clients[slot], key.surface))
             .then_some(window)
+    }
+
+    /// The window of `key` if `key` is a toplevel that is visible or minimised (#357): what the
+    /// window manager keeps mapped and the shell's window list keeps listed.
+    pub fn listed_window(&self, key: SurfaceKey) -> Option<WindowId> {
+        let slot = self.slot_of(key.connection)?;
+        let entry = self.clients[slot].objects.surface(key.surface).ok()?;
+        if entry.state.role().map(|r| r.role) != Some(SurfaceRole::Toplevel) {
+            return None;
+        }
+        let window = entry.window?;
+        (self.scene.entry(key).is_some() && surface_shown(&self.clients[slot], key.surface, true))
+            .then_some(window)
+    }
+
+    /// `key` is a listed toplevel the window manager has minimised (#357).
+    pub fn is_minimized(&self, key: SurfaceKey) -> bool {
+        self.listed_window(key)
+            .and_then(|window| {
+                let slot = self.slot_of(key.connection)?;
+                self.clients[slot].objects.window(window).ok()
+            })
+            .is_some_and(|w| w.minimized)
     }
 
     /// The visible toplevel `key` belongs to: itself, or a popup's root (same connection).
@@ -298,6 +321,42 @@ impl<P: WindowPolicy> Compositor<P> {
         }
     }
 
+    /// Sets the minimised flag of the listed toplevel `key`; `true` if it changed. Visibility
+    /// follows from the flag, so the next composite repaints what the window covered (or
+    /// covers again) and [`Self::wm_refresh`] moves focus off a minimised window.
+    fn set_minimized(&mut self, key: SurfaceKey, minimized: bool) -> bool {
+        let Some(window) = self.listed_window(key) else {
+            return false;
+        };
+        let Some(slot) = self.slot_of(key.connection) else {
+            return false;
+        };
+        let Ok(entry) = self.clients[slot].objects.window_mut(window) else {
+            return false;
+        };
+        if entry.minimized == minimized {
+            return false;
+        }
+        entry.minimized = minimized;
+        self.needs_composite = true;
+        true
+    }
+
+    /// The minimise control (#357): hides the window until the shell restores it. It stays
+    /// mapped and listed; focus moves to the next window down, as when a window closes.
+    pub fn minimize(&mut self, key: SurfaceKey) -> bool {
+        let minimized = self.set_minimized(key, true);
+        if minimized {
+            self.wm_refresh();
+        }
+        minimized
+    }
+
+    /// Shows a minimised window again where it was; the caller raises and focuses it.
+    pub fn restore(&mut self, key: SurfaceKey) -> bool {
+        self.set_minimized(key, false)
+    }
+
     /// Click-to-focus (and the shell's `ActivateWindow`): raise and focus the toplevel.
     pub(super) fn activate(&mut self, window: SurfaceKey) {
         self.raise_window(window);
@@ -359,9 +418,10 @@ impl<P: WindowPolicy> Compositor<P> {
                 self.wm.hover = None;
             }
         }
+        // A minimised window stays mapped (#357): restoring it is not a new map.
         for slot in 0..self.wm.mapped.len() {
             if let Some(key) = self.wm.mapped[slot] {
-                if self.visible_window(key).is_none() {
+                if self.listed_window(key).is_none() {
                     self.wm.mapped[slot] = None;
                 }
             }
@@ -747,9 +807,13 @@ impl<P: WindowPolicy> Compositor<P> {
         }
     }
 
-    /// Server-side decoration actions. Close is the only control the chrome draws (#115).
+    /// Server-side decoration actions: Close asks the client, Minimise is the window
+    /// manager's own (#357).
     fn control_action(&mut self, key: SurfaceKey, control: ChromeControl) {
         match control {
+            ChromeControl::Minimize => {
+                self.minimize(key);
+            }
             ChromeControl::Close => {
                 self.request_close(key);
             }

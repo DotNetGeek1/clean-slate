@@ -280,6 +280,11 @@ pub static EVENT_SPECS: &[OpcodeSpec] = &[
         pads: &[(16, 64)],
     },
     OpcodeSpec {
+        opcode: super::OP_WINDOW_MINIMIZED,
+        object: ObjectRule::MustBeZero,
+        pads: &[(17, 64)],
+    },
+    OpcodeSpec {
         opcode: super::OP_OUTPUT_CHANGED,
         object: ObjectRule::MustBeZero,
         pads: &[(12, 24), (41, 42), (56, 64)],

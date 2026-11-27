@@ -1,4 +1,4 @@
-//! Window list feature (#237) wire tests: `ActivateWindow` and the four list events.
+//! Window list feature (#237, #357) wire tests: `ActivateWindow` and the five list events.
 
 use super::event::Event;
 use super::request::Request;
@@ -99,6 +99,38 @@ fn window_focused_zero_means_none() {
     .encode(0)
     .unwrap();
     let mut zero = removed;
+    write_u32_le(&mut zero, 12, 0);
+    assert_eq!(event_code(&zero), ProtocolError::InvalidObject);
+}
+
+#[test]
+fn window_minimized_is_handle_then_a_zero_or_one_byte() {
+    let f = Event::WindowMinimized {
+        window: WindowHandle(5),
+        minimized: true,
+    }
+    .encode(0)
+    .unwrap();
+    assert_eq!(read_u16_le(&f, 0), OP_WINDOW_MINIMIZED);
+    assert_eq!(read_u32_le(&f, 12), 5);
+    assert_eq!(f[16], 1);
+    assert!(f[17..].iter().all(|&b| b == 0));
+    let mut restored = f;
+    restored[16] = 0;
+    assert_eq!(
+        Event::decode(&restored).unwrap().message,
+        Event::WindowMinimized {
+            window: WindowHandle(5),
+            minimized: false
+        }
+    );
+    let mut two = f;
+    two[16] = 2;
+    assert_eq!(event_code(&two), ProtocolError::MalformedFrame);
+    let mut padded = f;
+    padded[17] = 1;
+    assert_eq!(event_code(&padded), ProtocolError::ReservedBitsSet);
+    let mut zero = f;
     write_u32_le(&mut zero, 12, 0);
     assert_eq!(event_code(&zero), ProtocolError::InvalidObject);
 }

@@ -1293,11 +1293,12 @@ fn close_control_requests_close_on_release_over_it() {
         "released elsewhere"
     );
 
-    // #115: close is the only control. Where minimise and maximise used to sit (one and two
-    // control steps left of close) is plain title bar: not drawn as a control, not a control
-    // target, and a click there neither closes nor configures the window.
+    // #115: there is no maximise control. Where it used to sit (two control steps left of
+    // close, past minimise) is plain title bar: not drawn as a control, not a control target,
+    // and a click there neither closes nor configures the window.
     let step = TestChrome.metrics().control_size + TestChrome.metrics().control_gap;
-    for slot in 1..=2 {
+    {
+        let slot = 2;
         let at = Point {
             x: close.x - (slot * step) as i32,
             y: close.y,
@@ -1326,7 +1327,7 @@ fn close_control_requests_close_on_release_over_it() {
     );
     assert!(
         configures(&inbox, wa).is_empty(),
-        "the old minimise and maximise slots do nothing"
+        "the old maximise slot does nothing"
     );
 
     click(&mut h, close);

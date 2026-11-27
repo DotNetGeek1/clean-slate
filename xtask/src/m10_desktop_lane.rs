@@ -212,18 +212,21 @@ mod tests {
     /// The captures the driver takes, in order, with the pointer parked on the background.
     fn plan(tier: QualityTier) -> Vec<PlannedCapture> {
         [
-            ("desktop", window_origin(tier, 0)),
-            ("input", window_origin(tier, 0)),
-            ("dragged", dragged(tier)),
-            ("relaunched", window_origin(tier, 1)),
-            ("recovered", window_origin(tier, 2)),
-            ("restarted", window_origin(tier, 0)),
+            ("desktop", Some(window_origin(tier, 0))),
+            ("input", Some(window_origin(tier, 0))),
+            ("dragged", Some(dragged(tier))),
+            ("minimized", None),
+            ("restored", Some(dragged(tier))),
+            ("relaunched", Some(window_origin(tier, 1))),
+            ("recovered", Some(window_origin(tier, 2))),
+            ("restarted", Some(window_origin(tier, 0))),
         ]
         .map(|(name, window)| PlannedCapture {
             name,
             scene: Scene {
                 tier,
-                window: Some(window),
+                window,
+                minimized: window.is_none(),
                 pointer: BACKGROUND_POINT,
                 output: OUTPUT,
             },
@@ -312,6 +315,14 @@ mod tests {
             let dragged = frame_rect(tier, dragged(tier));
             let close = center(chrome.control_rect(dragged, ChromeControl::Close));
             assert!(chrome.visual_rect(dragged).contains(close));
+            let minimize = center(chrome.control_rect(dragged, ChromeControl::Minimize));
+            assert!(chrome.visual_rect(dragged).contains(minimize));
+            assert!(
+                !chrome.visual_rect(dragged).contains(BACKGROUND_POINT),
+                "{tier:?}: the pointer parks clear of the restored window"
+            );
+            let item = crate::m10_desktop_visual::rail_item(tier, 0).expect("rail slot 0");
+            assert!(rail(tier).contains(center(item)));
             assert!(dragged.y >= 0, "the drag keeps the title bar on screen");
             for step in 0..3 {
                 let visual = chrome.visual_rect(frame_rect(tier, window_origin(tier, step)));
@@ -340,8 +351,9 @@ mod tests {
             assert!(err.contains("counter"), "{err}");
 
             let mut misplaced = captures;
-            let relaunched = plan[3].scene;
-            misplaced[3] = capture(
+            let at = plan.iter().position(|p| p.name == "relaunched").unwrap();
+            let relaunched = plan[at].scene;
+            misplaced[at] = capture(
                 "relaunched",
                 shot(
                     &Scene {
@@ -353,6 +365,31 @@ mod tests {
             );
             let err = validate_captures(&misplaced, &plan).unwrap_err();
             assert!(err.starts_with("relaunched"), "{err}");
+
+            // #357: a window still on screen, or a restore that left the marker, fails.
+            let at = plan.iter().position(|p| p.name == "minimized").unwrap();
+            let good = || -> Vec<Capture> {
+                plan.iter()
+                    .map(|p| capture(p.name, shot(&p.scene, p.name != "desktop")))
+                    .collect()
+            };
+            let mut shown = good();
+            shown[at] = capture("minimized", shot(&plan[at - 1].scene, true));
+            let err = validate_captures(&shown, &plan).unwrap_err();
+            assert!(err.starts_with("minimized"), "{err}");
+            let mut stale = good();
+            stale[at + 1] = capture(
+                "restored",
+                shot(
+                    &Scene {
+                        minimized: true,
+                        ..plan[at + 1].scene
+                    },
+                    true,
+                ),
+            );
+            let err = validate_captures(&stale, &plan).unwrap_err();
+            assert!(err.starts_with("restored"), "{err}");
         }
     }
 
