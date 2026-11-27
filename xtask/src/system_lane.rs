@@ -30,9 +30,9 @@
 //! 6. Ctrl-X faults the console service (#310); init restarts it, and the shell's console
 //!    client capability is re-issued for generation 2's port ([`check_console_fault`]).
 //! 7. A typed `echo` reaches the same shell through console generation 2, which says so.
-//! 8. `nslookup` asking a server other than the system resolver is refused by the shell's
-//!    network policy (#221 stage E): nothing reaches the fixture, the shell prompts again, and
-//!    the audit service prints the refusal with its destination ([`check_refused`]).
+//! 8. A `wget` to port 0, which the shell's network policy (#221 stage E) does not cover, is
+//!    refused: nothing reaches the fixture, the shell prompts again, and the audit service
+//!    prints the refusal with its destination ([`check_refused`]).
 //!
 //! Each `wget` step proves a full exchange both ways: the fixture answers port 4001 only after
 //! receiving the complete request, and the step requires it to have answered exactly one
@@ -157,13 +157,14 @@ const WGET: Step = Step {
     },
 };
 
-/// The shells may send datagrams only to the system resolver (10.77.0.1:53 on the lab network),
-/// so a query to the fixture peer itself is refused before it leaves.
-const REFUSED_NSLOOKUP: Step = Step {
-    name: "nslookup to another server",
-    send: b"nslookup m7.fixture.test 10.77.0.50\r",
+/// The shells' TCP rule covers ports 1 to 65535, so a connect to port 0 is refused before it
+/// leaves. (This BusyBox `nslookup` names a server given on its command line but still asks the
+/// one in `/etc/resolv.conf`, so it cannot show the datagram rule.)
+const REFUSED_CONNECT: Step = Step {
+    name: "connect outside the policy",
+    send: b"wget -q -O - http://10.77.0.50:0/\r",
     expect: Expect::Refused {
-        destination: "10.77.0.50:53/udp",
+        destination: "10.77.0.50:0/tcp",
     },
 };
 
@@ -208,7 +209,7 @@ const STEPS: [Step; 11] = [
         send: b"echo hel''lo-again\r",
         expect: Expect::ConsoleInput(&["hello-again"]),
     },
-    REFUSED_NSLOOKUP,
+    REFUSED_CONNECT,
 ];
 
 /// The live network service instance.
@@ -819,7 +820,7 @@ fn check_step(
 }
 
 /// The refusal record, printed by the audit service, for a holder other than the shell itself
-/// (its `nslookup` child, which inherited the shell's app); then a prompt, with nothing having
+/// (its `wget` child, which inherited the shell's app); then a prompt, with nothing having
 /// reached the fixture.
 fn check_refused(
     segment: &str,
@@ -842,14 +843,15 @@ fn check_refused(
         return Err(format!("the refusal names the shell itself: {record:?}"));
     }
     if prompt_after(segment, 0).is_none() {
-        return Err("no prompt after the refused nslookup".to_owned());
+        return Err("no prompt after the refused connect".to_owned());
     }
     let answers = now
         .fixture_a_answers
         .saturating_sub(before.fixture_a_answers);
-    if answers != 0 {
+    let responses = now.http_responses.saturating_sub(before.http_responses);
+    if answers != 0 || responses != 0 {
         return Err(format!(
-            "the fixture peer sent {answers} A answers to a refused query"
+            "the fixture peer sent {answers} A answers and {responses} HTTP responses during a refused step"
         ));
     }
     Ok(state)
@@ -1660,10 +1662,10 @@ mod tests {
 
     fn refused() -> String {
         format!(
-            "nslookup m7.fixture.test 10.77.0.50\r\n\
-             [CON ] pid=12: nslookup: write to '10.77.0.50': Permission denied\n\
+            "wget -q -O - http://10.77.0.50:0/\r\n\
+             [CON ] pid=12: wget: can't connect to remote host (10.77.0.50): Permission denied\n\
              [LNX ] exit pid=12 status=1\n\
-             [IPC ] console pid={AUDIT2}: [ADT ] #77 12 dest net 10.77.0.50:53/udp\n\
+             [IPC ] console pid={AUDIT2}: [ADT ] #77 12 dest net 10.77.0.50:0/tcp\n\
              [CON ] pid={SHELL}: # "
         )
     }
@@ -1675,7 +1677,7 @@ mod tests {
             ..booted()
         };
         let quiet = counts(3, 0, 0);
-        let check = |segment: &str, now| check_step(&REFUSED_NSLOOKUP, segment, quiet, now, state);
+        let check = |segment: &str, now| check_step(&REFUSED_CONNECT, segment, quiet, now, state);
         assert!(check(&refused(), quiet).is_ok());
         let answered = counts(4, 0, 0);
         assert!(check(&refused(), answered)
