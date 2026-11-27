@@ -61,9 +61,9 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(60);
 /// a busy host leaves the guest behind on a burst of motion). Every edge is therefore sent only
 /// once the guest has reported the pointer settled, which means it has read every queued byte.
 const PACKETS_PER_BATCH: usize = 4;
-/// How long a batch may take to settle where it should before the lane corrects from where the
-/// guest says the pointer is.
-const SETTLE_WAIT: Duration = Duration::from_secs(10);
+/// How long a batch may take to settle where it should, or to settle somewhere else with the
+/// guest quiet after it, which the lane then corrects from.
+const SETTLE_WAIT: Duration = Duration::from_secs(20);
 const CORRECTIONS: usize = 3;
 const EDGE_WAIT: Duration = Duration::from_secs(30);
 /// D2: init restarts a closed or crashed app after 0.5 s; the guest's clock is in whole ms.
@@ -145,6 +145,35 @@ fn last_settled(segment: &str) -> Option<Point> {
         .last()
 }
 
+/// Where a motion batch left the pointer, once that is settled: the expected position, or
+/// another one the guest reported settled and then went quiet at (`[IDLE ] quiet` after it,
+/// so it has read every packet the batch queued).
+///
+/// A batch whose packets the guest reads in more than one drain settles part-way first.
+/// Correcting from that position while the rest is still on its way moves the pointer past the
+/// target: the #349 drag released 100 px (one motion chunk) beyond its target. Only a quiet
+/// guest's position is safe to correct from.
+fn settled_for_batch(segment: &str, expected: Point) -> Result<Point, String> {
+    let complete = complete_lines(segment);
+    let Some(at) = last_settled(complete) else {
+        return Err("no [INPT] pointer settled line since the move".to_owned());
+    };
+    if at == expected {
+        return Ok(at);
+    }
+    let after = complete
+        .rfind(SETTLED)
+        .map_or("", |start| &complete[start..]);
+    if lines(after).skip(1).any(|line| line.contains(QUIET)) {
+        Ok(at)
+    } else {
+        Err(format!(
+            "the pointer last settled at x={} y={} and the guest has not gone quiet since",
+            at.x, at.y
+        ))
+    }
+}
+
 /// The first complete `[INPT] button left <edge>` line in `segment`: its position and hit.
 fn button_edge(segment: &str, edge: &str) -> Option<(Point, String)> {
     let prefix = format!("[INPT] button left {edge} ");
@@ -185,7 +214,7 @@ impl Lane {
     /// Moves the pointer to `target` in batches of at most [`PACKETS_PER_BATCH`] motion
     /// commands, waiting after each for the compositor to report the pointer settled where the
     /// batch should have left it. A batch that settles elsewhere is corrected from the position
-    /// the guest reports.
+    /// the guest reports once it has gone quiet there ([`settled_for_batch`]).
     fn move_to(&mut self, what: &str, target: Point) -> Result<(), XtaskError> {
         let mut corrections = 0;
         loop {
@@ -214,39 +243,32 @@ impl Lane {
                     "{what}: pointer settled at x={} y={}",
                     expected.x, expected.y
                 );
-                let polled =
-                    self.session
-                        .poll(
-                            &waiting,
-                            SETTLE_WAIT,
-                            &mut |segment| match last_settled(segment) {
-                                Some(at) if at == expected => Ok(()),
-                                Some(at) => Err(format!(
-                                    "the pointer last settled at x={} y={}",
-                                    at.x, at.y
-                                )),
-                                None => {
-                                    Err("no [INPT] pointer settled line since the move".to_owned())
-                                }
-                            },
-                        )?;
-                if let Err(reason) = polled {
-                    let Some(at) = last_settled(&self.session.segment()) else {
+                let polled = self.session.poll(&waiting, SETTLE_WAIT, &mut |segment| {
+                    settled_for_batch(segment, expected)
+                })?;
+                match polled {
+                    Ok(at) if at == expected => {}
+                    Ok(at) => {
+                        println!(
+                            "\n[STD ] {waiting}: the pointer settled at x={} y={} and the guest went quiet; correcting",
+                            at.x, at.y
+                        );
+                        corrections += 1;
+                        if corrections > CORRECTIONS {
+                            return self.fail(format!(
+                                "{what}: the pointer did not settle at x={} y={} after {CORRECTIONS} corrections; it is at x={} y={}",
+                                target.x, target.y, at.x, at.y
+                            ));
+                        }
+                        self.pointer = Some(at);
+                        break;
+                    }
+                    Err(reason) => {
                         return self.fail(format!(
-                            "{what}: the guest never reported [INPT] pointer settled after the pointer was moved from x={} y={} towards x={} y={}",
+                            "{what}: the pointer did not settle after it was moved from x={} y={} towards x={} y={}: {reason}",
                             from.x, from.y, expected.x, expected.y
                         ));
-                    };
-                    println!("\n[STD ] {waiting}: {reason}; correcting");
-                    corrections += 1;
-                    if corrections > CORRECTIONS {
-                        return self.fail(format!(
-                            "{what}: the pointer did not settle at x={} y={} after {CORRECTIONS} corrections; it is at x={} y={}",
-                            target.x, target.y, at.x, at.y
-                        ));
                     }
-                    self.pointer = Some(at);
-                    break;
                 }
                 self.pointer = Some(expected);
             }
@@ -786,8 +808,29 @@ pub(crate) fn run() -> Result<(), XtaskError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_rows, last_settled, pointer_report};
+    use super::{check_rows, last_settled, pointer_report, settled_for_batch};
     use clean_slate_graphics::Point;
+
+    #[test]
+    fn a_batch_settled_part_way_is_corrected_only_once_the_guest_is_quiet() {
+        let expected = Point { x: 581, y: 33 };
+        let part_way = "[IPC ] console pid=4: [INPT] pointer settled x=481 y=41\n";
+        assert!(settled_for_batch(part_way, expected)
+            .unwrap_err()
+            .contains("has not gone quiet"));
+        // A quiet stretch before the part-way settle says nothing about the packets after it.
+        let quiet_before = format!("[IDLE ] quiet ms=500 presents=0 seq=4\n{part_way}");
+        assert!(settled_for_batch(&quiet_before, expected).is_err());
+        let quiet_after = format!("{part_way}[IDLE ] quiet ms=500 presents=0 seq=4\n");
+        assert_eq!(
+            settled_for_batch(&quiet_after, expected),
+            Ok(Point { x: 481, y: 41 })
+        );
+        let arrived =
+            format!("{part_way}[IPC ] console pid=4: [INPT] pointer settled x=581 y=33\n");
+        assert_eq!(settled_for_batch(&arrived, expected), Ok(expected));
+        assert!(settled_for_batch("[IDLE ] quiet ms=500 presents=0 seq=4\n", expected).is_err());
+    }
 
     #[test]
     fn a_settled_line_still_being_printed_is_not_read() {
