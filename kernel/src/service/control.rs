@@ -574,6 +574,12 @@ impl ServiceLifecycleController {
         ))
     }
 
+    /// Whether init declared `service` in this boot's manifest.
+    #[cfg(feature = "system-test-hooks")]
+    pub(crate) fn is_declared(&self, service: ServiceId) -> bool {
+        self.find_service(service).is_some()
+    }
+
     fn find_service(&self, service: ServiceId) -> Option<&ServiceRecord> {
         self.services
             .iter()

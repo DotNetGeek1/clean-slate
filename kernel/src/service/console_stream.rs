@@ -78,6 +78,11 @@ fn streams() -> &'static mut Streams {
 
 /// The caller's live `CONSOLE_CONNECT` capability on the console port, if it holds one.
 fn connect_capability(pid: u64) -> Option<CapabilityHandle> {
+    connect_record(pid).map(|(handle, _)| handle)
+}
+
+/// [`connect_capability`] with the record's rights.
+fn connect_record(pid: u64) -> Option<(CapabilityHandle, Rights)> {
     with_capability_space(|table| {
         (0..table.capacity()).find_map(|slot| {
             if table.state_at(slot) != CapabilityState::Live {
@@ -93,9 +98,18 @@ fn connect_capability(pid: u64) -> Option<CapabilityHandle> {
             {
                 return None;
             }
-            table.handle_at(slot)
+            table.handle_at(slot).map(|handle| (handle, record.rights))
         })
     })
+}
+
+/// Whether `pid` reads as a member of the console session (#311): the terminal's shell and
+/// its forks. Its input comes only from the session's front end, so a stream that ends reads
+/// as a hang-up, never as the serial line: after a console service fault (#358) the line
+/// discipline belongs to the serial shell, and the session member exits so that init starts a
+/// fresh one for the next terminal.
+fn session_member(pid: u64) -> bool {
+    connect_record(pid).is_some_and(|(_, rights)| rights.contains(Rights::CONSOLE_SESSION))
 }
 
 /// Whether `pid`'s console fds go through the console service.
@@ -316,7 +330,8 @@ fn take_input(pid: u64, out: &mut [u8]) -> Taken {
 
 /// `read(2)` on console input (fd 0) for a process whose console fds go through the service:
 /// the input the service answered its `READ` with. `None` when the service cannot be reached;
-/// the caller then reads the kernel's line discipline, as before the service existed.
+/// the caller then reads the kernel's line discipline, as before the service existed. A
+/// session member reads an end of input instead ([`session_member`]).
 pub(crate) fn read_input(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
@@ -343,7 +358,7 @@ pub(crate) fn read_input(
         }
         Taken::Gone => {
             forget(pid);
-            None
+            session_member(pid).then_some(Ok(0))
         }
     }
 }
@@ -368,7 +383,8 @@ pub(crate) fn input_readable(pid: u64) -> Option<bool> {
         Taken::Bytes(_) | Taken::End => Some(true),
         Taken::Gone => {
             forget(pid);
-            None
+            // A session member's read then returns its hang-up at once.
+            session_member(pid).then_some(true)
         }
     }
 }

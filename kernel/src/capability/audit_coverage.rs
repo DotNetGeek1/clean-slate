@@ -280,7 +280,7 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
     ),
     (
         "service/console_stream.rs",
-        "connect_capability",
+        "connect_record",
         NoDecision(LOOKUP),
     ),
     (
