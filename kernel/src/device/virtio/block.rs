@@ -52,6 +52,8 @@ const MSIX_QUEUE_ENTRY: u16 = 0;
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
+/// Status reads allowed after writing 0 before a reset counts as stuck (#199).
+const RESET_READBACK_LIMIT: u32 = 1024;
 
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
@@ -412,6 +414,41 @@ struct InFlightOperation {
     minimum_used_len: u32,
 }
 
+/// What the device was brought up with; a reset must bring it back to the same
+/// features and geometry, or the disk under the store is not the same disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NegotiatedDevice {
+    features: u32,
+    queue_size: u16,
+    block_size: u32,
+    block_count: u64,
+    sectors_per_block: u64,
+}
+
+/// Why a reset could not bring the device back; the device stays failed closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlockResetError {
+    /// The status register did not read back 0 after the reset write.
+    Stuck,
+    /// The device came back with other features, queue size or geometry.
+    Changed,
+    /// Queue or interrupt reprogramming failed.
+    BringUp(&'static str),
+    /// An earlier reset failed; the device stays down for the rest of the boot.
+    Failed,
+}
+
+impl BlockResetError {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Stuck => "device status did not clear",
+            Self::Changed => "device features or geometry changed",
+            Self::BringUp(message) => message,
+            Self::Failed => "an earlier reset failed",
+        }
+    }
+}
+
 /// Legacy virtio-block device with a single request in flight at a time.
 ///
 /// Submission and completion are split: `submit_*` hands one request to the
@@ -419,6 +456,13 @@ struct InFlightOperation {
 /// waiter harvests the result with [`Self::take_completion`]. Nothing here
 /// waits; callers block on their own wait key with a real-time deadline and
 /// call [`Self::abandon_in_flight`] when it passes.
+///
+/// A timeout or a malformed completion poisons the queue, because the device
+/// may still own the descriptors. Poisoning resets the device at once (#199):
+/// the reset stops it touching the ring, and the queue, its interrupt vector
+/// and `DRIVER_OK` are programmed again, so the next request can go ahead. The
+/// request that poisoned the queue still fails. A reset that fails leaves the
+/// device failed closed until the next boot.
 pub(crate) struct VirtioBlockDevice {
     registers: LegacyRegisters,
     queue: QueueState,
@@ -427,6 +471,14 @@ pub(crate) struct VirtioBlockDevice {
     sectors_per_block: u64,
     in_flight: Option<InFlightOperation>,
     queue_poisoned: bool,
+    interrupts: BlockInterruptRoute,
+    negotiated: NegotiatedDevice,
+    resets: u64,
+    reset_failed: bool,
+    /// Fault injection: the next submission is queued but the device is not
+    /// notified, so it never completes (a dropped completion).
+    #[cfg(feature = "m5-block-self-test")]
+    drop_next_notify: bool,
 }
 
 impl VirtioBlockDevice {
@@ -463,56 +515,19 @@ impl VirtioBlockDevice {
         registers: LegacyRegisters,
         interrupts: BlockInterruptRoute,
     ) -> Result<Self, &'static str> {
-        initialize_device_status(&registers);
-
-        let host_features = registers.read_u32(VIRTIO_PCI_HOST_FEATURES);
-        let negotiated_features = negotiate_features(host_features)?;
-        registers.write_u32(VIRTIO_PCI_GUEST_FEATURES, negotiated_features);
-
-        let config_offset = interrupts.device_config_offset();
-        let queue_size = initialize_queue_0(&registers)?;
-        let readonly = feature_enabled(negotiated_features, VIRTIO_BLK_F_RO);
-        let block_size = read_logical_block_size(&registers, config_offset, negotiated_features)?;
-        let (block_count, sectors_per_block) =
-            read_block_count(&registers, config_offset, block_size)?;
-        let max_transfer_blocks = calculate_max_transfer_blocks(block_size)?;
+        let negotiated = program_device(&registers, interrupts)?;
         let device_id = BlockDeviceId::new(encode_device_id(function));
+        let max_transfer_blocks = calculate_max_transfer_blocks(negotiated.block_size)?;
         let geometry = BlockGeometry::new(
             device_id,
-            block_size,
-            block_count,
+            negotiated.block_size,
+            negotiated.block_count,
             max_transfer_blocks,
-            readonly,
+            feature_enabled(negotiated.features, VIRTIO_BLK_F_RO),
         )
         .map_err(map_geometry_error)?;
-
-        let queue_layout = QueueLayout::compute(queue_size, VIRTQ_ALIGN)?;
-        if align_of::<QueueMemory>() < VIRTQ_ALIGN {
-            return Err("virtio DMA queue memory alignment is too small");
-        }
-
-        let memory_base = unsafe { core::ptr::addr_of_mut!(QUEUE_MEMORY.bytes) as *mut u8 };
-        let mut queue = QueueState {
-            memory_base,
-            layout: queue_layout,
-            last_used_idx: 0,
-        };
-        queue.clear_ring();
-
-        let queue_physical = physical_address_for_contiguous_range(
-            memory_base as *const u8,
-            queue.layout.total_bytes,
-        )?;
-        let queue_pfn = queue_pfn_from_physical_address(queue_physical)?;
-        registers.write_u16(VIRTIO_PCI_QUEUE_SEL, VIRTQ_QUEUE_SELECT_0);
-        registers.write_u32(VIRTIO_PCI_QUEUE_PFN, queue_pfn);
-        if matches!(interrupts, BlockInterruptRoute::Msix { .. }) {
-            registers.write_u16(VIRTIO_MSI_CONFIG_VECTOR, VIRTIO_MSI_NO_VECTOR);
-            assign_queue_vector(&registers, VIRTQ_QUEUE_SELECT_0, MSIX_QUEUE_ENTRY)?;
-        }
-
-        let status = registers.read_u8(VIRTIO_PCI_STATUS) | VIRTIO_STATUS_DRIVER_OK;
-        registers.write_u8(VIRTIO_PCI_STATUS, status);
+        let queue = attach_queue(&registers, interrupts, negotiated.queue_size)?;
+        set_driver_ok(&registers);
 
         Ok(Self {
             registers,
@@ -526,10 +541,90 @@ impl VirtioBlockDevice {
                 status: 0xff,
             },
             geometry,
-            sectors_per_block,
+            sectors_per_block: negotiated.sectors_per_block,
             in_flight: None,
             queue_poisoned: false,
+            interrupts,
+            negotiated,
+            resets: 0,
+            reset_failed: false,
+            #[cfg(feature = "m5-block-self-test")]
+            drop_next_notify: false,
         })
+    }
+
+    /// Completed resets since discovery.
+    pub(crate) fn reset_count(&self) -> u64 {
+        self.resets
+    }
+
+    /// Whether the device accepts requests: not poisoned, or reset since.
+    pub(crate) fn is_ready(&self) -> bool {
+        !self.queue_poisoned
+    }
+
+    /// Fault injection for the M5.2 lane: queue the next request without
+    /// notifying the device, so its completion never arrives and the caller's
+    /// deadline passes.
+    #[cfg(feature = "m5-block-self-test")]
+    pub(crate) fn drop_next_completion(&mut self) {
+        self.drop_next_notify = true;
+    }
+
+    /// Reset the device and bring its queue back (#199). Any request it still
+    /// owned is gone: the caller must already have failed it. The interrupt
+    /// route stays allocated; the device-side MSI-X vector is assigned again
+    /// because a virtio reset clears it.
+    fn reset(&mut self) -> Result<(), BlockResetError> {
+        if self.reset_failed {
+            return Err(BlockResetError::Failed);
+        }
+        self.in_flight = None;
+        self.queue_poisoned = true;
+        match self.reset_and_reprogram() {
+            Ok(()) => {
+                self.queue_poisoned = false;
+                self.resets = self.resets.saturating_add(1);
+                kernel_log_fmt(format_args!(
+                    "[BLK ] device reset complete resets={}\n",
+                    self.resets
+                ));
+                Ok(())
+            }
+            Err(error) => {
+                self.reset_failed = true;
+                // Leave the device stopped rather than half programmed.
+                self.registers.write_u8(VIRTIO_PCI_STATUS, 0);
+                kernel_log_fmt(format_args!(
+                    "[BLK ] device reset failed: {}\n",
+                    error.as_str()
+                ));
+                Err(error)
+            }
+        }
+    }
+
+    fn reset_and_reprogram(&mut self) -> Result<(), BlockResetError> {
+        // Writing 0 stops the device; once the status reads back 0 it no longer
+        // reads or writes the ring or the buffers it was given.
+        self.registers.write_u8(VIRTIO_PCI_STATUS, 0);
+        if !wait_for_reset(|| self.registers.read_u8(VIRTIO_PCI_STATUS)) {
+            return Err(BlockResetError::Stuck);
+        }
+        if matches!(self.interrupts, BlockInterruptRoute::Intx { .. }) {
+            // Clear a queue interrupt the abandoned request may have left asserted.
+            let _ = self.registers.read_u8(VIRTIO_PCI_ISR_STATUS);
+        }
+        let negotiated =
+            program_device(&self.registers, self.interrupts).map_err(BlockResetError::BringUp)?;
+        if negotiated != self.negotiated {
+            return Err(BlockResetError::Changed);
+        }
+        self.queue = attach_queue(&self.registers, self.interrupts, negotiated.queue_size)
+            .map_err(BlockResetError::BringUp)?;
+        self.request.status = 0xff;
+        set_driver_ok(&self.registers);
+        Ok(())
     }
 
     pub(crate) fn geometry(&self) -> BlockGeometry {
@@ -603,6 +698,7 @@ impl VirtioBlockDevice {
     /// Harvest the in-flight request if the device has completed it. Read data
     /// is copied into `read_into` (which must be the submitted length); `None`
     /// discards it. Returns `None` while the device still owns the request.
+    /// A malformed completion fails the request and resets the device.
     pub(crate) fn take_completion(
         &mut self,
         read_into: Option<&mut [u8]>,
@@ -611,6 +707,9 @@ impl VirtioBlockDevice {
         let used = self.queue.take_used()?;
         self.in_flight = None;
         let result = self.check_completion(operation, used);
+        if self.queue_poisoned {
+            let _ = self.reset();
+        }
         if result.is_err() || !operation.device_writes_data {
             return Some(result);
         }
@@ -629,11 +728,15 @@ impl VirtioBlockDevice {
     }
 
     /// Give up on the in-flight request after its deadline. The device may still
-    /// write the descriptors it owns, so the queue is poisoned until reset.
-    pub(crate) fn abandon_in_flight(&mut self) {
-        if self.in_flight.take().is_some() {
-            self.queue_poisoned = true;
+    /// write the descriptors it owns, so it is reset before anything else is
+    /// submitted. The abandoned request's caller must fail it; `Err` means the
+    /// reset failed and the device stays failed closed.
+    pub(crate) fn abandon_in_flight(&mut self) -> Result<(), BlockResetError> {
+        if self.in_flight.take().is_none() {
+            return Ok(());
         }
+        self.queue_poisoned = true;
+        self.reset()
     }
 
     fn submit_rw(
@@ -730,6 +833,10 @@ impl VirtioBlockDevice {
     fn start(&mut self, operation: InFlightOperation) {
         self.in_flight = Some(operation);
         self.queue.submit_head(0);
+        #[cfg(feature = "m5-block-self-test")]
+        if core::mem::take(&mut self.drop_next_notify) {
+            return;
+        }
         self.registers.write_u16(VIRTIO_PCI_QUEUE_NOTIFY, 0);
     }
 
@@ -840,6 +947,73 @@ fn assign_queue_vector(
         return Err("virtio block rejected its MSI-X queue vector");
     }
     Ok(())
+}
+
+/// Status, features and device config: everything up to the queue address.
+/// Discovery and reset both start from a device whose status is 0.
+fn program_device(
+    registers: &LegacyRegisters,
+    interrupts: BlockInterruptRoute,
+) -> Result<NegotiatedDevice, &'static str> {
+    initialize_device_status(registers);
+
+    let host_features = registers.read_u32(VIRTIO_PCI_HOST_FEATURES);
+    let features = negotiate_features(host_features)?;
+    registers.write_u32(VIRTIO_PCI_GUEST_FEATURES, features);
+
+    let config_offset = interrupts.device_config_offset();
+    let queue_size = initialize_queue_0(registers)?;
+    let block_size = read_logical_block_size(registers, config_offset, features)?;
+    let (block_count, sectors_per_block) = read_block_count(registers, config_offset, block_size)?;
+    Ok(NegotiatedDevice {
+        features,
+        queue_size,
+        block_size,
+        block_count,
+        sectors_per_block,
+    })
+}
+
+/// Clear the static ring, give the device its address and, with MSI-X, point
+/// the queue at its table entry.
+fn attach_queue(
+    registers: &LegacyRegisters,
+    interrupts: BlockInterruptRoute,
+    queue_size: u16,
+) -> Result<QueueState, &'static str> {
+    let queue_layout = QueueLayout::compute(queue_size, VIRTQ_ALIGN)?;
+    if align_of::<QueueMemory>() < VIRTQ_ALIGN {
+        return Err("virtio DMA queue memory alignment is too small");
+    }
+
+    let memory_base = unsafe { core::ptr::addr_of_mut!(QUEUE_MEMORY.bytes) as *mut u8 };
+    let mut queue = QueueState {
+        memory_base,
+        layout: queue_layout,
+        last_used_idx: 0,
+    };
+    queue.clear_ring();
+
+    let queue_physical =
+        physical_address_for_contiguous_range(memory_base as *const u8, queue.layout.total_bytes)?;
+    let queue_pfn = queue_pfn_from_physical_address(queue_physical)?;
+    registers.write_u16(VIRTIO_PCI_QUEUE_SEL, VIRTQ_QUEUE_SELECT_0);
+    registers.write_u32(VIRTIO_PCI_QUEUE_PFN, queue_pfn);
+    if matches!(interrupts, BlockInterruptRoute::Msix { .. }) {
+        registers.write_u16(VIRTIO_MSI_CONFIG_VECTOR, VIRTIO_MSI_NO_VECTOR);
+        assign_queue_vector(registers, VIRTQ_QUEUE_SELECT_0, MSIX_QUEUE_ENTRY)?;
+    }
+    Ok(queue)
+}
+
+fn set_driver_ok(registers: &LegacyRegisters) {
+    let status = registers.read_u8(VIRTIO_PCI_STATUS) | VIRTIO_STATUS_DRIVER_OK;
+    registers.write_u8(VIRTIO_PCI_STATUS, status);
+}
+
+/// Whether `read_status` reads back 0 within [`RESET_READBACK_LIMIT`] reads.
+fn wait_for_reset(mut read_status: impl FnMut() -> u8) -> bool {
+    (0..RESET_READBACK_LIMIT).any(|_| read_status() == 0)
 }
 
 fn initialize_device_status(registers: &LegacyRegisters) {
@@ -1058,6 +1232,27 @@ mod tests {
     fn minimum_used_len_for_rw_matches_direction() {
         assert_eq!(minimum_used_len_for_rw(false, 4096).unwrap(), 1);
         assert_eq!(minimum_used_len_for_rw(true, 4096).unwrap(), 4097);
+    }
+
+    #[test]
+    fn reset_waits_for_status_to_clear_within_its_bound() {
+        assert!(wait_for_reset(|| 0));
+        let mut reads = 0u32;
+        assert!(wait_for_reset(|| {
+            reads += 1;
+            if reads < 3 {
+                VIRTIO_STATUS_DRIVER_OK
+            } else {
+                0
+            }
+        }));
+        assert_eq!(reads, 3);
+        let mut stuck_reads = 0u32;
+        assert!(!wait_for_reset(|| {
+            stuck_reads += 1;
+            VIRTIO_STATUS_DRIVER_OK
+        }));
+        assert_eq!(stuck_reads, RESET_READBACK_LIMIT);
     }
 
     #[test]

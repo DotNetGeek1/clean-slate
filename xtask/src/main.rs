@@ -889,7 +889,7 @@ const M8_LINUX_IMAGE_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[M8.2] linux torn down pid=",
     "[M8.2] PASS",
 ];
-const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 8] = [
+const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[BLK ] irq vector=",
     "[VIRT] block device found",
     "[BLK ] virtio-block ready blocks=",
@@ -897,6 +897,9 @@ const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BLK ] flush complete",
     "[BLK ] read lba=",
     "[BLK ] completion interrupts=",
+    "[BLK ] device reset complete resets=1",
+    "[BLK ] fault dropped-completion timed out; resets=1",
+    "[BLK ] after reset write+flush+read lba=",
     "[M5.2] PASS",
 ];
 const M10_VMOD_MSIX_MARKERS: [&str; 14] = [
