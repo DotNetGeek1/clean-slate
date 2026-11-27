@@ -2,23 +2,29 @@
 
 use embedded_tls::{Aes128GcmSha256, CryptoProvider, TlsVerifier};
 
-/// Hermetic trust parameters for TLS verification.
+use crate::tls::verify::TrustStoreVerifier;
+
+/// What one TLS transaction verifies the server against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TlsConfig<'a> {
+    /// The name the server certificate must carry.
     pub server_name: &'a str,
-    pub trust_anchor_der: &'a [u8],
-    pub validation_time_unix: u64,
+    /// Trust anchors (DER X.509); an empty set trusts nothing.
+    pub trust_anchors: &'a [&'a [u8]],
+    /// Wall-clock Unix seconds to check validity periods at. `None` (no wall clock this boot)
+    /// fails the transaction closed before it connects ([`crate::tls::TlsError::NoClock`]).
+    pub validation_time_unix: Option<u64>,
 }
 
 impl<'a> TlsConfig<'a> {
     pub const fn new(
         server_name: &'a str,
-        trust_anchor_der: &'a [u8],
-        validation_time_unix: u64,
+        trust_anchors: &'a [&'a [u8]],
+        validation_time_unix: Option<u64>,
     ) -> Self {
         Self {
             server_name,
-            trust_anchor_der,
+            trust_anchors,
             validation_time_unix,
         }
     }
@@ -26,7 +32,7 @@ impl<'a> TlsConfig<'a> {
 
 pub(super) struct M7CryptoProvider<'a, R> {
     pub(super) rng: R,
-    pub(super) verifier: crate::tls::verify::PinnedVerifier<'a>,
+    pub(super) verifier: TrustStoreVerifier<'a>,
 }
 
 impl<'a, R: rand_core::CryptoRngCore> CryptoProvider for M7CryptoProvider<'a, R> {

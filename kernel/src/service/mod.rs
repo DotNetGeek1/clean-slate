@@ -23,6 +23,12 @@ pub(crate) mod lifecycle_wait;
 #[cfg(feature = "m8-linux-image")]
 pub(crate) mod linux_launch;
 pub(crate) mod net_bridge;
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+pub(crate) mod net_launch;
 pub(crate) mod net_request_wake;
 pub(crate) mod net_syscall;
 pub(crate) mod port;

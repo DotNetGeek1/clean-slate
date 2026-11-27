@@ -34,7 +34,6 @@ mod integration {
         load_fixture_server_config, server_config_from_der, TcpState, TcpTransport, TlsPeerCert,
         TlsPeerFault, TlsTestPeer,
     };
-    use crate::tls::verify::VALIDATION_TIME_UNIX;
     use crate::tls::{
         tls_transaction, TlsConfig, TlsError, TlsTransactionBudget, TlsTransactionClock,
         TLS_RECORD_BUFFER_BYTES,
@@ -43,6 +42,8 @@ mod integration {
     const ARP_TTL: u64 = 1000;
     const OWNER: TrustedCaller = TrustedCaller::new(1, 1, 1);
     const PINNED_CA: &[u8] = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
+    /// 2026-11-27T00:00:00Z, inside the fixture certificates' 2020..2120 validity.
+    const NOW_UNIX: u64 = 1_795_737_600;
 
     /// The network stack's generator, as the service hands it to each TLS transaction.
     fn seeded_rng(seed: u64) -> NetRng {
@@ -147,6 +148,27 @@ mod integration {
         start: u64,
         response: &mut [u8],
     ) -> (Result<usize, TlsError>, u64) {
+        run_client_with(
+            guest,
+            peer,
+            &[anchor],
+            Some(NOW_UNIX),
+            seed,
+            start,
+            response,
+        )
+    }
+
+    /// [`run_client`] with an explicit anchor set and wall-clock time.
+    fn run_client_with(
+        guest: *mut TcpTransport<FakeLink>,
+        peer: &mut TlsTestPeer<FakeLink>,
+        anchors: &[&[u8]],
+        wall_unix: Option<u64>,
+        seed: u64,
+        start: u64,
+        response: &mut [u8],
+    ) -> (Result<usize, TlsError>, u64) {
         let clock = TlsTransactionClock::new();
         clock.set_now(start);
         let mut read_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
@@ -159,7 +181,7 @@ mod integration {
                 TRANSACTION_BUDGET,
                 OWNER,
                 SocketAddrV4::new(PEER_IPV4, TLS_PORT),
-                TlsConfig::new(TLS_SERVER_NAME, anchor, VALIDATION_TIME_UNIX),
+                TlsConfig::new(TLS_SERVER_NAME, anchors, wall_unix),
                 seeded_rng(seed),
                 &mut read_buf,
                 &mut write_buf,
@@ -214,7 +236,7 @@ mod integration {
                 TRANSACTION_BUDGET,
                 OWNER,
                 SocketAddrV4::new(PEER_IPV4, TLS_PORT),
-                TlsConfig::new(TLS_SERVER_NAME, PINNED_CA, VALIDATION_TIME_UNIX),
+                TlsConfig::new(TLS_SERVER_NAME, &[PINNED_CA], Some(NOW_UNIX)),
                 seeded_rng(3),
                 &mut read_buf,
                 &mut write_buf,
@@ -301,6 +323,96 @@ mod integration {
         let (result, _) = run_client(guest, &mut peer, PINNED_CA, 5, 200, &mut response);
         let len = result.unwrap_or_else(|e| panic!("reconnect failed: {e:?}"));
         assert_eq!(&response[..len], APP_RESPONSE_BYTES);
+    }
+
+    /// A self-signed P-256 CA that issued nothing the peer sends.
+    fn unrelated_ca() -> Vec<u8> {
+        let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "Unrelated Root");
+        params.self_signed(&key).unwrap().der().to_vec()
+    }
+
+    #[test]
+    fn the_anchor_that_issued_the_chain_is_chosen_from_a_set() {
+        let (mut guest, mut peer) = setup_tls_pair(TlsPeerCert::FixtureCorrect, TlsPeerFault::None);
+        let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+        let other = unrelated_ca();
+        let mut response = [0u8; 64];
+        let anchors: [&[u8]; 2] = [&other, PINNED_CA];
+        let (result, _) = run_client_with(
+            guest,
+            &mut peer,
+            &anchors,
+            Some(NOW_UNIX),
+            11,
+            0,
+            &mut response,
+        );
+        let len = result.unwrap_or_else(|e| panic!("transaction failed: {e:?}"));
+        assert_eq!(&response[..len], APP_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn no_matching_or_no_anchor_fails_peer_identity() {
+        let other = unrelated_ca();
+        for anchors in [&[&other[..]][..], &[][..]] {
+            let (mut guest, mut peer) =
+                setup_tls_pair(TlsPeerCert::FixtureCorrect, TlsPeerFault::None);
+            let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+            let mut response = [0u8; 64];
+            let (result, _) = run_client_with(
+                guest,
+                &mut peer,
+                anchors,
+                Some(NOW_UNIX),
+                12,
+                0,
+                &mut response,
+            );
+            assert!(matches!(result, Err(TlsError::PeerIdentity)), "{result:?}");
+            assert_eq!(unsafe { &*guest }.connections_in_use(), 0);
+        }
+    }
+
+    #[test]
+    fn certificates_are_checked_at_the_wall_clock_time() {
+        // 2019 is before the fixture chain's notBefore; 2121 is after its notAfter.
+        for wall in [1_546_300_800, 4_765_132_800] {
+            let (mut guest, mut peer) =
+                setup_tls_pair(TlsPeerCert::FixtureCorrect, TlsPeerFault::None);
+            let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+            let mut response = [0u8; 64];
+            let (result, _) = run_client_with(
+                guest,
+                &mut peer,
+                &[PINNED_CA],
+                Some(wall),
+                13,
+                0,
+                &mut response,
+            );
+            assert!(
+                matches!(result, Err(TlsError::PeerIdentity)),
+                "{wall}: {result:?}"
+            );
+            assert_eq!(unsafe { &*guest }.connections_in_use(), 0);
+        }
+    }
+
+    #[test]
+    fn no_wall_clock_fails_closed_before_connecting() {
+        let (mut guest, mut peer) = setup_tls_pair(TlsPeerCert::FixtureCorrect, TlsPeerFault::None);
+        let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+        let mut response = [0u8; 64];
+        let (result, _) =
+            run_client_with(guest, &mut peer, &[PINNED_CA], None, 14, 0, &mut response);
+        assert!(matches!(result, Err(TlsError::NoClock)), "{result:?}");
+        assert_eq!(unsafe { &*guest }.connections_in_use(), 0);
     }
 
     #[test]

@@ -77,3 +77,40 @@ impl FixturePeer {
 pub const FIXTURE_PEER: FixturePeer = FixturePeer::host_peer();
 
 pub const GUEST_SOCKET: SocketAddrV4 = SocketAddrV4::new(GUEST_IPV4, 0);
+
+/// The hermetic lab network as a launch-time configuration: the guest on the /24, the peer as
+/// its gateway (pinned to [`PEER_MAC`]) and resolver, and [`TLS_SERVER_NAME`] as the name the
+/// native TLS session verifies. Only test launchers hand this to the network service.
+pub const FIXTURE_ROUTE: crate::config::Ipv4Route = crate::config::Ipv4Route {
+    local: GUEST_IPV4,
+    prefix_len: SUBNET_PREFIX_LEN,
+    gateway: Some(GATEWAY_IPV4),
+};
+
+pub const FIXTURE_NETWORK_CONFIG: crate::config::NetworkConfig =
+    crate::config::NetworkConfig::new_static(
+        FIXTURE_ROUTE,
+        Some(PEER_MAC),
+        Some(DNS_SERVER_ADDR),
+        TLS_SERVER_NAME,
+    );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_fixture_network_config_parses_to_the_lab_network() {
+        let network = FIXTURE_NETWORK_CONFIG.parse().unwrap();
+        assert_eq!(network.route, FIXTURE_ROUTE);
+        assert_eq!(network.resolver, Some(DNS_SERVER_ADDR));
+        assert_eq!(
+            network.pinned_neighbour(PEER_IPV4),
+            Some((PEER_IPV4, PEER_MAC))
+        );
+        assert_eq!(
+            network.tls_peer_name.unwrap().as_str().unwrap(),
+            TLS_SERVER_NAME
+        );
+    }
+}

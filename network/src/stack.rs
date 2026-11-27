@@ -3,10 +3,10 @@
 use crate::addr::{EtherType, IpProtocol, Ipv4Addr, MacAddr};
 use crate::arp::{ArpCache, ArpPacket};
 use crate::buffer::FrameBuf;
+use crate::config::Ipv4Route;
 use crate::device::NetworkLink;
 use crate::error::NetworkError;
 use crate::ethernet::{EthernetFrame, EthernetHeader, ParseError};
-use crate::fixture::SUBNET_PREFIX_LEN;
 use crate::icmp::{build_echo_reply, build_echo_request, IcmpMessage};
 use crate::ipv4::{Ipv4Header, IPV4_MIN_HEADER_LEN};
 use crate::limits::{MAX_ETHERNET_FRAME_BYTES, MAX_L3_PAYLOAD_BYTES};
@@ -73,23 +73,32 @@ pub struct StackStats {
     pub ipv4_forwarded: u64,
 }
 
-/// Bounded L2/L3 stack for one NIC / one IPv4 address (same-subnet /24 only).
+/// Bounded L2/L3 stack for one NIC / one IPv4 address, with one on-link prefix and an
+/// optional default gateway ([`Ipv4Route`]).
 pub struct L3Stack<L: NetworkLink> {
     link: L,
     our_mac: MacAddr,
     our_ip: Ipv4Addr,
+    route: Ipv4Route,
     arp: ArpCache,
     stats: StackStats,
     next_identification: u16,
 }
 
 impl<L: NetworkLink> L3Stack<L> {
-    /// Creates a stack bound to `our_mac` / `our_ip` with the given ARP cache TTL.
+    /// Creates a stack bound to `our_mac` / `our_ip` on an on-link /24 with no gateway, with
+    /// the given ARP cache TTL.
     pub fn new(link: L, our_mac: MacAddr, our_ip: Ipv4Addr, arp_ttl_ticks: u64) -> Self {
+        Self::with_route(link, our_mac, Ipv4Route::on_link_24(our_ip), arp_ttl_ticks)
+    }
+
+    /// Creates a stack bound to `our_mac` and `route` (address, prefix, gateway).
+    pub fn with_route(link: L, our_mac: MacAddr, route: Ipv4Route, arp_ttl_ticks: u64) -> Self {
         Self {
             link,
             our_mac,
-            our_ip,
+            our_ip: route.local,
+            route,
             arp: ArpCache::new(arp_ttl_ticks),
             stats: StackStats::default(),
             next_identification: 1,
@@ -110,6 +119,10 @@ impl<L: NetworkLink> L3Stack<L> {
 
     pub fn our_ip(&self) -> Ipv4Addr {
         self.our_ip
+    }
+
+    pub fn route(&self) -> Ipv4Route {
+        self.route
     }
 
     pub fn stats(&self) -> StackStats {
@@ -141,10 +154,12 @@ impl<L: NetworkLink> L3Stack<L> {
         self.dispatch_frame(frame, now)
     }
 
-    /// Sends an IPv4 datagram on the local /24 (no routing).
+    /// Sends an IPv4 datagram to `dst_ip` through its next hop: `dst_ip` itself on the local
+    /// prefix, else the gateway.
     ///
-    /// Returns [`NetworkError::Unreachable`] when the neighbor MAC is not cached and an ARP
-    /// request was emitted (bounded); callers should `poll` and retry.
+    /// Returns [`NetworkError::Unreachable`] when there is no route, or when the next hop's
+    /// MAC is not cached and an ARP request was emitted (bounded); callers should `poll` and
+    /// retry.
     pub fn send_ipv4<W>(
         &mut self,
         now: u64,
@@ -156,10 +171,10 @@ impl<L: NetworkLink> L3Stack<L> {
     where
         W: FnOnce(&mut [u8]) -> Result<(), NetworkError>,
     {
-        if !same_subnet(self.our_ip, dst_ip, SUBNET_PREFIX_LEN) {
+        let Some(next_hop) = self.route.next_hop(dst_ip) else {
             return Err(NetworkError::Unreachable);
-        }
-        if let Some(mac) = self.arp.lookup(dst_ip, now) {
+        };
+        if let Some(mac) = self.arp.lookup(next_hop, now) {
             return self.transmit_ipv4(
                 mac,
                 self.our_ip,
@@ -169,8 +184,8 @@ impl<L: NetworkLink> L3Stack<L> {
                 write_payload,
             );
         }
-        if self.arp.track_pending(dst_ip) {
-            let req = ArpPacket::request(self.our_mac, self.our_ip, dst_ip);
+        if self.arp.track_pending(next_hop) {
+            let req = ArpPacket::request(self.our_mac, self.our_ip, next_hop);
             let _ = self.transmit_arp(req, MacAddr::new([0xFF; 6]));
             self.stats.arp_requests_sent += 1;
         }
@@ -200,6 +215,10 @@ impl<L: NetworkLink> L3Stack<L> {
         frame: FrameBuf,
         now: u64,
     ) -> Result<Option<Inbound>, NetworkError> {
+        // Without an address the stack answers nothing and delivers nothing.
+        if !self.route.is_configured() {
+            return Ok(None);
+        }
         let data = frame.as_slice();
         let (eth, l3) = match EthernetFrame::parse_frame(data) {
             Ok(v) => v,
@@ -423,12 +442,17 @@ fn reserve_zero_bytes(
     Ok(())
 }
 
-/// M7 lab networks use [`SUBNET_PREFIX_LEN`] /24 only.
+/// Whether `a` and `b` share the first `prefix_len` bits (`prefix_len` 0..=32).
 pub fn same_subnet(a: Ipv4Addr, b: Ipv4Addr, prefix_len: u8) -> bool {
-    if prefix_len != SUBNET_PREFIX_LEN {
+    if prefix_len > 32 {
         return false;
     }
-    a.octets()[0..3] == b.octets()[0..3]
+    Ipv4Route {
+        local: a,
+        prefix_len,
+        gateway: None,
+    }
+    .on_link(b)
 }
 
 impl From<crate::device::NetworkDeviceError> for NetworkError {
@@ -477,6 +501,75 @@ mod tests {
         }
         assert!(reply.is_some());
         assert!(b.stats().icmp_replies_sent >= 1);
+    }
+
+    #[test]
+    fn off_link_destinations_go_through_the_gateway() {
+        let local = Ipv4Addr::new([10, 0, 2, 15]);
+        let gateway = Ipv4Addr::new([10, 0, 2, 2]);
+        let gateway_mac = MacAddr::new([0x52, 0x55, 0x0a, 0x00, 0x02, 0x02]);
+        let remote = Ipv4Addr::new([192, 0, 2, 7]);
+        let mac = MacAddr::new([0x02; 6]);
+        let route = Ipv4Route {
+            local,
+            prefix_len: 24,
+            gateway: Some(gateway),
+        };
+        let mut stack = L3Stack::with_route(FakeLink::new(mac, true), mac, route, 1000);
+        let err = stack
+            .send_ipv4(0, remote, IpProtocol::UDP, 0, |_| Ok(()))
+            .unwrap_err();
+        assert!(matches!(err, NetworkError::Unreachable));
+        // The stack asked for the gateway, not the remote host.
+        assert!(stack.arp_cache().is_pending(gateway));
+        assert!(!stack.arp_cache().is_pending(remote));
+
+        stack.arp_cache_mut().insert(gateway, gateway_mac, 0);
+        stack.link().drained_tx();
+        stack
+            .send_ipv4(1, remote, IpProtocol::UDP, 0, |_| Ok(()))
+            .unwrap();
+        let sent = stack.link().drained_tx();
+        assert_eq!(sent.len(), 1);
+        let (eth, l3) = EthernetFrame::parse_frame(sent[0].as_slice()).unwrap();
+        assert_eq!(eth.dst, gateway_mac);
+        let (ipv4, _) = Ipv4Header::parse(l3).unwrap();
+        assert_eq!(ipv4.dst, remote);
+        assert_eq!(ipv4.src, local);
+    }
+
+    #[test]
+    fn without_a_gateway_off_link_is_unreachable_and_sends_nothing() {
+        let mac = MacAddr::new([0x02; 6]);
+        let mut stack = L3Stack::new(FakeLink::new(mac, true), mac, GUEST_IPV4, 1000);
+        let err = stack
+            .send_ipv4(0, Ipv4Addr::new([192, 0, 2, 7]), IpProtocol::UDP, 0, |_| {
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(err, NetworkError::Unreachable));
+        assert_eq!(stack.link().tx_depth(), 0);
+    }
+
+    #[test]
+    fn an_unconfigured_stack_sends_and_answers_nothing() {
+        let mac = MacAddr::new([0x02; 6]);
+        let mut stack =
+            L3Stack::with_route(FakeLink::new(mac, true), mac, Ipv4Route::UNCONFIGURED, 1000);
+        assert!(stack
+            .send_ipv4(0, PEER_IPV4, IpProtocol::UDP, 0, |_| Ok(()))
+            .is_err());
+        let probe = ArpPacket::request(MacAddr::new([0x04; 6]), PEER_IPV4, Ipv4Addr::new([0; 4]));
+        stack
+            .link()
+            .inject_rx(arp_frame(
+                MacAddr::new([0xff; 6]),
+                MacAddr::new([0x04; 6]),
+                probe,
+            ))
+            .unwrap();
+        assert!(stack.poll(0).unwrap().is_none());
+        assert_eq!(stack.link().tx_depth(), 0);
     }
 
     #[test]

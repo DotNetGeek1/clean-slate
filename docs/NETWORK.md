@@ -73,6 +73,13 @@ Every `NetworkRequest` / `NetworkResponse` is one fixed 64-byte frame so it fits
 
 Constants live in `network/src/fixture.rs`. Acceptance assumes a private `10.77.0.0/24` lab network, fixed DNS answers, echo/TLS ports, and repository-owned certificates under `xtask/fixtures/m7/`. No public Internet, public DNS, external PKI, or host LAN dependencies.
 
+The network service image itself carries none of this (#221 stage D). The kernel writes a launch block beside the service's bootstrap (`NetworkServiceLaunch` at `NETWORK_SERVICE_LAUNCH_OFFSET` in the bootstrap page): a `NetworkConfig` (address, prefix, gateway, optional pinned gateway MAC, resolver, and the name the native TLS session verifies), a `TrustAnchors` store, and, for self-test client-mode probes, a `NetworkProbe` (what to resolve, connect to and expect). `kernel/src/service/net_launch.rs` picks them:
+
+- Test kernels (the M7 feature sets, `cfg(clean_slate_fixture_network)`) hand over `FIXTURE_NETWORK_CONFIG` and the M7 test CA. Only they compile `ca.crt` in.
+- Every other kernel hands over `CLEAN_SLATE_NET_STATIC` from the build (`local/prefix[,gw=a.b.c.d][,gw_mac=..][,dns=a.b.c.d[:port]][,tls_name=name]`), or an unconfigured network (no address: every send is unreachable), and the `*.der` anchors in `kernel/trust-anchors/` (or `CLEAN_SLATE_TRUST_ANCHORS_DIR`), empty today.
+
+The service checks the block (`NetworkConfig::parse`, `TrustAnchors::set`) and stops before it is ready, with `aux_status` `NETWORK_SERVICE_AUX_BAD_LAUNCH`, when it does not check out. `L3Stack::with_route` routes off-prefix destinations through the gateway; the service pins the gateway's MAC only when the configuration names one, and otherwise resolves it with ARP.
+
 ## M7.7 network capabilities & attribution
 
 Kernel broker: `kernel/src/capability/network.rs`. Live generation lookup:
@@ -478,8 +485,8 @@ Enable in consumers: `clean-slate-network` feature `tls` (kernel: `m7-tls-self-t
 ### Supported subset
 
 - TLS **1.3** client only; cipher suite via `embedded-tls` default (`AES-128-GCM-SHA256`).
-- Server authentication: single **pinned DER trust anchor** (`TlsConfig::trust_anchor_der`), hostname/SAN vs `TlsConfig::server_name`.
-- **Fixed validation time** [`VALIDATION_TIME_UNIX`](../network/src/tls/verify.rs) = 2030-01-01 UTC (guest has no wall clock).
+- Server authentication: a set of DER trust anchors (`TlsConfig::trust_anchors`, at most `MAX_TRUST_ANCHORS`); [`TrustStoreVerifier`](../network/src/tls/verify.rs) picks the anchor whose subject is the issuer of the top certificate the server sent, then checks the chain and hostname/SAN vs `TlsConfig::server_name`. Chains are ECDSA P-256 / SHA-256 only.
+- **Validation time** is the wall clock: `TlsConfig::validation_time_unix` (the service reads syscall 24 `CLOCK` WALL per transaction, the in-kernel lane `wall_clock_ns`). `None`, a boot with no trusted wall clock, fails the transaction with `TlsError::NoClock` before it connects.
 - Record buffers: [`TLS_RECORD_BUFFER_BYTES`](../network/src/tls/mod.rs) = 16_640 bytes each (read + write), caller-provided.
 - I/O timeouts: every client (the network service's TLS job and the in-kernel `m7-tls` lanes) runs `tls_transaction` with a `TlsTransactionBudget` of handshake 8192 ms and per-phase I/O 2000 ms, measured on the calibrated TSC clock.
 
@@ -488,7 +495,7 @@ Enable in consumers: `clean-slate-network` feature `tls` (kernel: `m7-tls-self-t
 - Repository-owned material under `xtask/fixtures/m7/` (CA + server leaf + wrong-name leaf). **Test-only — never trust elsewhere.**
 - Regenerate: `cargo xtask gen-m7-fixture-certs` (deterministic layout; EC P-256, SAN `m7.fixture.test`, validity 2020–2120).
 - QEMU peer presents the leaf at `10.77.0.1:4443`; DNS A record `10.77.0.50` is fixture vocabulary only.
-- Pin `ca.crt` (DER) in the guest; `validation_time_unix` must match `VALIDATION_TIME_UNIX` or connect returns `Protocol`.
+- Only test kernels trust `ca.crt` (DER); they hand it to the service in the launch block. The fixture certificates are valid 2020–2120, so the lanes pass at today's wall clock.
 
 ### Fail-closed
 

@@ -24,7 +24,7 @@ use crate::tcp::{TcpState, TcpTransport};
 use crate::tls::error::{map_embedded_tls_error, TlsError};
 use crate::tls::io::TlsIoError;
 use crate::tls::session::{M7CryptoProvider, TlsConfig};
-use crate::tls::verify::{pinned_verifier, TlsRng, VALIDATION_TIME_UNIX};
+use crate::tls::verify::{TlsRng, TrustStoreVerifier, ValidationInstant};
 use crate::tls::TLS_RECORD_BUFFER_BYTES;
 
 /// Per-phase monotonic budgets for one transaction.
@@ -160,8 +160,8 @@ impl<L: NetworkLink> Write for PollTcpSocket<'_, L> {
     }
 }
 
-/// Starts one client transaction: connect to `remote`, handshake against the pinned
-/// anchor in `config`, write `request`, read one application record into `response`,
+/// Starts one client transaction: connect to `remote`, handshake against the trust anchors
+/// in `config` at its wall-clock time, write `request`, read one application record into `response`,
 /// send close_notify and FIN. Resolves to the response length.
 ///
 /// The future only makes progress when polled; `Pending` means it waits for ingress on
@@ -193,8 +193,12 @@ where
     R: TlsRng,
 {
     {
-        if config.validation_time_unix != VALIDATION_TIME_UNIX {
-            return Err(TlsError::Protocol);
+        // No wall clock, no certificate check: refuse before any packet is sent.
+        let Some(validation_time) = config.validation_time_unix else {
+            return Err(TlsError::NoClock);
+        };
+        if config.server_name.is_empty() {
+            return Err(TlsError::PeerIdentity);
         }
         clock.start_phase(budget.handshake_ticks);
         // SAFETY: caller contract.
@@ -225,8 +229,9 @@ where
         let et_config = EtTlsConfig::new().with_server_name(config.server_name);
         let provider = M7CryptoProvider {
             rng,
-            verifier: pinned_verifier(config.trust_anchor_der),
+            verifier: TrustStoreVerifier::new(config.trust_anchors, config.server_name),
         };
+        ValidationInstant::set(validation_time);
         let mut tls: TlsConnection<'_, _, Aes128GcmSha256> =
             TlsConnection::new(socket, read_buf, write_buf);
         crate::tls::trace::handshake_step("client hello begin");

@@ -74,8 +74,8 @@ use clean_slate_service_fixtures::manifest::{Grant, ServiceSpec};
     feature = "m2-timer-self-test"
 )))]
 use clean_slate_service_fixtures::{
-    NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
-    NETWORK_UNAUTHORIZED_SERVICE_ID,
+    NetworkProbe, NetworkServiceBootstrap, NetworkServiceLaunch, NETWORK_SERVICE_BOOTSTRAP_ADDRESS,
+    NETWORK_SERVICE_ID, NETWORK_SERVICE_LAUNCH_OFFSET, NETWORK_UNAUTHORIZED_SERVICE_ID,
 };
 #[cfg(not(any(
     feature = "m1-self-test",
@@ -1752,7 +1752,14 @@ pub(crate) fn launch_network_aux_process(
     scheduler_slot: usize,
     bootstrap: NetworkServiceBootstrap,
 ) -> Result<SpawnedServiceInstance, &'static str> {
-    launch_network_userspace_with_bootstrap(allocator, kernel_stack_top, scheduler_slot, bootstrap)
+    // Self-test aux instances are the client-mode probes of the fixture peer.
+    launch_network_userspace_with_bootstrap(
+        allocator,
+        kernel_stack_top,
+        scheduler_slot,
+        bootstrap,
+        crate::service::net_launch::m7_fixture_probe(),
+    )
 }
 
 #[cfg(not(any(
@@ -1768,7 +1775,13 @@ fn launch_network_userspace_service(
 ) -> Result<SpawnedServiceInstance, &'static str> {
     let spec = context.spec.ok_or("network service has no manifest row")?;
     let bootstrap = NetworkServiceBootstrap::new(spec.mode, u64::from(context.generation.0));
-    launch_network_userspace_with_bootstrap(allocator, kernel_stack_top, scheduler_slot, bootstrap)
+    launch_network_userspace_with_bootstrap(
+        allocator,
+        kernel_stack_top,
+        scheduler_slot,
+        bootstrap,
+        NetworkProbe::NONE,
+    )
 }
 
 #[cfg(not(any(
@@ -1781,6 +1794,7 @@ fn launch_network_userspace_with_bootstrap(
     kernel_stack_top: u64,
     scheduler_slot: usize,
     bootstrap: NetworkServiceBootstrap,
+    probe: NetworkProbe,
 ) -> Result<SpawnedServiceInstance, &'static str> {
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::mm::address_space::map_process_page;
@@ -1830,6 +1844,17 @@ fn launch_network_userspace_with_bootstrap(
                     bootstrap,
                 );
             }
+            // #221 stage D: the network, the trust anchors and the probe, beside the bootstrap.
+            // SAFETY: the page was zeroed above, and all-zero is a valid launch block; the block
+            // fits the page after the bootstrap (asserted in service-fixtures).
+            let launch = unsafe {
+                &mut *((phys_to_virt(data_frame) + NETWORK_SERVICE_LAUNCH_OFFSET)
+                    as *mut NetworkServiceLaunch)
+            };
+            launch.network = crate::service::net_launch::network_config();
+            launch.probe = probe;
+            crate::service::net_launch::fill_trust_anchors(&mut launch.trust)
+                .map_err(|_| "network trust anchors do not fit the launch block")?;
             map_process_page(
                 address_space,
                 NETWORK_SERVICE_BOOTSTRAP_ADDRESS,

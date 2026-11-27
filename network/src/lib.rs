@@ -22,6 +22,7 @@ extern crate alloc;
 
 pub mod addr;
 pub mod buffer;
+pub mod config;
 pub mod device;
 pub mod error;
 pub mod fixture;

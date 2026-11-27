@@ -12,6 +12,11 @@ pub const NETWORK_CLIENT_DEVICE_ID: u64 = 2;
 pub const NETWORK_STATUS_PENDING: u64 = 0xFFFF_FFFF_FFFF_FFF0;
 
 pub const NETWORK_SERVICE_BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0020_0000;
+/// Byte offset of the [`NetworkServiceLaunch`] block inside the bootstrap page.
+pub const NETWORK_SERVICE_LAUNCH_OFFSET: u64 = 1024;
+/// User address of the [`NetworkServiceLaunch`] block.
+pub const NETWORK_SERVICE_LAUNCH_ADDRESS: u64 =
+    NETWORK_SERVICE_BOOTSTRAP_ADDRESS + NETWORK_SERVICE_LAUNCH_OFFSET;
 
 pub const NETWORK_CAPABILITY_VERSION: u16 = 1;
 
@@ -31,6 +36,9 @@ pub const NETWORK_SERVICE_RESULT_ERROR: u64 = 2;
 /// `clean_slate_network::rng::SeedError` code.
 pub const NETWORK_SERVICE_AUX_NO_ENTROPY: u64 = 0x4e45_0000;
 pub const NETWORK_SERVICE_AUX_NO_ENTROPY_REASON_MASK: u64 = 0xff;
+/// #221: `aux_status` of an acceptance-mode service whose launch block (network
+/// configuration or trust anchors) did not check out; it stopped before it was ready.
+pub const NETWORK_SERVICE_AUX_BAD_LAUNCH: u64 = 0x4e4c_0000;
 
 pub const NET_SUBOP_SUBMIT: u64 = 1;
 pub const NET_SUBOP_POLL: u64 = 2;
@@ -170,6 +178,85 @@ impl NetworkServiceBootstrap {
         }
     }
 }
+
+/// Most request or response bytes a [`NetworkProbe`] carries.
+pub const NETWORK_PROBE_PAYLOAD_BYTES: usize = 64;
+
+/// What a client-mode instance of the network image (a kernel self-test's probe, never the
+/// serving instance) resolves, connects to and expects back. The test harness that spawns the
+/// probe fills it, so the image itself carries no fixture addresses or names (#221).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetworkProbe {
+    pub resolve_name_len: u8,
+    pub resolve_name: [u8; clean_slate_network::limits::MAX_REQUEST_HOSTNAME_LEN],
+    /// The A record and TTL the resolve must answer.
+    pub expect_ipv4: [u8; 4],
+    pub expect_ttl: u32,
+    /// TLS port on the resolved address.
+    pub tls_port: u16,
+    /// A UDP port on [`Self::silent_ipv4`] that never answers (the in-flight-arm probe).
+    pub silent_port: u16,
+    pub silent_ipv4: [u8; 4],
+    pub request_len: u16,
+    pub response_len: u16,
+    pub request: [u8; NETWORK_PROBE_PAYLOAD_BYTES],
+    pub response: [u8; NETWORK_PROBE_PAYLOAD_BYTES],
+}
+
+const _: () = assert!(core::mem::size_of::<NetworkProbe>() == 204);
+
+impl NetworkProbe {
+    pub const NONE: Self = Self {
+        resolve_name_len: 0,
+        resolve_name: [0; clean_slate_network::limits::MAX_REQUEST_HOSTNAME_LEN],
+        expect_ipv4: [0; 4],
+        expect_ttl: 0,
+        tls_port: 0,
+        silent_port: 0,
+        silent_ipv4: [0; 4],
+        request_len: 0,
+        response_len: 0,
+        request: [0; NETWORK_PROBE_PAYLOAD_BYTES],
+        response: [0; NETWORK_PROBE_PAYLOAD_BYTES],
+    };
+
+    pub fn resolve_name(&self) -> &[u8] {
+        let len = usize::from(self.resolve_name_len).min(self.resolve_name.len());
+        &self.resolve_name[..len]
+    }
+
+    pub fn request(&self) -> &[u8] {
+        &self.request[..usize::from(self.request_len).min(NETWORK_PROBE_PAYLOAD_BYTES)]
+    }
+
+    pub fn response(&self) -> &[u8] {
+        &self.response[..usize::from(self.response_len).min(NETWORK_PROBE_PAYLOAD_BYTES)]
+    }
+}
+
+/// What the launcher hands the network image beside its [`NetworkServiceBootstrap`], at
+/// [`NETWORK_SERVICE_LAUNCH_OFFSET`] in the same page (#221 stage D): the network to bring
+/// up, the certificate authorities to trust, and, for client-mode probes, what to probe.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetworkServiceLaunch {
+    pub network: clean_slate_network::config::NetworkConfig,
+    pub probe: NetworkProbe,
+    pub trust: clean_slate_network::config::TrustAnchors,
+}
+
+const _: () = assert!(
+    core::mem::size_of::<NetworkServiceLaunch>() == 88 + 204 + 2_576,
+    "no padding: the launch block crosses the user/kernel boundary as bytes"
+);
+const _: () = assert!(
+    core::mem::size_of::<NetworkServiceBootstrap>() as u64 <= NETWORK_SERVICE_LAUNCH_OFFSET
+        && NETWORK_SERVICE_LAUNCH_OFFSET as usize + core::mem::size_of::<NetworkServiceLaunch>()
+            <= 4096,
+    "bootstrap and launch block share one page"
+);
+const _: () = assert!(NETWORK_SERVICE_LAUNCH_OFFSET % 8 == 0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetworkServiceWorkItem {
