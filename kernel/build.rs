@@ -837,21 +837,34 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
 
     if !elf.is_file() {
         let (package, build_std) = userspace_embed_recipe(bin_name);
-        // The cargo line builds `--release`. `userspace_elf` also accepts the active
-        // profile, but when neither file exists it returns that profile's path.
-        let release_elf = manifest_dir
-            .join("..")
-            .join(target_dir)
-            .join("x86_64-unknown-none")
-            .join("release")
-            .join(bin_name);
+        // When neither copy exists `userspace_elf` returns the release path, which is
+        // what the cargo line below builds.
         panic!(
             "missing userspace ELF at {}; run `cargo xtask build`, or:\n  \
              RUSTC_BOOTSTRAP=1 cargo build -p {package} \
              --bin {bin_name} --features userspace \
              --target x86_64-unknown-none -Z build-std={build_std} --release",
-            release_elf.display(),
+            elf.display(),
         );
+    }
+
+    // Say which file went in, so a lane result can be traced to the program it tested.
+    // Every build logs it; a non-release copy is also a cargo warning, since `xtask`
+    // never makes one and it is probably stale.
+    println!("embedding userspace ELF {}", elf.display());
+    if elf.parent().and_then(Path::file_name) != Some("release".as_ref()) {
+        println!(
+            "cargo:warning=embedding non-release userspace ELF {} (no release copy found)",
+            elf.display()
+        );
+        // Rebuild once the release copy appears, so it replaces this one.
+        let release_elf = elf
+            .parent()
+            .and_then(Path::parent)
+            .map(|base| base.join("release").join(bin_name));
+        if let Some(release_elf) = release_elf {
+            println!("cargo:rerun-if-changed={}", release_elf.display());
+        }
     }
 
     let elf_bytes = fs::read(&elf).expect("failed to read userspace ELF");
@@ -1235,12 +1248,16 @@ fn read_cstr(table: &[u8], offset: usize) -> Result<&str, String> {
     std::str::from_utf8(&tail[..end]).map_err(|_| "section name was not valid UTF-8".into())
 }
 
+/// `xtask` builds every embedded program `--release`, so the release copy wins. The active
+/// profile's copy is only a fallback for a hand-built tree with no release copy (#245); a
+/// stray debug build must never shadow the one `xtask` just made. When neither exists this
+/// returns the release path, which the caller names in its "missing" message.
 fn userspace_elf(manifest_dir: &Path, target_dir: &str, profile: &str, bin_name: &str) -> PathBuf {
     let base = manifest_dir
         .join("..")
         .join(target_dir)
         .join("x86_64-unknown-none");
-    for profile in [profile, "release"] {
+    for profile in ["release", profile] {
         let candidate = base.join(profile).join(bin_name);
         if candidate.is_file() {
             return candidate;
@@ -1253,5 +1270,5 @@ fn userspace_elf(manifest_dir: &Path, target_dir: &str, profile: &str, bin_name:
             }
         }
     }
-    base.join(profile).join(bin_name)
+    base.join("release").join(bin_name)
 }
