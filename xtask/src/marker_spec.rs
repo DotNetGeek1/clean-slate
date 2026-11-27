@@ -4,22 +4,39 @@
 //! text a client process wrote. No marker can be satisfied by text on such a line, so a client
 //! cannot print a gate's marker for it. Only a marker that is itself a console line (it starts
 //! with the tag) matches there.
+//!
+//! A line that starts with [`IPC_CONSOLE_LINE_PREFIX`] is a console-sink message, also a
+//! client's words: the kernel starts every line of one that way, so a client cannot start a line
+//! of its own (#223). Services' own markers (`[INIT]`, `[SUP ]`, `[ADT ]`, ...) arrive only on
+//! such lines and still match there, but a milestone verdict marker (one whose tag is
+//! `[M<digit>…]`, such as `[M4  ] PASS`) is the kernel's or xtask's and never does.
 
 pub use clean_slate_native_abi::console::CONSOLE_LINE_TAG;
+pub use clean_slate_native_abi::console::IPC_CONSOLE_LINE_PREFIX;
 
-/// The first `marker` in `output` at or after `from` that is not inside a console-stream line
-/// (unless `marker` is one), as an offset into `output`.
+/// The first `marker` in `output` at or after `from` that is not inside a client's line it
+/// cannot come from (see the module docs), as an offset into `output`.
 pub fn find_marker(output: &str, from: usize, marker: &str) -> Option<usize> {
-    if marker.starts_with(CONSOLE_LINE_TAG) {
+    if marker.starts_with(CONSOLE_LINE_TAG) || marker.starts_with(IPC_CONSOLE_LINE_PREFIX) {
         return output[from..].find(marker).map(|at| from + at);
     }
+    let verdict = is_milestone_marker(marker);
     output[from..]
         .match_indices(marker)
         .map(|(at, _)| from + at)
         .find(|&at| {
             let line_start = output[..at].rfind('\n').map_or(0, |newline| newline + 1);
-            !output[line_start..].starts_with(CONSOLE_LINE_TAG)
+            let line = &output[line_start..];
+            !(line.starts_with(CONSOLE_LINE_TAG)
+                || verdict && line.starts_with(IPC_CONSOLE_LINE_PREFIX))
         })
+}
+
+/// A marker whose tag is a milestone's, `[M` and a digit: `[M4  ] PASS`, `[M4.3] kernel
+/// evidence`, `[M10.port] FAIL`.
+fn is_milestone_marker(marker: &str) -> bool {
+    let bytes = marker.trim_start_matches('\n').as_bytes();
+    bytes.len() > 2 && bytes[0] == b'[' && bytes[1] == b'M' && bytes[2].is_ascii_digit()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,6 +499,37 @@ mod tests {
                 .replace("[M4  ] PASS", "playground: console stream open")
                 .as_str()
         ));
+    }
+
+    #[test]
+    fn a_console_sink_line_cannot_satisfy_a_milestone_verdict() {
+        // A client wrote `"\n[M4  ] PASS"`; the kernel starts both lines with its prefix.
+        let forged = "[IPC ] console pid=5: \n[IPC ] console pid=5: [M4  ] PASS\n";
+        let markers = ["[M4  ] PASS"];
+        assert!(!MarkerTracker::from_ordered(&markers).consume(forged));
+        let steps = [MarkerStep::Line {
+            prefix: "[M4.3] kernel evidence supervisor",
+            fields: &[("console-messages=", "6")],
+        }];
+        assert!(!MarkerTracker::from_steps(&steps).consume(
+            "[IPC ] console pid=1: [M4.3] kernel evidence supervisor pid=1 console-messages=6\n"
+        ));
+        // The kernel's own line, after the forged one, still counts.
+        assert!(MarkerTracker::from_ordered(&markers).consume(&format!("{forged}[M4  ] PASS\n")));
+        // A service's own marker still matches on its attributed line, and a marker that
+        // spells out the attribution matches the line it names.
+        let wrapped = "[IPC ] console pid=1: [SUP ] started pid=1\n";
+        assert!(MarkerTracker::from_ordered(&["[SUP ] started pid=1"]).consume(wrapped));
+        assert!(
+            MarkerTracker::from_ordered(&["[IPC ] console pid=1: [SUP ] started pid=1"])
+                .consume(wrapped)
+        );
+        assert!(is_milestone_marker("[M10.port] PASS"));
+        assert!(is_milestone_marker("\n[M4  ] PASS"));
+        assert!(!is_milestone_marker(
+            "[MEM ] physical allocator initialized"
+        ));
+        assert!(!is_milestone_marker("[MM  ] scratch page map/unmap OK"));
     }
 
     #[test]

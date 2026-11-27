@@ -1,5 +1,10 @@
-//! M4.3 integration self-test: boots the Rust supervisor userspace image at CPL3
-//! and validates `[SUP ]` diagnostics over a granted console IPC capability.
+//! M4.3 integration self-test: boots the Rust supervisor userspace image at CPL3 with a granted
+//! console IPC capability, and passes once the image reaches its rendezvous having used it.
+//!
+//! The kernel reports only what it observed: the capability grant, how many console messages
+//! the supervisor's capability carried, and the rendezvous trap. What the supervisor said is the
+//! supervisor's own `[IPC ] console pid=1: [SUP ] ...` output, which the lane checks as such
+//! (#223); the kernel never repeats it as a marker of its own.
 
 include!(concat!(env!("OUT_DIR"), "/supervisor_userspace_entry.rs"));
 
@@ -11,6 +16,7 @@ use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::arch::x86_64::gdt::userspace_gdt_state;
 use crate::arch::x86_64::interrupt_context::InterruptContext;
+use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
@@ -56,9 +62,8 @@ const SUPERVISOR_STACK_ADDRESS: u64 = SUPERVISOR_BOOTSTRAP_ADDRESS + PAGE_SIZE;
 
 pub(crate) const SUPERVISOR_CAPABILITY_GRANTED_MARKER: &str =
     "[CAP ] supervisor console capability granted pid=1";
-pub(crate) const SUPERVISOR_STARTED_MARKER: &str = "[SUP ] started pid=1";
-pub(crate) const SUPERVISOR_REGISTERED_MARKER: &str = "[SUP ] registered service=1";
-pub(crate) const SUPERVISOR_RUNNING_MARKER: &str = "[SUP ] service=1 state=2 pid=201 gen=1";
+/// The evidence line before `[M4.3] PASS`; it ends with `pid=1 console-messages=N`.
+pub(crate) const SUPERVISOR_EVIDENCE_MARKER: &str = "[M4.3] kernel evidence supervisor";
 
 #[repr(C)]
 struct SupervisorBootstrap {
@@ -75,9 +80,8 @@ struct UserspaceSupervisorProcess {
 
 pub(crate) struct UserspaceSupervisorTestState {
     process: UserspaceSupervisorProcess,
-    pub(crate) started_observed: bool,
-    pub(crate) registered_observed: bool,
-    pub(crate) running_observed: bool,
+    /// Console-sink messages the kernel delivered for the supervisor (syscall 3 successes).
+    console_messages: u32,
 }
 
 pub(crate) static USERSPACE_SUPERVISOR_TEST_STATE: GlobalCell<
@@ -253,9 +257,7 @@ fn install_userspace_supervisor_payload(allocator: &mut PageAllocator) -> Result
     unsafe {
         *USERSPACE_SUPERVISOR_TEST_STATE.get() = Some(UserspaceSupervisorTestState {
             process,
-            started_observed: false,
-            registered_observed: false,
-            running_observed: false,
+            console_messages: 0,
         });
     }
     Ok(())
@@ -293,21 +295,14 @@ fn userspace_supervisor_test_state(
     }
 }
 
-pub(crate) fn observe_supervisor_console_line(sender_pid: u64, message: &str) {
+/// Counts a console-sink message the kernel delivered for `sender_pid`. Only the delivery is
+/// kernel state; the text stays the supervisor's.
+pub(crate) fn record_supervisor_console_delivery(sender_pid: u64) {
     if sender_pid != USERSPACE_SUPERVISOR_TEST_PID {
         return;
     }
     if let Ok(state) = userspace_supervisor_test_state() {
-        if message.starts_with("[SUP ] started pid=") {
-            state.started_observed = true;
-            kernel_log_line(SUPERVISOR_STARTED_MARKER);
-        } else if message.starts_with("[SUP ] registered service=") {
-            state.registered_observed = true;
-            kernel_log_line(SUPERVISOR_REGISTERED_MARKER);
-        } else if message.starts_with("[SUP ] service=1 state=2 pid=201 gen=1") {
-            state.running_observed = true;
-            kernel_log_line(SUPERVISOR_RUNNING_MARKER);
-        }
+        state.console_messages = state.console_messages.saturating_add(1);
     }
 }
 
@@ -334,12 +329,14 @@ pub(crate) fn handle_userspace_supervisor_entry(
         return Err("userspace entry trap returned with an unexpected stack window");
     }
 
-    if !state.started_observed || !state.registered_observed || !state.running_observed {
-        return Err(
-            "supervisor self-test did not observe required [SUP ] markers before rendezvous",
-        );
+    if state.console_messages == 0 {
+        return Err("supervisor reached its rendezvous without using its console capability");
     }
 
+    kernel_log_fmt(format_args!(
+        "{SUPERVISOR_EVIDENCE_MARKER} pid={USERSPACE_SUPERVISOR_TEST_PID} console-messages={}\n",
+        state.console_messages
+    ));
     kernel_log_line("[M4.3] PASS");
     unsafe {
         *USERSPACE_SUPERVISOR_TEST_STATE.get() = None;
