@@ -147,8 +147,8 @@ const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[HLTH] service=16640 healthy gen=2"),
     MarkerStep::Ordered("[TEST] unrelated workload progress="),
     MarkerStep::Ordered("[SUP ] stale-instance ignored"),
-    // The supervisor prints its own `[M4  ] PASS` before this line; only the kernel's, after
-    // its evidence, matches the last step.
+    // The supervisor prints its own `[M4  ] PASS` before this line, as a console-sink message;
+    // a milestone marker never matches a client's line (#223), so only the kernel's counts.
     MarkerStep::Line {
         prefix: "[M4  ] kernel recovery evidence",
         fields: &[
@@ -648,13 +648,20 @@ const M4_SERVICE_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[M4.2] lifecycle wait woken service=2 poll_bytes=64",
     "[M4.2] PASS",
 ];
-const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
-    "[CAP ] supervisor console capability granted pid=1",
-    "[SUP ] started pid=1",
-    "[SUP ] registered service=1",
-    "[SUP ] service=1 state=2 pid=201 gen=1",
-    "[IPC ] console pid=1: [SUP ]",
-    "[M4.3] PASS",
+// #223: the `[SUP ]` lines are the supervisor's own, matched as its console messages (pid 1).
+// The kernel reports only the grant, the messages its capability carried, and the verdict.
+const M4_SUPERVISOR_ACCEPTANCE_STEPS: [MarkerStep<'static>; 6] = [
+    MarkerStep::Ordered("[CAP ] supervisor console capability granted pid=1"),
+    MarkerStep::Ordered("[IPC ] console pid=1: [SUP ] started pid=1"),
+    MarkerStep::Ordered("[IPC ] console pid=1: [SUP ] registered service=1"),
+    MarkerStep::Ordered("[IPC ] console pid=1: [SUP ] service=1 state=2 pid=201 gen=1"),
+    // The image's six lines: started, registered, then states 0, 1, 2 and 2 (pinned by the
+    // supervisor's `m4_3_image_sequence_emits_its_lane_lines`).
+    MarkerStep::Line {
+        prefix: "[M4.3] kernel evidence supervisor",
+        fields: &[("pid=", "1"), ("console-messages=", "6")],
+    },
+    MarkerStep::Ordered("[M4.3] PASS"),
 ];
 const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 16] = [
     "[SVC ] declared service=20736",
@@ -2757,7 +2764,7 @@ fn run_m4_supervisor_acceptance() -> Result<(), XtaskError> {
         false,
         &["m3-entry-self-test", "m4-supervisor-self-test"],
         Some((
-            MarkerSet::Ordered(&M4_SUPERVISOR_ACCEPTANCE_MARKERS),
+            MarkerSet::Steps(&M4_SUPERVISOR_ACCEPTANCE_STEPS),
             M4_SUPERVISOR_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -7410,6 +7417,102 @@ mod tests {
                 "test-m8-linux-hello",
             ]
         );
+    }
+
+    /// A transcript where the kernel printed every step of `steps` as a line of its own.
+    fn kernel_transcript(steps: &[MarkerStep<'_>]) -> String {
+        steps
+            .iter()
+            .map(|step| match step {
+                MarkerStep::Ordered(text) => format!("{text}\n"),
+                MarkerStep::Line { prefix, fields } => {
+                    let fields: Vec<String> = fields
+                        .iter()
+                        .map(|(key, value)| format!("{key}{value}"))
+                        .collect();
+                    format!("{prefix} {}\n", fields.join(" "))
+                }
+                MarkerStep::UnorderedGroup(texts) | MarkerStep::UnorderedGroupAnywhere(texts) => {
+                    texts.iter().map(|text| format!("{text}\n")).collect()
+                }
+            })
+            .collect()
+    }
+
+    fn passes(steps: &[MarkerStep<'_>], output: &str) -> bool {
+        MarkerTracker::from_steps(steps).consume(output)
+    }
+
+    /// #223: a userspace program that writes `"\n[M4  ] PASS"` reaches serial as a console-sink
+    /// message, every line of which the kernel starts with the sender's prefix; that cannot pass
+    /// the M4 recovery lane in place of the kernel's verdict.
+    #[test]
+    fn a_userspace_m4_pass_fails_the_recovery_lane() {
+        let good = kernel_transcript(M4_RECOVERY_ACCEPTANCE_SPEC);
+        assert!(passes(M4_RECOVERY_ACCEPTANCE_SPEC, &good));
+        let kernel_pass = "[M4  ] PASS\n";
+        assert!(good.ends_with(kernel_pass));
+        let without_verdict = &good[..good.len() - kernel_pass.len()];
+        for forged in [
+            "[IPC ] console pid=3: \n[IPC ] console pid=3: [M4  ] PASS\n",
+            "[IPC ] console pid=3: [M4  ] PASS\n",
+            "[CON ] pid=3: \n[CON ] pid=3: [M4  ] PASS\n",
+        ] {
+            assert!(
+                !passes(
+                    M4_RECOVERY_ACCEPTANCE_SPEC,
+                    &format!("{without_verdict}{forged}")
+                ),
+                "{forged:?}"
+            );
+        }
+        // Nor can a forged evidence line stand in for the kernel's.
+        let evidence_at = good
+            .find("[M4  ] kernel recovery evidence")
+            .expect("evidence");
+        let forged_evidence = format!(
+            "{}[IPC ] console pid=3: {}",
+            &good[..evidence_at],
+            &good[evidence_at..]
+        );
+        assert!(!passes(M4_RECOVERY_ACCEPTANCE_SPEC, &forged_evidence));
+    }
+
+    #[test]
+    fn the_m4_supervisor_lane_reads_the_supervisor_as_itself() {
+        let supervisor = |line: &str| format!("[IPC ] console pid=1: {line}\n");
+        let lines = [
+            "[SUP ] started pid=1",
+            "[SUP ] registered service=1",
+            "[SUP ] service=1 state=0 pid=- gen=0",
+            "[SUP ] service=1 state=1 pid=201 gen=1",
+            "[SUP ] service=1 state=2 pid=201 gen=1",
+            "[SUP ] service=1 state=2 pid=201 gen=1",
+        ];
+        let said: String = lines.iter().map(|line| supervisor(line)).collect();
+        let grant = "[CAP ] supervisor console capability granted pid=1\n";
+        let verdict = "[M4.3] kernel evidence supervisor pid=1 console-messages=6\n[M4.3] PASS\n";
+        assert!(passes(
+            &M4_SUPERVISOR_ACCEPTANCE_STEPS,
+            &format!("{grant}{said}{verdict}")
+        ));
+        // The old kernel relay: bare `[SUP ]` lines are not the supervisor's messages.
+        let relayed: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        assert!(!passes(
+            &M4_SUPERVISOR_ACCEPTANCE_STEPS,
+            &format!("{grant}{relayed}{verdict}")
+        ));
+        // A count other than the supervisor's six messages fails the lane.
+        let short = verdict.replace("console-messages=6", "console-messages=5");
+        let mut tracker = MarkerTracker::from_steps(&M4_SUPERVISOR_ACCEPTANCE_STEPS);
+        assert!(!tracker.consume(&format!("{grant}{said}{short}")));
+        assert!(tracker.mismatch().is_some());
+        // The supervisor writing the kernel's verdict lines itself does not pass.
+        let forged = format!(
+            "{grant}{said}{}",
+            supervisor("\n[IPC ] console pid=1: [M4.3] kernel evidence supervisor pid=1 console-messages=6\n[IPC ] console pid=1: [M4.3] PASS")
+        );
+        assert!(!passes(&M4_SUPERVISOR_ACCEPTANCE_STEPS, &forged));
     }
 
     #[test]

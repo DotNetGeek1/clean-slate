@@ -2,7 +2,7 @@
 
 use super::open_description::ConsoleSinkRef;
 use crate::capability::holder_has_resource_rights;
-use crate::diagnostics::log::kernel_log_fmt;
+use crate::diagnostics::log::log_console_sink_message;
 use crate::ipc::IpcEndpointTable;
 use crate::ipc::IpcSendError;
 use crate::ipc::IPC_MAX_MESSAGE_BYTES;
@@ -63,7 +63,7 @@ fn emit_console_sink_render(style: ConsoleSinkRenderStyle, sender_pid: u64, payl
         ConsoleSinkRenderStyle::Verbatim => console_write_bytes(payload),
         ConsoleSinkRenderStyle::NativeFramed => {
             let message = core::str::from_utf8(payload).unwrap_or("<non-utf8>");
-            kernel_log_fmt(format_args!("[IPC ] console pid={sender_pid}: {message}\n"));
+            log_console_sink_message(sender_pid, message);
         }
     }
 }

@@ -112,6 +112,12 @@ pub const CONSOLE_DEVICE_WRITE_MAX: usize = 256;
 /// What the kernel writes at the start of every serial line the console device writes.
 pub const CONSOLE_LINE_TAG: &str = "[CON ] ";
 
+/// What the kernel writes at the start of every serial line of a console-sink message (syscall
+/// 3, or a native process's console write), followed by the sender's pid and `": "`. The kernel
+/// starts each line of the message this way, so a sender cannot start a serial line of its own
+/// (#223).
+pub const IPC_CONSOLE_LINE_PREFIX: &str = "[IPC ] console pid=";
+
 /// Payload bytes in one request or event frame.
 pub const CONSOLE_FRAME_PAYLOAD: usize = PORT_FRAME_BYTES - 2;
 

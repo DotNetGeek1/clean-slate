@@ -29,6 +29,7 @@ use crate::arch::x86_64::RFLAGS_TRAP_FLAG_BIT;
 use crate::diagnostics::log::kernel_log_fmt;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::diagnostics::log::kernel_log_line;
+use crate::diagnostics::log::log_console_sink_message;
 use crate::diagnostics::qemu::fatal_kernel_error;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::diagnostics::qemu::qemu_exit;
@@ -43,8 +44,6 @@ use crate::ipc::IPC_MAX_MESSAGE_BYTES;
 use crate::ipc::USERSPACE_IPC_TEST_PID;
 #[cfg(feature = "m3-ipc-self-test")]
 use crate::ipc::USERSPACE_IPC_UNAUTHORIZED_TEST_PID;
-#[cfg(feature = "m4-supervisor-self-test")]
-use crate::ipc::USERSPACE_SUPERVISOR_TEST_PID;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
@@ -85,7 +84,7 @@ use crate::selftest::m3_syscall::SYSCALL_TEST_REQUIRED_CALLS;
 #[cfg(feature = "m4-recovery-self-test")]
 use crate::selftest::m4_recovery::recovery_complete_and_exit;
 #[cfg(feature = "m4-supervisor-self-test")]
-use crate::selftest::m4_supervisor::observe_supervisor_console_line;
+use crate::selftest::m4_supervisor::record_supervisor_console_delivery;
 #[cfg(any(
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
@@ -229,11 +228,9 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
     match table.send_console_message(sender_pid, frame.rdi, &copied[..length]) {
         Ok(bytes_sent) => {
             let message = core::str::from_utf8(&copied[..length]).unwrap_or("<non-utf8>");
-            kernel_log_fmt(format_args!("[IPC ] console pid={sender_pid}: {message}\n"));
+            log_console_sink_message(sender_pid, message);
             #[cfg(feature = "m4-supervisor-self-test")]
-            if sender_pid == USERSPACE_SUPERVISOR_TEST_PID {
-                observe_supervisor_console_line(sender_pid, message.trim_end());
-            }
+            record_supervisor_console_delivery(sender_pid);
             #[cfg(feature = "m3-ipc-self-test")]
             if let Some(state) = unsafe { (&mut *USERSPACE_IPC_TEST_STATE.get()).as_mut() } {
                 if sender_pid == USERSPACE_IPC_TEST_PID && !state.send_ok_observed {
