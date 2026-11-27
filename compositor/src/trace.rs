@@ -48,8 +48,6 @@ impl ButtonHit {
             Self::Content => "content",
             Self::Title => "title",
             Self::Control(ChromeControl::Close) => "close",
-            Self::Control(ChromeControl::Minimize) => "minimize",
-            Self::Control(ChromeControl::Maximize) => "maximize",
             Self::Resize => "resize",
         }
     }

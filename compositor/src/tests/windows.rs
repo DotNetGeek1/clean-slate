@@ -1293,8 +1293,31 @@ fn close_control_requests_close_on_release_over_it() {
         "released elsewhere"
     );
 
-    for control in [ChromeControl::Minimize, ChromeControl::Maximize] {
-        click(&mut h, control_point(A_AT, control));
+    // #115: close is the only control. Where minimise and maximise used to sit (one and two
+    // control steps left of close) is plain title bar: not drawn as a control, not a control
+    // target, and a click there neither closes nor configures the window.
+    let step = TestChrome.metrics().control_size + TestChrome.metrics().control_gap;
+    for slot in 1..=2 {
+        let at = Point {
+            x: close.x - (slot * step) as i32,
+            y: close.y,
+        };
+        assert_ne!(
+            px(
+                &h,
+                Point {
+                    x: at.x - 1,
+                    ..close_probe
+                }
+            ),
+            CONTROL
+        );
+        assert_eq!(
+            crate::wm::decoration_target(&TestChrome, content(A_AT, SIDE, SIDE), at),
+            Some(Target::TitleBar),
+            "slot {slot}"
+        );
+        click(&mut h, at);
     }
     let inbox = h.drain(&a);
     assert_eq!(
@@ -1303,7 +1326,7 @@ fn close_control_requests_close_on_release_over_it() {
     );
     assert!(
         configures(&inbox, wa).is_empty(),
-        "reserved controls do nothing in M10"
+        "the old minimise and maximise slots do nothing"
     );
 
     click(&mut h, close);

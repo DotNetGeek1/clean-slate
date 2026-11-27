@@ -77,4 +77,17 @@ mod tests {
         let outcome = Outcome::Exit(ExitReason::HostFailed(received));
         assert_eq!(exit_reason(outcome), "compositor-gone");
     }
+
+    /// #315: a compositor that disconnected the app (the send sees `EPIPE`, not `ESTALE`) is
+    /// `Gone` too, so the exit still reads as `compositor-gone`.
+    #[test]
+    fn a_compositor_disconnect_reads_as_compositor_gone_on_send() {
+        let mut client = client();
+        allocate_buffers(&mut client).expect("buffers");
+        client.sys().server_disconnect(0);
+        let sent = Host::send(&mut client, &Request::CreateSurface, None);
+        assert_eq!(sent, Err(HostError::Gone));
+        let outcome = Outcome::Exit(ExitReason::HostFailed(sent.unwrap_err()));
+        assert_eq!(exit_reason(outcome), "compositor-gone");
+    }
 }
