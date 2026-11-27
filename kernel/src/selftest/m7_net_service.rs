@@ -144,6 +144,11 @@ fn spawn_phase_fixture(slot: usize, bootstrap: NetworkServiceBootstrap, grant_cl
 }
 
 pub(crate) fn on_holder_exit_acked(holder_pid: u64, sessions: u64, pending: u64) {
+    // `service::net_bridge` host tests ack holder exits without running the lane (#213).
+    #[cfg(test)]
+    if unsafe { (*M7_NET_SELF_TEST_STATE.get()).is_none() } {
+        return;
+    }
     let test_state = state();
     if test_state.phase != M7Phase::AwaitHolderExitAck {
         return;

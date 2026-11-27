@@ -358,15 +358,33 @@ jobs:
           # verify-m9-fixture, clean-slate-rootfs --features std and the M9-gated kernel
           # host tests run once, as steps of `cargo xtask test-m9` in the acceptance job.
           cargo test -p clean-slate-rootfs
+          # The default kernel build here; every kernel feature set runs in the kernel-host job.
           cargo test -p clean-slate-kernel
-          cargo test -p clean-slate-kernel --features m3-entry-self-test
-          cargo test -p clean-slate-kernel --features m3-address-space-self-test
-          cargo test -p clean-slate-kernel --features m3-syscall-self-test
-          cargo test -p clean-slate-kernel --lib --features m4-service-lifecycle-self-test
-          cargo test -p clean-slate-kernel --lib --features m4-recovery-self-test
-          cargo test -p clean-slate-kernel --features m8-linux-image
-          cargo test -p clean-slate-kernel --features m8-linux-hello
-          cargo test -p clean-slate-kernel --features system-test-hooks --lib
+
+  # #213: the kernel host tests once per kernel clippy line above (`cargo xtask
+  # kernel-host-tests` reads them from this file), split across three runners.
+  kernel-host:
+    name: kernel-host (${{ matrix.shard }}/3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rust-src
+          targets: x86_64-unknown-uefi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: kernel-host-${{ matrix.shard }}
+
+      - name: Kernel host tests per feature set
+        run: cargo xtask kernel-host-tests --shard ${{ matrix.shard }}/3
 
   acceptance:
     name: acceptance

@@ -216,7 +216,10 @@ pub(crate) mod userspace_process;
     feature = "m9-linux-fs-self-test",
     feature = "m9-linux-trace-self-test",
     feature = "m10-nxe-self-test",
-    feature = "m10-input-self-test"
+    feature = "m10-input-self-test",
+    // Host tests in `mm::paging` and below use the code and stack addresses whenever the
+    // M3 entry feature is on, even when another lane is the selected userspace arm (#213).
+    all(test, feature = "m3-entry-self-test")
 ))]
 use crate::mm::PAGE_SIZE;
 
@@ -241,7 +244,8 @@ use crate::mm::PAGE_SIZE;
     feature = "m9-userspace-self-test",
     feature = "m9-linux-trace-self-test",
     feature = "m10-nxe-self-test",
-    feature = "m10-input-self-test"
+    feature = "m10-input-self-test",
+    all(test, feature = "m3-entry-self-test")
 ))]
 pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
 #[cfg(any(

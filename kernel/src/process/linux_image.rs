@@ -28,7 +28,17 @@
 //! (`m8-linux-image-self-test`). Consumed by `#97` (`service::linux_launch`)
 //! and the `m8-linux-image` self-test.
 
-#![cfg_attr(not(test), allow(dead_code))]
+// The M1/M2 bring-up lanes compile out the launch path below (`launch_linux_process*`), so
+// their host-test builds leave the image builder without a caller (#213).
+#![cfg_attr(
+    any(
+        not(test),
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test"
+    ),
+    allow(dead_code)
+)]
 
 use crate::mm::address_space::{
     create_process_address_space, destroy_process_address_space, translate_address_in_root,
@@ -166,10 +176,7 @@ pub(crate) const LINUX_M8_LOAD_POLICY: LoadPlanPolicy = LoadPlanPolicy {
 pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
     LoadPlanPolicy::linux_conventional_x86_64();
 
-#[cfg(any(
-    feature = "m9-linux-runtime-self-test",
-    feature = "m9-linux-trace-self-test"
-))]
+#[cfg(feature = "m9-linux-runtime-self-test")]
 pub(crate) const LINUX_RUNTIME_PROBE_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-runtime-probe/linux-runtime-probe-x86_64");
 
@@ -1371,14 +1378,18 @@ pub(crate) fn register_linux_process(
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
+// Its callers are boot-path code, which a host-test build leaves out (#213).
 #[cfg_attr(
-    not(any(
-        feature = "m8-linux-image-self-test",
-        feature = "m8-linux-hello-self-test",
-        feature = "m8-linux-dispatch-self-test",
-        feature = "m9-low-va-self-test",
-        feature = "m9-linux-exec-self-test"
-    )),
+    any(
+        test,
+        not(any(
+            feature = "m8-linux-image-self-test",
+            feature = "m8-linux-hello-self-test",
+            feature = "m8-linux-dispatch-self-test",
+            feature = "m9-low-va-self-test",
+            feature = "m9-linux-exec-self-test"
+        ))
+    ),
     allow(dead_code)
 )]
 pub(crate) fn launch_linux_process(

@@ -1437,6 +1437,12 @@ mod tests {
         pipe::pipe_ref_to_handle(read)
     }
 
+    // The M1/M2 bring-up builds stub out pipe-end accounting (`open_description.rs`).
+    #[cfg(not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test"
+    )))]
     #[test]
     fn pipe_installs_both_ends_and_close_frees_the_pipe() {
         let _pipes = pipe::PIPE_POOL_TEST_LOCK

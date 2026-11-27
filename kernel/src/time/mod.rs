@@ -1,7 +1,12 @@
 //! Calibrated LAPIC IRQ ticks (#163), TSC monotonic ns (#103 Linux clocks) and the wall clock
 //! ([`wall`], #308).
 
-#![cfg_attr(not(feature = "m9-linux-runtime-self-test"), allow(dead_code))]
+// The runtime self-test drives every clock path, so only its kernel build lints them; its
+// host-test build drops the boot-path callers like every other test build (#213).
+#![cfg_attr(
+    any(test, not(feature = "m9-linux-runtime-self-test")),
+    allow(dead_code)
+)]
 
 pub(crate) mod calibration;
 pub(crate) mod wall;
