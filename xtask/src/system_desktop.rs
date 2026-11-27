@@ -24,8 +24,10 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use clean_slate_graphics::Size;
 use clean_slate_ui::QualityTier;
 
+use crate::m10_desktop_visual::OUTPUT;
 use crate::marker_spec::first_guest_failure;
 use crate::system_boot::{
     check_audit_service, check_console_service, check_no_desktop_rows, expected_audit_authority,
@@ -401,7 +403,19 @@ fn grant_line<'a>(
     Ok(middle)
 }
 
+#[cfg(test)]
 fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopSummary, String> {
+    check_desktop_boot_at(output, machine, &[OUTPUT])
+}
+
+/// [`check_desktop_boot`] where the compositor may start at, and the shell lay its rail out for,
+/// any of `outputs` (#314: a VirtIO-GPU mode change the compositor asks for at start can land
+/// before or after either line).
+fn check_desktop_boot_at(
+    output: &str,
+    machine: &DesktopMachine,
+    outputs: &[Size],
+) -> Result<DesktopSummary, String> {
     let backend = only(output, "[DISP] backend=")?;
     if field(backend, "backend") != Some(machine.backend) {
         return Err(format!(
@@ -560,15 +574,34 @@ fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopS
             "the compositor reported ready before presenting a frame: {compositor_ready:?}"
         ));
     }
-    for (pid, line) in [
+    for (pid, prefix, accepted) in [
         (
             compositor,
-            format!("[COMP] started output=1280x800 tier={tier}"),
+            "[COMP] started output=",
+            outputs
+                .iter()
+                .map(|o| format!("{}x{} tier={tier}", o.width, o.height))
+                .collect::<Vec<_>>(),
         ),
         (
             shell,
-            format!("[SHELL] ready rail=88x800 surfaces=2 dock=none tier={tier}"),
+            "[SHELL] ready rail=",
+            outputs
+                .iter()
+                .map(|o| format!("88x{} surfaces=2 dock=none tier={tier}", o.height))
+                .collect(),
         ),
+    ] {
+        let line = only(output, &format!("[IPC ] console pid={pid}: {prefix}"))?;
+        let rest = &line[line.find(prefix).map_or(0, |at| at + prefix.len())..];
+        if !accepted.iter().any(|want| rest == want) {
+            return Err(format!(
+                "{line:?}, expected {prefix}{}",
+                accepted.join(" or ")
+            ));
+        }
+    }
+    for (pid, line) in [
         // #237: init's launcher port lists the app row.
         (shell, "[SHELL] launcher listed=1".to_owned()),
         (app, "[APP ] ready".to_owned()),
@@ -682,6 +715,15 @@ pub(crate) fn check_baseline_boot(
     segment: &str,
     machine: &DesktopMachine,
 ) -> Result<Desktop, String> {
+    check_baseline_boot_at(segment, machine, &[OUTPUT])
+}
+
+/// [`check_baseline_boot`] at any of `outputs` ([`check_desktop_boot_at`]).
+pub(crate) fn check_baseline_boot_at(
+    segment: &str,
+    machine: &DesktopMachine,
+    outputs: &[Size],
+) -> Result<Desktop, String> {
     let mut tracker = crate::MarkerTracker::from_steps(&DESKTOP_MARKERS);
     if !tracker.consume(segment) {
         return Err(match tracker.mismatch() {
@@ -689,7 +731,7 @@ pub(crate) fn check_baseline_boot(
             None => format!("boot waiting for {:?}", tracker.pending_label()),
         });
     }
-    let summary = check_desktop_boot(segment, machine)?;
+    let summary = check_desktop_boot_at(segment, machine, outputs)?;
     let init_pid = number(only(segment, "[KERN] init launched pid=")?, "pid")?;
     let mut rows = [Row {
         pid: 0,

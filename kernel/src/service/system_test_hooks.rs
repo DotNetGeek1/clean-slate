@@ -15,6 +15,12 @@
 //! (fault report, teardown, init's restart policy, the clients' `ServerGone`) is the
 //! production path the default image runs.
 //!
+//! **Display mode (#314).** Ctrl-V (`0x16`) asks the display for its smallest settable mode
+//! other than the current one, through the same `SET_MODE` path the presenter's syscall takes,
+//! on behalf of the bound presenter: a mode change the compositor did not start, so a lane can
+//! check that the desktop re-lays itself out. A busy display (a present or a mode change in
+//! flight) is asked again on the next tick; the hook logs the size and the answer once.
+//!
 //! **Audit flood.** Ctrl-A (`0x01`) queues one denial and Ctrl-B (`0x02`) commits the queue. In
 //! one interrupt-context call the kernel denies init one audit-log read (the witness), then
 //! denies the shell's holder one read per queued byte, through the production rights check that
@@ -108,13 +114,16 @@ static FAULT_REQUESTED: [AtomicBool; FAULT_TARGETS.len()] =
 const AUDIT_FLOOD_QUEUE_BYTE: u8 = 0x01;
 const AUDIT_FLOOD_COMMIT_BYTE: u8 = 0x02;
 
+const DISPLAY_MODE_BYTE: u8 = 0x16;
+static DISPLAY_MODE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 static AUDIT_FLOOD_QUEUED: AtomicU32 = AtomicU32::new(0);
 static AUDIT_FLOOD_COMMIT: AtomicBool = AtomicBool::new(false);
 
 /// Printed once COM1 receive is on, so every transcript says which build produced it.
 pub(crate) fn announce() {
     kernel_log_fmt(format_args!(
-        "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service, Ctrl-] the compositor, Ctrl-^ the desktop shell, Ctrl-_ the app, Ctrl-X the console service, Ctrl-Y the audit service; Ctrl-A queues an audit denial, Ctrl-B commits them\n"
+        "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service, Ctrl-] the compositor, Ctrl-^ the desktop shell, Ctrl-_ the app, Ctrl-X the console service, Ctrl-Y the audit service; Ctrl-A queues an audit denial, Ctrl-B commits them; Ctrl-V sets the smallest other display mode\n"
     ));
 }
 
@@ -129,6 +138,7 @@ pub(crate) fn observe_received_byte(byte: u8) {
             AUDIT_FLOOD_QUEUED.fetch_add(1, Ordering::Relaxed);
         }
         AUDIT_FLOOD_COMMIT_BYTE => AUDIT_FLOOD_COMMIT.store(true, Ordering::Relaxed),
+        DISPLAY_MODE_BYTE => DISPLAY_MODE_REQUESTED.store(true, Ordering::Relaxed),
         _ => {}
     }
 }
@@ -145,6 +155,35 @@ pub(crate) fn run_pending() {
     }
     if AUDIT_FLOOD_COMMIT.swap(false, Ordering::Relaxed) {
         audit_flood(AUDIT_FLOOD_QUEUED.swap(0, Ordering::Relaxed));
+    }
+    if DISPLAY_MODE_REQUESTED.load(Ordering::Relaxed) {
+        set_display_mode();
+    }
+}
+
+/// Ctrl-V: the smallest other settable mode, retried while the display is busy.
+fn set_display_mode() {
+    use clean_slate_graphics::display::DisplayError;
+
+    let Some(((width, height), result)) = crate::device::display::hook_set_smallest_mode() else {
+        DISPLAY_MODE_REQUESTED.store(false, Ordering::Relaxed);
+        kernel_log_fmt(format_args!(
+            "[HOOK] display mode requested but no presenter or other settable mode; ignored\n"
+        ));
+        return;
+    };
+    if result == Err(DisplayError::BufferBusy) {
+        return;
+    }
+    DISPLAY_MODE_REQUESTED.store(false, Ordering::Relaxed);
+    match result {
+        Ok(()) => kernel_log_fmt(format_args!(
+            "[HOOK] display mode {width}x{height} requested status=ok at-ms={}\n",
+            uptime_ms()
+        )),
+        Err(error) => kernel_log_fmt(format_args!(
+            "[HOOK] display mode {width}x{height} requested status={error:?}\n"
+        )),
     }
 }
 

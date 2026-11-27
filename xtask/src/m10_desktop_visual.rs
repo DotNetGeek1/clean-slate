@@ -43,6 +43,8 @@ pub(crate) struct Scene {
     pub(crate) window: Option<Point>,
     /// Pointer hotspot (the software cursor is drawn there).
     pub(crate) pointer: Point,
+    /// The output size: [`OUTPUT`] except in the display-mode lane (#314).
+    pub(crate) output: Size,
 }
 
 fn style(tier: QualityTier) -> Style<'static> {
@@ -50,7 +52,22 @@ fn style(tier: QualityTier) -> Style<'static> {
 }
 
 fn shell(tier: QualityTier) -> Shell<'static> {
-    Shell::new(&CLEAN_SLATE_DARK, tier, OUTPUT, ShellConfig::M10)
+    shell_at(tier, OUTPUT)
+}
+
+fn shell_at(tier: QualityTier, output: Size) -> Shell<'static> {
+    Shell::new(&CLEAN_SLATE_DARK, tier, output, ShellConfig::M10)
+}
+
+/// The rail rect on an `output`-sized desktop.
+pub(crate) fn rail_at(tier: QualityTier, output: Size) -> Rect {
+    shell_at(tier, output).zones().rail
+}
+
+/// [`window_origin`] on an `output`-sized desktop (#314).
+pub(crate) fn window_origin_at(tier: QualityTier, output: Size, step: u32) -> Point {
+    let area = shell_at(tier, output).zones().window_area();
+    cascade(&chrome(tier), area, PANEL_SIZE, step)
 }
 
 /// The desktop lanes' manifest names one launchable row, the playground, running at boot
@@ -81,6 +98,7 @@ pub(crate) fn chrome(tier: QualityTier) -> CleanSlateChrome<'static> {
 }
 
 /// The rail rect and the window area of the M10 shell zones.
+#[cfg(test)]
 pub(crate) fn rail(tier: QualityTier) -> Rect {
     shell(tier).zones().rail
 }
@@ -137,27 +155,28 @@ pub(crate) fn center(rect: Rect) -> Point {
     }
 }
 
-fn output_rect() -> Rect {
+fn output_rect(output: Size) -> Rect {
     Rect {
         x: 0,
         y: 0,
-        width: OUTPUT.width,
-        height: OUTPUT.height,
+        width: output.width,
+        height: output.height,
     }
 }
 
-fn output_layout() -> BufferLayout {
-    BufferLayout::packed(OUTPUT.width, OUTPUT.height, PixelFormat::Xrgb8888).expect("output")
+fn output_layout(output: Size) -> BufferLayout {
+    BufferLayout::packed(output.width, output.height, PixelFormat::Xrgb8888).expect("output")
 }
 
 /// One host render, as screendump RGB.
 pub(crate) struct Render {
     rgb: Vec<u8>,
+    output: Size,
 }
 
 impl Render {
     fn pixel(&self, x: u32, y: u32) -> [u8; 3] {
-        let at = (y * OUTPUT.width + x) as usize * 3;
+        let at = (y * self.output.width + x) as usize * 3;
         [self.rgb[at], self.rgb[at + 1], self.rgb[at + 2]]
     }
 }
@@ -174,14 +193,14 @@ pub(crate) enum Layers {
 /// Paints `scene` in compositor order: background surface, window frame, (client content left
 /// as background), rail surface over it, cursor.
 pub(crate) fn render(scene: &Scene, layers: Layers) -> Render {
-    let mut shell = shell(scene.tier);
+    let mut shell = shell_at(scene.tier, scene.output);
     // The lanes capture only while the one window has focus, so the rail shows the playground
     // selected whenever there is a window; `focused` varies only the chrome, which is what the
     // focus check compares.
     if matches!(layers, Layers::Desktop { .. }) {
         shell.set_apps(desktop_rail(scene.window.is_some()));
     }
-    let layout = output_layout();
+    let layout = output_layout(scene.output);
     let mut bytes = vec![0u8; layout.byte_len()];
     {
         let mut canvas = Canvas::new(&mut bytes, layout).expect("output canvas");
@@ -231,7 +250,25 @@ pub(crate) fn render(scene: &Scene, layers: Layers) -> Render {
         .chunks_exact(4)
         .flat_map(|bgrx| [bgrx[2], bgrx[1], bgrx[0]])
         .collect();
-    Render { rgb }
+    Render {
+        rgb,
+        output: scene.output,
+    }
+}
+
+/// What a passing capture of `scene` looks like: the render with client content filled in.
+#[cfg(test)]
+pub(crate) fn passing_capture(scene: &Scene) -> Screenshot {
+    let output = scene.output;
+    let mut rgb = render(scene, Layers::Desktop { focused: true }).rgb;
+    if let Some(origin) = scene.window {
+        let pointer = cursor(scene.pointer);
+        for (x, y) in pixels(content_rect(origin), &[pointer], output) {
+            let at = (y * output.width + x) as usize * 3;
+            rgb[at..at + 3].copy_from_slice(&[0x20, 0x24, 0x2c]);
+        }
+    }
+    Screenshot::new(output.width, output.height, rgb).unwrap()
 }
 
 /// [`render`]'s pixels, for tests that build synthetic captures.
@@ -244,12 +281,12 @@ pub(crate) fn cursor(pointer: Point) -> Rect {
     cursor_rect(&ARROW, pointer)
 }
 
-/// Pixels of `region` (clipped to the output) outside every `exclude` rect.
-fn pixels(region: Rect, exclude: &[Rect]) -> impl Iterator<Item = (u32, u32)> + '_ {
+/// Pixels of `region` (clipped to an `output`-sized frame) outside every `exclude` rect.
+fn pixels(region: Rect, exclude: &[Rect], output: Size) -> impl Iterator<Item = (u32, u32)> + '_ {
     let x0 = region.x.max(0) as u32;
     let y0 = region.y.max(0) as u32;
-    let x1 = (region.right().max(0) as u32).min(OUTPUT.width);
-    let y1 = (region.bottom().max(0) as u32).min(OUTPUT.height);
+    let x1 = (region.right().max(0) as u32).min(output.width);
+    let y1 = (region.bottom().max(0) as u32).min(output.height);
     (y0..y1)
         .flat_map(move |y| (x0..x1).map(move |x| (x, y)))
         .filter(move |&(x, y)| {
@@ -292,7 +329,7 @@ pub(crate) fn diff(
     exclude: &[Rect],
 ) -> RegionDiff {
     let mut result = RegionDiff::default();
-    for (x, y) in pixels(region, exclude) {
+    for (x, y) in pixels(region, exclude, expected.output) {
         result.compared += 1;
         let got = shot.pixel(x, y).unwrap_or([0; 3]);
         let want = expected.pixel(x, y);
@@ -323,11 +360,12 @@ const TITLE_BAR_BUDGET: u64 = 10_000;
 
 /// Every structural check of one capture of `scene`.
 pub(crate) fn check_scene(shot: &Screenshot, scene: &Scene) -> Result<(), String> {
-    if (shot.width(), shot.height()) != (OUTPUT.width, OUTPUT.height) {
+    let output = scene.output;
+    if (shot.width(), shot.height()) != (output.width, output.height) {
         return Err(format!(
             "expected a {}x{} frame, got {}x{}",
-            OUTPUT.width,
-            OUTPUT.height,
+            output.width,
+            output.height,
             shot.width(),
             shot.height()
         ));
@@ -338,7 +376,7 @@ pub(crate) fn check_scene(shot: &Screenshot, scene: &Scene) -> Result<(), String
     let content = scene.window.map(content_rect);
     let no_content: Vec<Rect> = content.into_iter().collect();
 
-    let rail = rail(scene.tier);
+    let rail = rail_at(scene.tier, output);
     let rail_diff = diff(shot, &focused, rail, &[cursor]);
     if !rail_diff.within(RAIL_BUDGET) {
         return Err(rail_diff.describe("left rail"));
@@ -353,8 +391,8 @@ pub(crate) fn check_scene(shot: &Screenshot, scene: &Scene) -> Result<(), String
     }
     let dock_band = Rect {
         x: rail.right(),
-        y: (OUTPUT.height - DOCK_BAND_ROWS) as i32,
-        width: OUTPUT.width - rail.width,
+        y: (output.height - DOCK_BAND_ROWS) as i32,
+        width: output.width - rail.width,
         height: DOCK_BAND_ROWS,
     };
     let dock = diff(shot, &background, dock_band, &dock_exclude);
@@ -385,7 +423,7 @@ pub(crate) fn check_scene(shot: &Screenshot, scene: &Scene) -> Result<(), String
         }
     }
 
-    let whole = diff(shot, &focused, output_rect(), &no_content);
+    let whole = diff(shot, &focused, output_rect(output), &no_content);
     if !whole.within(DESKTOP_BUDGET) {
         return Err(whole.describe("desktop outside client content"));
     }
@@ -403,7 +441,7 @@ fn check_focused_chrome(
     let unfocused = render(scene, Layers::Desktop { focused: false });
     let visual = chrome(scene.tier).visual_rect(frame);
     let (mut distinct, mut as_focused) = (0u64, 0u64);
-    for (x, y) in pixels(visual, exclude) {
+    for (x, y) in pixels(visual, exclude, scene.output) {
         let want = focused.pixel(x, y);
         if want == unfocused.pixel(x, y) {
             continue;
@@ -431,7 +469,11 @@ pub(crate) fn region_changed(
     region: Rect,
     exclude: &[Rect],
 ) -> bool {
-    pixels(region, exclude).any(|(x, y)| a.pixel(x, y) != b.pixel(x, y))
+    let output = Size {
+        width: a.width(),
+        height: a.height(),
+    };
+    pixels(region, exclude, output).any(|(x, y)| a.pixel(x, y) != b.pixel(x, y))
 }
 
 #[cfg(test)]
@@ -444,17 +486,7 @@ mod tests {
 
     /// A render with client content filled in, as a passing capture would look.
     fn passing_shot(scene: &Scene) -> Screenshot {
-        let mut rgb = render(scene, Layers::Desktop { focused: true }).rgb;
-        if let Some(origin) = scene.window {
-            let pointer = cursor(scene.pointer);
-            paint_except(
-                &mut rgb,
-                content_rect(origin),
-                &[pointer],
-                [0x20, 0x24, 0x2c],
-            );
-        }
-        Screenshot::new(OUTPUT.width, OUTPUT.height, rgb).unwrap()
+        passing_capture(scene)
     }
 
     fn paint(rgb: &mut [u8], rect: Rect, color: [u8; 3]) {
@@ -462,7 +494,7 @@ mod tests {
     }
 
     fn paint_except(rgb: &mut [u8], rect: Rect, exclude: &[Rect], color: [u8; 3]) {
-        for (x, y) in pixels(rect, exclude) {
+        for (x, y) in pixels(rect, exclude, OUTPUT) {
             let at = (y * OUTPUT.width + x) as usize * 3;
             rgb[at..at + 3].copy_from_slice(&color);
         }
@@ -473,6 +505,7 @@ mod tests {
             tier,
             window: Some(window_origin(tier, 0)),
             pointer: Point { x: 1279, y: 799 },
+            output: OUTPUT,
         }
     }
 
@@ -512,7 +545,7 @@ mod tests {
         let background = render(&scene, Layers::Background);
         let mut no_rail = passing_shot(&scene).rgb().to_vec();
         let rail = rail(scene.tier);
-        for (x, y) in pixels(rail, &[]) {
+        for (x, y) in pixels(rail, &[], OUTPUT) {
             let at = (y * OUTPUT.width + x) as usize * 3;
             no_rail[at..at + 3].copy_from_slice(&background.pixel(x, y));
         }
