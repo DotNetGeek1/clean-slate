@@ -54,6 +54,33 @@ pub(crate) fn is_held_key_line(line: &str) -> bool {
         .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b == b's'))
 }
 
+/// `lines` (app input states after `state=changed `) without a line that only counted a key
+/// press whose text the next line adds. The app takes a key's press and its text as two events
+/// and logs once per drain, so when they land in separate drains it logs the press first: the
+/// #349 soak saw `presses=1 text=` (the text unchanged) before `presses=1 text=a`.
+pub(crate) fn without_pending_text<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+    fn split(line: &str) -> Option<(&str, &str)> {
+        let (counts, text) = line.split_once(" text=")?;
+        Some((counts, text))
+    }
+    let mut kept = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        let pending = index > 0
+            && matches!(
+                (split(lines[index - 1]), split(line), lines.get(index + 1).and_then(|next| split(next))),
+                (Some((_, before)), Some((counts, text)), Some((next_counts, next_text)))
+                    if text == before
+                        && next_counts == counts
+                        && next_text.len() > text.len()
+                        && next_text.starts_with(text)
+            );
+        if !pending {
+            kept.push(*line);
+        }
+    }
+    kept
+}
+
 /// The app 1 lines after [`EXPECTED_INPUT`]: the press (`text=as`), then at least
 /// [`HELD_KEY_MIN_REPEATS`] repeat lines, and nothing else.
 pub(crate) fn check_held_key(lines: &[&str]) -> Result<(), String> {
@@ -170,6 +197,36 @@ pub(crate) fn run() -> Result<(), XtaskError> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_press_logged_before_its_text_is_dropped_and_nothing_else() {
+        let logged = [
+            "clicks=1 magenta=1 presses=0 text=",
+            "clicks=1 magenta=1 presses=1 text=",
+            "clicks=1 magenta=1 presses=1 text=a",
+            "clicks=1 magenta=1 presses=2 text=a",
+            "clicks=1 magenta=1 presses=2 text=as",
+            "clicks=1 magenta=1 presses=2 text=ass",
+            "clicks=1 magenta=1 presses=2 text=ass",
+        ];
+        assert_eq!(
+            super::without_pending_text(&logged),
+            [
+                "clicks=1 magenta=1 presses=0 text=",
+                "clicks=1 magenta=1 presses=1 text=a",
+                "clicks=1 magenta=1 presses=2 text=as",
+                "clicks=1 magenta=1 presses=2 text=ass",
+                "clicks=1 magenta=1 presses=2 text=ass",
+            ]
+        );
+        // A click that changes nothing but the counts is kept.
+        let clicked = [
+            "clicks=0 magenta=0 presses=0 text=",
+            "clicks=1 magenta=0 presses=0 text=",
+        ];
+        assert_eq!(super::without_pending_text(&clicked), clicked);
+    }
+
     use super::*;
     use crate::m10_desktop_visual::{
         center, chrome, content_rect, frame_rect, rail, window_origin, DOCK_BAND_ROWS, OUTPUT,

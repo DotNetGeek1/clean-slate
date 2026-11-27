@@ -31,8 +31,8 @@ use clean_slate_graphics::Point;
 use clean_slate_ui::{ChromeControl, ChromeStyle};
 
 use crate::m10_desktop_lane::{
-    check_held_key, is_held_key_line, motion_chunks, validate_captures, PlannedCapture,
-    BACKGROUND_POINT, DRAG, EXPECTED_INPUT, HELD_KEY_HOLD, HELD_KEY_MIN_REPEATS,
+    check_held_key, is_held_key_line, motion_chunks, validate_captures, without_pending_text,
+    PlannedCapture, BACKGROUND_POINT, DRAG, EXPECTED_INPUT, HELD_KEY_HOLD, HELD_KEY_MIN_REPEATS,
 };
 use crate::m10_desktop_visual::{center, chrome, frame_rect, panel, translate, window_origin};
 use crate::m10_desktop_visual::{Scene, OUTPUT};
@@ -523,6 +523,7 @@ fn check_whole(transcript: &str, first_app: u64, created: &[Point]) -> Result<()
             line.strip_prefix(&format!("[IPC ] console pid={first_app}: {APP_INPUT}"))
         })
         .collect();
+    let first_input = without_pending_text(&first_input);
     if first_input.len() < EXPECTED_INPUT.len()
         || first_input[..EXPECTED_INPUT.len()] != EXPECTED_INPUT
     {
