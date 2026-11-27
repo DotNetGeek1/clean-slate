@@ -378,8 +378,10 @@ const FIXTURE_NETWORK_FEATURES: &[&str] = &[
 /// - `production_trust_anchors.rs`: every `*.der` file in `CLEAN_SLATE_TRUST_ANCHORS_DIR`
 ///   (default `kernel/trust-anchors`), in name order, as `PRODUCTION_TRUST_ANCHORS`.
 /// - `production_network.rs`: `CLEAN_SLATE_NET_STATIC` as `PRODUCTION_NETWORK`, a static
-///   configuration `local/prefix[,gw=a.b.c.d][,gw_mac=xx:..][,dns=a.b.c.d[:port]][,tls_name=n]`;
-///   unset is an unconfigured network.
+///   configuration `local/prefix[,gw=a.b.c.d][,gw_mac=xx:..][,dns=a.b.c.d[:port]][,tls_name=n]`,
+///   or `CLEAN_SLATE_NET_DHCP` as a DHCP configuration `on[,dns=a.b.c.d[:port]][,tls_name=n]`
+///   (a `dns` here is used instead of the leased resolver). Setting both is an error; neither
+///   is an unconfigured network.
 fn emit_network_launch_inputs() {
     println!("cargo::rustc-check-cfg=cfg(clean_slate_fixture_network)");
     if any_feature_enabled(FIXTURE_NETWORK_FEATURES) {
@@ -416,10 +418,17 @@ fn emit_network_launch_inputs() {
         .expect("write production_trust_anchors.rs");
 
     println!("cargo::rerun-if-env-changed=CLEAN_SLATE_NET_STATIC");
-    let network = match env::var("CLEAN_SLATE_NET_STATIC") {
-        Ok(spec) if !spec.trim().is_empty() => static_network_code(spec.trim())
+    println!("cargo::rerun-if-env-changed=CLEAN_SLATE_NET_DHCP");
+    let set = |name| env::var(name).ok().filter(|spec| !spec.trim().is_empty());
+    let network = match (set("CLEAN_SLATE_NET_STATIC"), set("CLEAN_SLATE_NET_DHCP")) {
+        (Some(_), Some(_)) => {
+            panic!("CLEAN_SLATE_NET_STATIC and CLEAN_SLATE_NET_DHCP are both set; pick one")
+        }
+        (Some(spec), None) => static_network_code(spec.trim())
             .unwrap_or_else(|err| panic!("CLEAN_SLATE_NET_STATIC={spec:?}: {err}")),
-        _ => "NetworkConfig::UNCONFIGURED".to_string(),
+        (None, Some(spec)) => dhcp_network_code(spec.trim())
+            .unwrap_or_else(|err| panic!("CLEAN_SLATE_NET_DHCP={spec:?}: {err}")),
+        (None, None) => "NetworkConfig::UNCONFIGURED".to_string(),
     };
     std::fs::write(
         out_dir.join("production_network.rs"),
@@ -439,6 +448,46 @@ fn parse_ipv4(text: &str) -> Result<[u8; 4], String> {
     octets
         .try_into()
         .map_err(|_| format!("bad IPv4 address {text:?}"))
+}
+
+/// `dns=a.b.c.d[:port]` as `(address, port)`.
+fn parse_dns(value: &str) -> Result<([u8; 4], u16), String> {
+    let (addr, port) = match value.split_once(':') {
+        Some((addr, port)) => (addr, port.parse::<u16>().map_err(|_| "bad dns port")?),
+        None => (value, 53),
+    };
+    Ok((parse_ipv4(addr)?, port))
+}
+
+fn dns_code(dns: Option<([u8; 4], u16)>) -> String {
+    dns.map_or("None".to_string(), |(a, p)| {
+        format!("Some(SocketAddrV4::new(Ipv4Addr::new({a:?}), {p}))")
+    })
+}
+
+/// Rust for a `NetworkConfig::new_dhcp` call from `CLEAN_SLATE_NET_DHCP` (see
+/// [`emit_network_launch_inputs`]).
+fn dhcp_network_code(spec: &str) -> Result<String, String> {
+    let mut fields = spec.split(',').map(str::trim);
+    match fields.next() {
+        Some("on" | "1") => {}
+        _ => return Err("must start with `on`".to_string()),
+    }
+    let (mut dns, mut tls_name) = (None, String::new());
+    for field in fields {
+        let (key, value) = field
+            .split_once('=')
+            .ok_or(format!("bad field {field:?}"))?;
+        match key {
+            "dns" => dns = Some(parse_dns(value)?),
+            "tls_name" => tls_name = value.to_string(),
+            other => return Err(format!("unknown field {other:?}")),
+        }
+    }
+    Ok(format!(
+        "NetworkConfig::new_dhcp({}, {tls_name:?})",
+        dns_code(dns)
+    ))
 }
 
 /// Rust for a `NetworkConfig::new_static` call from `CLEAN_SLATE_NET_STATIC` (see
@@ -468,13 +517,7 @@ fn static_network_code(spec: &str) -> Result<String, String> {
                 let octets: [u8; 6] = octets.try_into().map_err(|_| "bad gw_mac")?;
                 gateway_mac = Some(octets);
             }
-            "dns" => {
-                let (addr, port) = match value.split_once(':') {
-                    Some((addr, port)) => (addr, port.parse::<u16>().map_err(|_| "bad dns port")?),
-                    None => (value, 53),
-                };
-                dns = Some((parse_ipv4(addr)?, port));
-            }
+            "dns" => dns = Some(parse_dns(value)?),
             "tls_name" => tls_name = value.to_string(),
             other => return Err(format!("unknown field {other:?}")),
         }
@@ -484,9 +527,7 @@ fn static_network_code(spec: &str) -> Result<String, String> {
     });
     let gateway_mac =
         gateway_mac.map_or("None".to_string(), |m| format!("Some(MacAddr::new({m:?}))"));
-    let dns = dns.map_or("None".to_string(), |(a, p)| {
-        format!("Some(SocketAddrV4::new(Ipv4Addr::new({a:?}), {p}))")
-    });
+    let dns = dns_code(dns);
     Ok(format!(
         "NetworkConfig::new_static(Ipv4Route {{ local: Ipv4Addr::new({local:?}), prefix_len: {prefix}, gateway: {gateway} }}, {gateway_mac}, {dns}, {tls_name:?})"
     ))
