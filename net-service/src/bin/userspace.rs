@@ -972,7 +972,8 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     };
     unsafe {
         // #221 stage E: each caller reaches what its app's policy names, judged against the
-        // launch configuration's resolver.
+        // resolver in use: the launch configuration's, or for a DHCP launch without one, the
+        // lease's (`with_lease` above). Leases are taken once at start, so it cannot change.
         let authorizer = AppPolicyAuthorizer::new(NETWORK_POLICIES, network.resolver);
         NetworkService::init_in_place(service_state_ptr(), generation, authorizer);
         (*service_state_ptr()).attach_backend(DemuxLink::for_udp());
