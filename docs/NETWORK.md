@@ -80,6 +80,8 @@ The network service image itself carries none of this (#221 stage D). The kernel
 
 The service checks the block (`NetworkConfig::parse`, `TrustAnchors::set`) and stops before it is ready, with `aux_status` `NETWORK_SERVICE_AUX_BAD_LAUNCH`, when it does not check out. `L3Stack::with_route` routes off-prefix destinations through the gateway; the service pins the gateway's MAC only when the configuration names one, and otherwise resolves it with ARP.
 
+**DHCP.** A build can ask for a DHCP lease instead of a static address with `CLEAN_SLATE_NET_DHCP=on[,dns=a.b.c.d[:port]][,tls_name=name]` (refused together with `CLEAN_SLATE_NET_STATIC`; `cargo xtask` leaves the lab network out when it is set). The launch block then carries `CONFIG_FLAG_DHCP` and no address, prefix, gateway or gateway MAC. Before either stack exists the service runs `clean_slate_network::dhcp::DhcpClient` over the raw NIC (DISCOVER, OFFER, REQUEST, ACK from `0.0.0.0` to the broadcast address, retransmitting after 1, 2 and 4 s) and applies the lease with `ServiceNetwork::with_lease`, which checks it like a static configuration: leased address and prefix, the first router if it is on the leased prefix, and the first leased DNS server on port 53 unless the build named a `dns`. The lease has to arrive within 6 s (`DHCP_LAUNCH_BUDGET_MS`), because init stops a service that is not ready in 10 s; without one the service comes up unconfigured. Its ready line then ends `dhcp-lease=a.b.c.d` (`NetworkReadyDetail::leased`) when it got a lease. Not done yet: renewing the lease (T1/T2), releasing it, and ARP-probing the offered address.
+
 ## M7.7 network capabilities & attribution
 
 Kernel broker: `kernel/src/capability/network.rs`. Live generation lookup:
