@@ -310,6 +310,7 @@ dependencies = [
  "clean-slate-runtime",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
+ "sha2",
 ]
 
 [[package]]

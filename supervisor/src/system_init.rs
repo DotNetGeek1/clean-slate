@@ -772,6 +772,8 @@ pub(crate) mod tests {
         pub(crate) init: SystemInit<SharedKernel, SharedLog, SLOTS>,
         pub(crate) kernel: SharedKernel,
         log: SharedLog,
+        /// A started audit instance reports ready at once.
+        audit_ready_at_once: bool,
     }
 
     impl Harness {
@@ -779,11 +781,12 @@ pub(crate) mod tests {
             Self::boot_manifest(SYSTEM_MANIFEST)
         }
 
-        /// Boots `manifest`; its audit and console services, which depend on nothing, report
-        /// ready at once so that the tests below follow the other rows.
+        /// Boots `manifest`; its console service, which depends on nothing, reports ready at
+        /// once, and its audit service as soon as it is started after storage's ready, so that
+        /// the tests below follow the other rows.
         pub(crate) fn boot_manifest(manifest: &'static [ServiceSpec]) -> Self {
             let mut harness = Self::boot_manifest_unready(manifest);
-            harness.report(0, AUDIT_SERVICE_ID, LifecycleEventKind::Ready);
+            harness.audit_ready_at_once = true;
             harness.report(0, CONSOLE_SERVICE_ID, LifecycleEventKind::Ready);
             harness
         }
@@ -800,12 +803,21 @@ pub(crate) mod tests {
             )
             .expect("init registers the manifest");
             init.boot(0);
-            Self { init, kernel, log }
+            Self {
+                init,
+                kernel,
+                log,
+                audit_ready_at_once: false,
+            }
         }
 
         pub(crate) fn report(&mut self, now: u64, service: ServiceId, kind: LifecycleEventKind) {
+            let audit_starts = self.starts_of(AUDIT_SERVICE_ID);
             self.kernel.0.borrow_mut().report(service, kind);
             self.init.on_wake(now, Some(service));
+            if self.audit_ready_at_once && self.starts_of(AUDIT_SERVICE_ID) > audit_starts {
+                self.report(now, AUDIT_SERVICE_ID, LifecycleEventKind::Ready);
+            }
         }
 
         pub(crate) fn requests(&self) -> Vec<(ServiceId, ControlRequestKind)> {
@@ -872,14 +884,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn boot_starts_storage_and_the_audit_and_console_services_and_announces_itself() {
+    fn boot_starts_storage_and_the_console_service_and_announces_itself() {
         let harness = Harness::boot_manifest_unready(SYSTEM_MANIFEST);
         assert_eq!(
             harness.requests(),
             [
                 (STORAGE_SERVICE_ID, ControlRequestKind::Start),
                 (CONSOLE_SERVICE_ID, ControlRequestKind::Start),
-                (AUDIT_SERVICE_ID, ControlRequestKind::Start),
             ]
         );
         assert_eq!(
@@ -888,14 +899,14 @@ pub(crate) mod tests {
         );
         assert_eq!(harness.lines_with("[INIT] starting service=20736").len(), 1);
         assert_eq!(harness.lines_with("[INIT] starting service=22016").len(), 1);
-        assert_eq!(harness.lines_with("[INIT] starting service=21760").len(), 1);
-        for service in [STORAGE_SERVICE_ID, AUDIT_SERVICE_ID, CONSOLE_SERVICE_ID] {
+        for service in [STORAGE_SERVICE_ID, CONSOLE_SERVICE_ID] {
             assert_eq!(harness.state(service), ServiceLifecycleState::Starting);
         }
-        assert_eq!(
-            harness.state(NETWORK_SERVICE_ID),
-            ServiceLifecycleState::Declared
-        );
+        // The audit service persists through the storage service, so it waits with the
+        // network service for storage's ready (#219 stage D).
+        for service in [NETWORK_SERVICE_ID, AUDIT_SERVICE_ID] {
+            assert_eq!(harness.state(service), ServiceLifecycleState::Declared);
+        }
     }
 
     #[test]
@@ -911,9 +922,9 @@ pub(crate) mod tests {
             [
                 (STORAGE_SERVICE_ID, ControlRequestKind::Start),
                 (CONSOLE_SERVICE_ID, ControlRequestKind::Start),
-                (AUDIT_SERVICE_ID, ControlRequestKind::Start),
                 (NETWORK_SERVICE_ID, ControlRequestKind::Start),
                 (SYSTEM_SHELL_SERVICE_ID, ControlRequestKind::Start),
+                (AUDIT_SERVICE_ID, ControlRequestKind::Start),
             ]
         );
         let storage_ready = harness.position_of("[INIT] service=20736 ready gen=1");
@@ -925,7 +936,7 @@ pub(crate) mod tests {
         assert!(network_start < shell_start);
     }
 
-    /// The compositor starts at boot beside storage and the audit service; the desktop shell
+    /// The compositor starts at boot beside storage and the console service; the desktop shell
     /// waits for the compositor's ready, the app for the shell's; the serial shell still waits
     /// for storage and the console service only.
     #[test]
@@ -941,7 +952,6 @@ pub(crate) mod tests {
             [
                 (STORAGE_SERVICE_ID, ControlRequestKind::Start),
                 (CONSOLE_SERVICE_ID, ControlRequestKind::Start),
-                (AUDIT_SERVICE_ID, ControlRequestKind::Start),
                 (COMPOSITOR_SERVICE_ID, ControlRequestKind::Start),
             ]
         );
@@ -1057,9 +1067,11 @@ pub(crate) mod tests {
             [
                 "[INIT] not starting service=20992: service=20736 is down",
                 "[INIT] not starting service=21504: service=20736 is down",
+                "[INIT] not starting service=21760: service=20736 is down",
             ]
         );
         assert_eq!(harness.starts_of(NETWORK_SERVICE_ID), 0);
+        assert_eq!(harness.starts_of(AUDIT_SERVICE_ID), 0);
         assert_eq!(harness.starts_of(SYSTEM_SHELL_SERVICE_ID), 0);
         assert_eq!(
             harness.init.next_deadline(),
@@ -1068,7 +1080,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             harness.lines_with("[INIT] boot settled"),
-            ["[INIT] boot settled running=2 down=3; waiting, no deadline"]
+            ["[INIT] boot settled running=1 down=4; waiting, no deadline"]
         );
 
         let requests = harness.requests().len();
@@ -1087,7 +1099,7 @@ pub(crate) mod tests {
         assert_eq!(harness.starts_of(STORAGE_SERVICE_ID), 1);
         harness.init.on_wake(3 * SECOND, None);
         assert_eq!(
-            harness.requests()[3..],
+            harness.requests()[2..],
             [
                 (STORAGE_SERVICE_ID, ControlRequestKind::Restart),
                 (STORAGE_SERVICE_ID, ControlRequestKind::Start),

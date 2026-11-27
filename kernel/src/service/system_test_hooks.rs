@@ -1,10 +1,10 @@
 //! `system-test-hooks` (#218 S7b, S6d): the test-only differences between the kernel that
 //! `cargo xtask test-system` boots and the default image. Nothing else enables the feature.
 //!
-//! **Fault bytes.** Each of five control bytes on COM1 asks for the live instance of one service
+//! **Fault bytes.** Each of six control bytes on COM1 asks for the live instance of one service
 //! to fault: Ctrl-\ (`0x1C`) the network service, Ctrl-] (`0x1D`) the compositor, Ctrl-^ (`0x1E`)
-//! the desktop shell, Ctrl-_ (`0x1F`) the app and Ctrl-X (`0x18`) the console service (#310).
-//! The default line discipline drops all five as
+//! the desktop shell, Ctrl-_ (`0x1F`) the app, Ctrl-X (`0x18`) the console service (#310) and
+//! Ctrl-Y (`0x19`) the audit service (#219). The default line discipline drops all six as
 //! unhandled control bytes in every build, so the hooks build changes nothing about how the
 //! shell's input is processed; it only also notices them.
 //!
@@ -67,7 +67,7 @@ struct FaultTarget {
 
 /// None of these bytes is printable or one the line discipline acts on (CR, LF, BS, DEL,
 /// Ctrl-U, Ctrl-D), so each reaches the discipline as an ordinary dropped control byte.
-const FAULT_TARGETS: [FaultTarget; 5] = [
+const FAULT_TARGETS: [FaultTarget; 6] = [
     FaultTarget {
         byte: 0x1c,
         service: NETWORK_SERVICE_ID,
@@ -93,6 +93,11 @@ const FAULT_TARGETS: [FaultTarget; 5] = [
         service: CONSOLE_SERVICE_ID,
         name: "console",
     },
+    FaultTarget {
+        byte: 0x19,
+        service: AUDIT_SERVICE_ID,
+        name: "audit",
+    },
 ];
 
 /// Set by the receive path, cleared once the fault is armed or there is nothing to fault.
@@ -109,7 +114,7 @@ static AUDIT_FLOOD_COMMIT: AtomicBool = AtomicBool::new(false);
 /// Printed once COM1 receive is on, so every transcript says which build produced it.
 pub(crate) fn announce() {
     kernel_log_fmt(format_args!(
-        "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service, Ctrl-] the compositor, Ctrl-^ the desktop shell, Ctrl-_ the app, Ctrl-X the console service; Ctrl-A queues an audit denial, Ctrl-B commits them\n"
+        "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service, Ctrl-] the compositor, Ctrl-^ the desktop shell, Ctrl-_ the app, Ctrl-X the console service, Ctrl-Y the audit service; Ctrl-A queues an audit denial, Ctrl-B commits them\n"
     ));
 }
 
@@ -541,7 +546,7 @@ mod tests {
             .iter()
             .map(|target| target.service.0)
             .collect();
-        assert_eq!(services, [0x5200, 0x5300, 0x5301, 0x5302, 0x5600]);
+        assert_eq!(services, [0x5200, 0x5300, 0x5301, 0x5302, 0x5600, 0x5500]);
         for byte in [AUDIT_FLOOD_QUEUE_BYTE, AUDIT_FLOOD_COMMIT_BYTE] {
             assert!(byte < b' ');
             assert!(!handled.contains(&byte));

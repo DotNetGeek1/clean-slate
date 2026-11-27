@@ -141,6 +141,12 @@ pub enum Grant {
     /// Root `AUDIT_READ` on the capability audit log. Its handle is written into the audit
     /// bootstrap page, so only a [`ServiceImage::Audit`] row may hold it.
     AuditReader,
+    /// Root `READ | WRITE | DIRECTORY` on the audit store, the directory whose table is
+    /// `AUDIT_STORE_DIRECTORY_ID` (#219 stage D), where the audit service keeps the persisted
+    /// log. Its handle is written into the audit bootstrap page, so only a
+    /// [`ServiceImage::Audit`] row may hold it, and the row must depend on the object-service
+    /// row (the one holding [`Self::ObjectServiceRole`]), which serves its requests.
+    AuditStore,
     /// Registers the row's console port, `console_port(row id, instance generation)`, for the
     /// instance being started, with a root `CONSOLE_SERVE` capability on it, and grants root
     /// `WRITE` on the serial console device (#310). Teardown unregisters the port (clients see
@@ -307,16 +313,17 @@ pub const SYSTEM_SHELL_SPEC: ServiceSpec = ServiceSpec {
     start: Start::AtBoot,
 };
 
-/// The capability audit log's reader (#219 stage B). It is a holder of its own, apart from the
-/// storage service, so either can be revoked alone. Reading the log needs no other service, so
-/// it depends on nothing and starts at boot. Ready is its first drain.
+/// The capability audit log's reader (#219 stages B and D). It is a holder of its own, apart
+/// from the storage service, so either can be revoked alone. It persists the log in its audit
+/// store, which the storage service serves, so it depends on the storage row and starts at boot
+/// once that runs. Ready is its first drain, after the store has been opened and verified.
 pub const AUDIT_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     id: AUDIT_SERVICE_ID,
     image: ServiceImage::Audit,
     mode: 0,
-    grants: &[Grant::AuditReader, Grant::Console],
+    grants: &[Grant::AuditReader, Grant::Console, Grant::AuditStore],
     restart: SYSTEM_RESTART,
-    depends_on: &[],
+    depends_on: &[STORAGE_SERVICE_ID],
     slot_allowance: None,
     memory_pages: 0,
     launch_name: None,
@@ -569,8 +576,8 @@ pub enum ManifestError {
     ConsoleInputWithoutConsole {
         row: usize,
     },
-    /// A second row holds `Grant::GraphicsPort`, `Grant::InputSeat`, `Grant::AuditReader` or
-    /// `Grant::ConsoleService`.
+    /// A second row holds `Grant::GraphicsPort`, `Grant::InputSeat`, `Grant::AuditReader`,
+    /// `Grant::AuditStore` or `Grant::ConsoleService`.
     DuplicateExclusiveGrant {
         row: usize,
     },
@@ -583,6 +590,11 @@ pub enum ManifestError {
     /// does not list the `Grant::ConsoleService` row in `depends_on` (or no earlier row holds
     /// `ConsoleService`).
     ConsoleClientWithoutServiceDependency {
+        row: usize,
+    },
+    /// A `Grant::AuditStore` holder does not list the `Grant::ObjectServiceRole` row in
+    /// `depends_on` (or no earlier row holds `ObjectServiceRole`).
+    AuditStoreWithoutStorageDependency {
         row: usize,
     },
     /// A row holds both `Grant::ConsoleClient` and `Grant::ConsoleSession`: one console port
@@ -693,10 +705,19 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
             }
             if matches!(
                 spec.grants[grant],
-                Grant::GraphicsPort | Grant::InputSeat | Grant::AuditReader | Grant::ConsoleService
+                Grant::GraphicsPort
+                    | Grant::InputSeat
+                    | Grant::AuditReader
+                    | Grant::AuditStore
+                    | Grant::ConsoleService
             ) && earlier_row_grants(manifest, row, spec.grants[grant])
             {
                 return Err(ManifestError::DuplicateExclusiveGrant { row });
+            }
+            if matches!(spec.grants[grant], Grant::AuditStore)
+                && !depends_on_row_granting(manifest, row, Grant::ObjectServiceRole)
+            {
+                return Err(ManifestError::AuditStoreWithoutStorageDependency { row });
             }
             if matches!(
                 spec.grants[grant],
@@ -771,7 +792,7 @@ const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
         Grant::ConsoleClient => image.is_desktop() || matches!(image, ServiceImage::LinuxShell),
         Grant::ConsoleSession => matches!(image, ServiceImage::LinuxShell),
         Grant::ConsoleFrontEnd => matches!(image, ServiceImage::Terminal),
-        Grant::AuditReader => matches!(image, ServiceImage::Audit),
+        Grant::AuditReader | Grant::AuditStore => matches!(image, ServiceImage::Audit),
         Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
             matches!(image, ServiceImage::LinuxShell)
         }
@@ -969,11 +990,14 @@ mod tests {
     }
 
     #[test]
-    fn the_audit_row_reads_the_log_and_prints_and_depends_on_nothing() {
+    fn the_audit_row_reads_the_log_prints_and_persists_and_depends_on_storage() {
         let audit = find_service(SYSTEM_MANIFEST, AUDIT_SERVICE_ID).unwrap();
         assert_eq!(audit.image, ServiceImage::Audit);
-        assert_eq!(audit.grants, [Grant::AuditReader, Grant::Console]);
-        assert!(audit.depends_on.is_empty());
+        assert_eq!(
+            audit.grants,
+            [Grant::AuditReader, Grant::Console, Grant::AuditStore]
+        );
+        assert_eq!(audit.depends_on, [STORAGE_SERVICE_ID]);
         assert_eq!(audit.restart, STORAGE_SERVICE_SPEC.restart);
         assert_eq!(audit.slot_allowance, None);
         assert!(!ServiceImage::Audit.is_linux());
@@ -1587,15 +1611,57 @@ mod tests {
     }
 
     #[test]
-    fn validation_allows_one_audit_reader() {
+    fn validation_allows_one_audit_reader_and_one_audit_store() {
+        let storage = STORAGE_SERVICE_SPEC;
         let mut second = AUDIT_SERVICE_SPEC;
         second.id = ServiceId(0x5510);
         assert_eq!(
-            validate_manifest(&[AUDIT_SERVICE_SPEC, second]),
-            Err(ManifestError::DuplicateExclusiveGrant { row: 1 })
+            validate_manifest(&[storage, AUDIT_SERVICE_SPEC, second]),
+            Err(ManifestError::DuplicateExclusiveGrant { row: 2 })
+        );
+        second.grants = &[Grant::Console, Grant::AuditStore];
+        assert_eq!(
+            validate_manifest(&[storage, AUDIT_SERVICE_SPEC, second]),
+            Err(ManifestError::DuplicateExclusiveGrant { row: 2 })
         );
         second.grants = &[Grant::Console];
-        assert_eq!(validate_manifest(&[AUDIT_SERVICE_SPEC, second]), Ok(()));
+        assert_eq!(
+            validate_manifest(&[storage, AUDIT_SERVICE_SPEC, second]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_audit_store_needs_the_object_service_row_as_a_dependency() {
+        let mut audit = AUDIT_SERVICE_SPEC;
+        assert_eq!(validate_manifest(&[STORAGE_SERVICE_SPEC, audit]), Ok(()));
+        audit.depends_on = &[];
+        assert_eq!(
+            validate_manifest(&[STORAGE_SERVICE_SPEC, audit]),
+            Err(ManifestError::AuditStoreWithoutStorageDependency { row: 1 })
+        );
+        // A row with that id that does not serve objects is no dependency.
+        let mut not_objects = row(STORAGE_SERVICE_ID.0, ServiceImage::Network, &[]);
+        not_objects.grants = &[];
+        audit.depends_on = &[STORAGE_SERVICE_ID];
+        assert_eq!(
+            validate_manifest(&[not_objects, audit]),
+            Err(ManifestError::AuditStoreWithoutStorageDependency { row: 1 })
+        );
+        for image in [
+            ServiceImage::Storage,
+            ServiceImage::Network,
+            ServiceImage::LinuxShell,
+            ServiceImage::Compositor,
+            ServiceImage::DesktopShell,
+            ServiceImage::Playground,
+            ServiceImage::Console,
+        ] {
+            assert!(
+                !grant_supported_by_image(Grant::AuditStore, image),
+                "{image:?}"
+            );
+        }
     }
 
     #[test]

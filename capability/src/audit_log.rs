@@ -27,8 +27,10 @@ pub enum Recorded {
 /// An allowed use identical to the same holder's newest record, which no reader has been
 /// handed yet ([`Self::mark_read`]), is merged into it: the record's `count` becomes the
 /// number of uses it stands for (2, 3, ...; saturating, after which a new record starts).
-/// A read of this log merges even into a record already handed over, so a reader polling an
-/// idle log holds one record and consumes no sequences.
+/// A read of this log merges even into a record already handed over, and into the reader's
+/// newest read even when the reader's other uses came after it, so a reader polling an idle log
+/// holds one read record and consumes no sequences, also when it writes what it read to storage
+/// between polls (#219 stage D).
 /// Merging consumes no sequence and no space.
 ///
 /// Nothing is lost silently: every stored record consumes a sequence; [`Self::dropped`]
@@ -89,10 +91,11 @@ impl<const N: usize> BoundedAuditLog<N> {
     /// Adds `event` (its sequence is assigned here) and says where it went.
     pub fn record_event(&mut self, mut event: AuditEvent) -> Recorded {
         let holder = event.charged_holder();
+        let log_read = is_log_read(&event) && event.kind == AuditKind::Authorize;
         let newest_of_holder = self
             .held()
             .iter()
-            .rposition(|held| held.charged_holder() == holder);
+            .rposition(|held| held.charged_holder() == holder && (!log_read || is_log_read(held)));
         if let Some(index) = newest_of_holder {
             if self.is_repeat(&self.events[index], &event) {
                 let merged = &mut self.events[index];
@@ -479,6 +482,37 @@ mod tests {
         log.record(use_event(1));
         assert_eq!(poll(&mut log), 1, "new records still reach the reader");
         assert_eq!(log.held_by(reader), 1);
+
+        // The reader's own uses between polls (writing what it read to its store) do not
+        // start a new read record.
+        let store_write = crate::audit::event_for(
+            0,
+            reader,
+            ResourceRef::object(0x4F_0000),
+            Rights::WRITE,
+            CapabilityHandle::new(1, 1),
+            0,
+            Ok(()),
+        );
+        log.record(store_write);
+        assert_eq!(poll(&mut log), 1, "the store write");
+        log.record(store_write.with_result(Ok(())));
+        log.record(crate::audit::event_for(
+            0,
+            reader,
+            ResourceRef::object(0x4F_0000),
+            Rights::READ,
+            CapabilityHandle::new(1, 1),
+            0,
+            Ok(()),
+        ));
+        assert_eq!(poll(&mut log), 2, "a second write and a read of the store");
+        assert_eq!(poll(&mut log), 0);
+        let reads = (1..log.next_sequence())
+            .filter_map(|sequence| log.get(sequence))
+            .filter(is_log_read)
+            .count();
+        assert_eq!(reads, 1, "still one read record");
     }
 
     #[test]

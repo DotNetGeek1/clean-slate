@@ -14,6 +14,8 @@ pub(crate) trait BootstrapGrantAuthority {
     fn grant_object_service_role(&mut self, pid: u64) -> Result<u64, &'static str>;
     /// Returns the encoded `AUDIT_READ` handle on the audit log.
     fn grant_audit_reader(&mut self, pid: u64) -> Result<u64, &'static str>;
+    /// Returns the encoded `READ | WRITE | DIRECTORY` handle on the audit store (#219).
+    fn grant_audit_store(&mut self, pid: u64) -> Result<u64, &'static str>;
     /// Returns the console IPC send handle.
     fn grant_console(&mut self, pid: u64) -> Result<u64, &'static str>;
 }
@@ -81,6 +83,7 @@ impl ConsoleClientRole {
 pub(crate) struct BootstrapGrantHandles {
     pub(crate) object_service_role: Option<u64>,
     pub(crate) audit_reader: Option<u64>,
+    pub(crate) audit_store: Option<u64>,
     pub(crate) console: Option<u64>,
 }
 
@@ -105,6 +108,9 @@ pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
             }
             Grant::AuditReader => {
                 handles.audit_reader = Some(authority.grant_audit_reader(pid)?);
+            }
+            Grant::AuditStore => {
+                handles.audit_store = Some(authority.grant_audit_store(pid)?);
             }
             Grant::Console => {
                 handles.console = Some(authority.grant_console(pid)?);
@@ -154,6 +160,7 @@ pub(crate) fn apply_instance_grants<A: InstanceGrantAuthority>(
             Grant::LauncherClient => authority.grant_launcher_client(pid),
             Grant::ObjectServiceRole
             | Grant::AuditReader
+            | Grant::AuditStore
             | Grant::Console
             | Grant::ConsoleInput
             | Grant::TmpObjects
@@ -177,6 +184,7 @@ mod tests {
     enum Call {
         ObjectServiceRole(u64),
         AuditReader(u64),
+        AuditStore(u64),
         Console(u64),
         BlockDevice(u64),
         NetworkService(u64, InstanceGeneration),
@@ -214,6 +222,11 @@ mod tests {
         fn grant_audit_reader(&mut self, pid: u64) -> Result<u64, &'static str> {
             self.calls.push(Call::AuditReader(pid));
             self.outcome(Grant::AuditReader).map(|()| 0xad17)
+        }
+
+        fn grant_audit_store(&mut self, pid: u64) -> Result<u64, &'static str> {
+            self.calls.push(Call::AuditStore(pid));
+            self.outcome(Grant::AuditStore).map(|()| 0xad57)
         }
 
         fn grant_console(&mut self, pid: u64) -> Result<u64, &'static str> {
@@ -376,16 +389,20 @@ mod tests {
     }
 
     #[test]
-    fn the_audit_row_is_given_its_reader_and_console_handles_at_bootstrap() {
+    fn the_audit_row_is_given_its_reader_console_and_store_handles_at_bootstrap() {
         use clean_slate_service_fixtures::AUDIT_SERVICE_ID;
         let mut recorder = Recorder::default();
         let handles = apply_both(grants_for(SYSTEM_MANIFEST, AUDIT_SERVICE_ID), &mut recorder);
-        assert_eq!(recorder.calls, [Call::AuditReader(7), Call::Console(7)]);
+        assert_eq!(
+            recorder.calls,
+            [Call::AuditReader(7), Call::Console(7), Call::AuditStore(7)]
+        );
         assert_eq!(
             handles,
             BootstrapGrantHandles {
                 object_service_role: None,
                 audit_reader: Some(0xad17),
+                audit_store: Some(0xad57),
                 console: Some(0xc0e5),
             }
         );
