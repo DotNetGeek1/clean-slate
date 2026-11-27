@@ -1,12 +1,13 @@
 //! What the kernel hands the network service at launch (#221 stage D): the network to bring
-//! up and the certificate authorities to trust, written beside its bootstrap.
+//! up, written beside its bootstrap, and the certificate authorities to trust, on read-only
+//! pages of their own.
 //!
 //! Test kernels (`cfg(clean_slate_fixture_network)`, the M7 lanes) hand it the hermetic lab
 //! network and the M7 test CA; only they compile the test CA in. Every other kernel hands it
 //! the build's production inputs (see `kernel/build.rs`): `CLEAN_SLATE_NET_STATIC`, else an
 //! unconfigured network, and the anchors in `kernel/trust-anchors`.
 
-use clean_slate_network::config::{ConfigError, NetworkConfig, TrustAnchors};
+use clean_slate_network::config::{NetworkConfig, TrustAnchors};
 #[cfg(clean_slate_fixture_network)]
 use clean_slate_service_fixtures::NetworkProbe;
 
@@ -38,10 +39,9 @@ pub(crate) fn network_config() -> NetworkConfig {
     source::NETWORK
 }
 
-/// Writes this kernel's trust anchors into `store` (in the service's bootstrap page).
-pub(crate) fn fill_trust_anchors(store: &mut TrustAnchors) -> Result<(), ConfigError> {
-    store.fill(source::TRUST_ANCHORS)
-}
+/// This kernel's trust anchors, packed at compile time (a set that does not fit fails the
+/// build). Spawn copies its pages into the service's trust pages.
+pub(crate) static TRUST_STORE: TrustAnchors = TrustAnchors::pack(source::TRUST_ANCHORS);
 
 /// What a self-test's client-mode probe of the network image resolves and expects: the M7
 /// fixture peer.
@@ -87,8 +87,7 @@ mod tests {
     #[test]
     fn this_kernels_launch_inputs_check_out() {
         network_config().parse().expect("network config");
-        let mut store = TrustAnchors::EMPTY;
-        fill_trust_anchors(&mut store).expect("trust anchors fit");
-        store.set().expect("trust anchors read back");
+        let anchors = TRUST_STORE.set().expect("trust anchors read back");
+        assert_eq!(anchors.as_slice(), source::TRUST_ANCHORS);
     }
 }

@@ -31,8 +31,8 @@ mod integration {
     use crate::session::SessionGeneration;
     use crate::stack::L3Stack;
     use crate::tcp::{
-        load_fixture_server_config, server_config_from_der, TcpState, TcpTransport, TlsPeerCert,
-        TlsPeerFault, TlsTestPeer,
+        load_fixture_server_config, server_config_from_chain, server_config_from_der, TcpState,
+        TcpTransport, TlsPeerCert, TlsPeerFault, TlsTestPeer,
     };
     use crate::tls::{
         tls_transaction, TlsConfig, TlsError, TlsTransactionBudget, TlsTransactionClock,
@@ -121,7 +121,7 @@ mod integration {
                 .as_mut()
                 .as_pin_mut()
                 .expect("polled after completion");
-            let output = match pending.poll(&mut cx) {
+            let output = match scratch::counting(|| pending.poll(&mut cx)) {
                 core::task::Poll::Ready(output) => Some(output),
                 core::task::Poll::Pending if tick >= clock.phase_deadline() => {
                     Some(Err(TlsError::Timeout))
@@ -413,6 +413,260 @@ mod integration {
             run_client_with(guest, &mut peer, &[PINNED_CA], None, 14, 0, &mut response);
         assert!(matches!(result, Err(TlsError::NoClock)), "{result:?}");
         assert_eq!(unsafe { &*guest }.connections_in_use(), 0);
+    }
+
+    /// What the client's polls allocate goes to a scratch heap like the network service's:
+    /// `clean_slate_runtime`'s size-class heap over [`crate::tls::TLS_SCRATCH_PAGES`] pages
+    /// (`ArenaPages`), one per test thread. Everything else uses the system allocator.
+    mod scratch {
+        use clean_slate_runtime::heap::{ArenaPages, Heap, PAGE_BYTES};
+        use core::ptr::NonNull;
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::{Cell, RefCell};
+
+        use crate::tls::TLS_SCRATCH_PAGES;
+
+        struct Routed;
+
+        std::thread_local! {
+            static ON: Cell<bool> = const { Cell::new(false) };
+            static HEAP: RefCell<Option<Heap<ArenaPages>>> = const { RefCell::new(None) };
+            static REGION: Cell<usize> = const { Cell::new(0) };
+        }
+
+        fn region() -> NonNull<u8> {
+            let base = REGION.with(|region| {
+                if region.get() == 0 {
+                    let layout =
+                        Layout::from_size_align(TLS_SCRATCH_PAGES * PAGE_BYTES, PAGE_BYTES)
+                            .unwrap();
+                    // SAFETY: non-zero size; leaked for the thread's lifetime.
+                    region.set(unsafe { System.alloc_zeroed(layout) } as usize);
+                }
+                region.get()
+            });
+            NonNull::new(base as *mut u8).unwrap()
+        }
+
+        /// A fresh scratch heap (nothing may still live in the old one).
+        pub(super) fn reset() {
+            let base = region();
+            // SAFETY: the region is this thread's and nothing in it is live.
+            let heap = Heap::new(unsafe { ArenaPages::new(base, TLS_SCRATCH_PAGES) });
+            HEAP.with(|slot| *slot.borrow_mut() = Some(heap));
+        }
+
+        /// Runs `f` with its allocations in the scratch heap.
+        pub(super) fn counting<T>(f: impl FnOnce() -> T) -> T {
+            if HEAP.with(|slot| slot.borrow().is_none()) {
+                reset();
+            }
+            ON.with(|on| on.set(true));
+            let out = f();
+            ON.with(|on| on.set(false));
+            out
+        }
+
+        /// (most scratch pages mapped at once, allocations refused) since the last reset.
+        pub(super) fn usage() -> (usize, usize) {
+            HEAP.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .map_or((0, 0), |heap| (high_water(heap), heap.stats().refusals))
+            })
+        }
+
+        fn high_water(heap: &Heap<ArenaPages>) -> usize {
+            heap.source().high_water_pages()
+        }
+
+        fn in_scratch(ptr: *mut u8) -> bool {
+            let base = REGION.try_with(Cell::get).unwrap_or(0);
+            let at = ptr as usize;
+            base != 0 && at >= base && at < base + TLS_SCRATCH_PAGES * PAGE_BYTES
+        }
+
+        unsafe impl GlobalAlloc for Routed {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                // `try_with`: thread-local teardown may allocate after the slots are gone.
+                if ON.try_with(Cell::get).unwrap_or(false) {
+                    if let Ok(ptr) = HEAP.try_with(|slot| {
+                        slot.borrow_mut()
+                            .as_mut()
+                            .map_or(core::ptr::null_mut(), |heap| heap.allocate(layout))
+                    }) {
+                        return ptr;
+                    }
+                }
+                unsafe { System.alloc(layout) }
+            }
+
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                if in_scratch(ptr) {
+                    let _ = HEAP.try_with(|slot| {
+                        if let Some(heap) = slot.borrow_mut().as_mut() {
+                            // SAFETY: the scratch heap handed out `ptr` for `layout`.
+                            unsafe { heap.deallocate(ptr, layout) };
+                        }
+                    });
+                    return;
+                }
+                unsafe { System.dealloc(ptr, layout) }
+            }
+        }
+
+        #[global_allocator]
+        static ROUTED: Routed = Routed;
+    }
+
+    macro_rules! fixture {
+        ($name:literal) => {
+            include_bytes!(concat!("../../../xtask/fixtures/tls-algorithms/", $name)).as_slice()
+        };
+    }
+
+    /// (label, chain as the server sends it, the leaf's key, the issuing root).
+    type AlgorithmChain = (
+        &'static str,
+        [&'static [u8]; 2],
+        &'static [u8],
+        &'static [u8],
+    );
+
+    /// The public-CA algorithm shapes (`xtask/fixtures/tls-algorithms/generate.py`): leaf
+    /// chain as the server sends it, its key, and the root that issued it.
+    fn algorithm_chains() -> [AlgorithmChain; 3] {
+        [
+            (
+                "rsa",
+                [fixture!("rsa-leaf.crt"), fixture!("rsa-int.crt")],
+                fixture!("rsa-leaf.key"),
+                fixture!("rsa-root.crt"),
+            ),
+            (
+                "p384",
+                [fixture!("p384-leaf.crt"), fixture!("p384-int.crt")],
+                fixture!("p384-leaf.key"),
+                fixture!("p384-root.crt"),
+            ),
+            (
+                "mixed",
+                [fixture!("mixed-leaf.crt"), fixture!("mixed-int.crt")],
+                fixture!("mixed-leaf.key"),
+                fixture!("rsa-root.crt"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn rsa_and_p384_chains_verify_within_the_scratch_heap() {
+        for (label, chain, key, root) in algorithm_chains() {
+            let config = server_config_from_chain(
+                chain.iter().map(|der| der.to_vec()).collect(),
+                key.to_vec(),
+            );
+            let (mut guest, mut peer) = setup_tls_pair_custom(config);
+            let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+            let mut response = [0u8; 64];
+            let other = unrelated_ca();
+            let anchors: [&[u8]; 3] = [&other, fixture!("p384-root.crt"), root];
+            scratch::reset();
+            let (result, _) = run_client_with(
+                guest,
+                &mut peer,
+                &anchors[if label == "p384" { 1 } else { 0 }..],
+                Some(NOW_UNIX),
+                21,
+                0,
+                &mut response,
+            );
+            let (pages, refused) = scratch::usage();
+            let len = result.unwrap_or_else(|e| panic!("{label}: transaction failed: {e:?}"));
+            assert_eq!(&response[..len], APP_RESPONSE_BYTES, "{label}");
+            println!("{label}: at most {pages} scratch pages mapped");
+            assert_eq!(refused, 0, "{label}");
+            // The peak moves between runs (19 to 25 pages seen; the peer's
+            // handshake values are not seeded). Leave a third of the arena
+            // for longer chains than these.
+            assert!(
+                pages <= crate::tls::TLS_SCRATCH_PAGES * 2 / 3,
+                "{label}: {pages} pages"
+            );
+        }
+    }
+
+    #[test]
+    fn rsa_and_p384_chains_fail_without_their_root() {
+        for (label, chain, key, _root) in algorithm_chains() {
+            let config = server_config_from_chain(
+                chain.iter().map(|der| der.to_vec()).collect(),
+                key.to_vec(),
+            );
+            let (mut guest, mut peer) = setup_tls_pair_custom(config);
+            let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+            let mut response = [0u8; 64];
+            let (result, _) = run_client(guest, &mut peer, PINNED_CA, 22, 0, &mut response);
+            assert!(
+                matches!(result, Err(TlsError::PeerIdentity)),
+                "{label}: {result:?}"
+            );
+        }
+    }
+
+    /// One transaction against a server sending `chain` with `key`, trusting `anchors`.
+    fn chain_result(chain: &[&[u8]], key: &[u8], anchors: &[&[u8]]) -> Result<usize, TlsError> {
+        let config =
+            server_config_from_chain(chain.iter().map(|der| der.to_vec()).collect(), key.to_vec());
+        let (mut guest, mut peer) = setup_tls_pair_custom(config);
+        let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+        let mut response = [0u8; 64];
+        run_client_with(
+            guest,
+            &mut peer,
+            anchors,
+            Some(NOW_UNIX),
+            23,
+            0,
+            &mut response,
+        )
+        .0
+    }
+
+    #[test]
+    fn a_leaf_cannot_issue_certificates() {
+        let result = chain_result(
+            &[
+                fixture!("evil-leaf.crt"),
+                fixture!("p384-leaf.crt"),
+                fixture!("p384-int.crt"),
+            ],
+            fixture!("evil-leaf.key"),
+            &[fixture!("p384-root.crt")],
+        );
+        assert!(matches!(result, Err(TlsError::PeerIdentity)), "{result:?}");
+    }
+
+    #[test]
+    fn the_path_ends_at_the_first_certificate_an_anchor_issued() {
+        // A cross-signed copy of the root, or the root itself, above the intermediate.
+        for top in [fixture!("p384-root-cross.crt"), fixture!("p384-root.crt")] {
+            let result = chain_result(
+                &[fixture!("p384-leaf.crt"), fixture!("p384-int.crt"), top],
+                fixture!("p384-leaf.key"),
+                &[fixture!("p384-root.crt")],
+            );
+            assert_eq!(result, Ok(APP_RESPONSE_BYTES.len()));
+        }
+    }
+
+    #[test]
+    fn every_subject_alt_name_and_wildcards_count() {
+        let result = chain_result(
+            &[fixture!("names-leaf.crt"), fixture!("p384-int.crt")],
+            fixture!("names-leaf.key"),
+            &[fixture!("p384-root.crt")],
+        );
+        assert_eq!(result, Ok(APP_RESPONSE_BYTES.len()));
     }
 
     #[test]

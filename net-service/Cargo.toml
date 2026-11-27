@@ -18,6 +18,7 @@ required-features = ["userspace"]
 clean-slate-capability = { path = "../capability" }
 clean-slate-native-abi = { path = "../native-abi" }
 clean-slate-network = { path = "../network", features = ["alloc", "tls"] }
+clean-slate-runtime = { path = "../runtime" }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 
 [lints]

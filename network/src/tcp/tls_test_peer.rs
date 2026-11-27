@@ -246,7 +246,10 @@ impl<L: NetworkLink> TlsTestPeer<L> {
             if written == 0 {
                 break;
             }
-            chunks.push(tls_out[..written].to_vec());
+            // One segment per MSS: a flight with an RSA chain does not fit one frame.
+            for segment in tls_out[..written].chunks(usize::from(OUR_TCP_MSS)) {
+                chunks.push(segment.to_vec());
+            }
         }
         for chunk in chunks {
             let written = chunk.len();
@@ -367,7 +370,12 @@ pub fn load_fixture_server_config(cert: TlsPeerCert) -> Arc<ServerConfig> {
 }
 
 pub fn server_config_from_der(cert_der: Vec<u8>, key_der: Vec<u8>) -> Arc<ServerConfig> {
-    let certs = vec![CertificateDer::from(cert_der)];
+    server_config_from_chain(vec![cert_der], key_der)
+}
+
+/// A TLS 1.3 server sending `chain` (leaf first) and signing with the PKCS#8 `key_der`.
+pub fn server_config_from_chain(chain: Vec<Vec<u8>>, key_der: Vec<u8>) -> Arc<ServerConfig> {
+    let certs = chain.into_iter().map(CertificateDer::from).collect();
     let key = PrivateKeyDer::Pkcs8(key_der.into());
     let provider = rustls::crypto::ring::default_provider();
     Arc::new(

@@ -38,8 +38,10 @@ pub(crate) const PROCESS_REGISTRY_CAPACITY: usize = 16;
 ///
 /// The pool holds `PROCESS_REGISTRY_CAPACITY + 8` tables (spaces in flight
 /// during exec, fork and spawn). Each entry is two `u64`s, so the pool is
-/// 24 × 384 × 16 = 144 KiB.
-pub(crate) const SMALL_ADDRESS_SPACE_USER_MAPPINGS: usize = 384;
+/// 24 × 512 × 16 = 192 KiB. The largest native space is the network
+/// service's: about 400 image pages (RSA/P-384 verification and its TLS
+/// scratch heap, #221), an 80-page stack, its bootstrap page and 8 trust pages.
+pub(crate) const SMALL_ADDRESS_SPACE_USER_MAPPINGS: usize = 512;
 
 /// User pages one address space can track at most (64 MiB of 4 KiB pages):
 /// the ceiling for a Linux process's image, stack, brk and mmap together.
