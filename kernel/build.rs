@@ -878,6 +878,7 @@ fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
         "clean-slate-storage-probe-userspace" => {
             ("clean-slate-storage-probe", "core,compiler_builtins")
         }
+        "clean-slate-net-probe-userspace" => ("clean-slate-net-probe", "core,compiler_builtins"),
         "clean-slate-storage-userspace" => ("clean-slate-store", "core,alloc,compiler_builtins"),
         "clean-slate-network-userspace" => {
             ("clean-slate-net-service", "core,alloc,compiler_builtins")
