@@ -1,10 +1,10 @@
 #![cfg_attr(not(test), no_std)]
 
-#[cfg(clean_slate_bump_allocator)]
+#[cfg(all(clean_slate_bump_allocator, not(test)))]
 use core::alloc::{GlobalAlloc, Layout};
-#[cfg(clean_slate_bump_allocator)]
+#[cfg(all(clean_slate_bump_allocator, not(test)))]
 use core::ptr::null_mut;
-#[cfg(clean_slate_bump_allocator)]
+#[cfg(all(clean_slate_bump_allocator, not(test)))]
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod arch;
@@ -29,24 +29,26 @@ mod time;
 pub use diagnostics::qemu::qemu_exit_failure;
 pub use diagnostics::serial::{serial_write_fmt, serial_write_line};
 
-#[cfg(clean_slate_bump_allocator)]
+// Host tests keep the system allocator: the bump heap is 1 MiB and never frees, so a test
+// binary built with a storage lane's features would run out of it (#213).
+#[cfg(all(clean_slate_bump_allocator, not(test)))]
 struct M5BumpAllocator;
 
-#[cfg(clean_slate_bump_allocator)]
+#[cfg(all(clean_slate_bump_allocator, not(test)))]
 const M5_HEAP_BYTES: usize = 1024 * 1024;
-#[cfg(clean_slate_bump_allocator)]
+#[cfg(all(clean_slate_bump_allocator, not(test)))]
 static M5_HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-#[cfg(clean_slate_bump_allocator)]
+#[cfg(all(clean_slate_bump_allocator, not(test)))]
 #[repr(align(16))]
 struct M5Heap([u8; M5_HEAP_BYTES]);
-#[cfg(clean_slate_bump_allocator)]
+#[cfg(all(clean_slate_bump_allocator, not(test)))]
 static mut M5_HEAP: M5Heap = M5Heap([0; M5_HEAP_BYTES]);
 
-#[cfg(clean_slate_bump_allocator)]
+#[cfg(all(clean_slate_bump_allocator, not(test)))]
 #[global_allocator]
 static M5_ALLOCATOR: M5BumpAllocator = M5BumpAllocator;
 
-#[cfg(clean_slate_bump_allocator)]
+#[cfg(all(clean_slate_bump_allocator, not(test)))]
 unsafe impl GlobalAlloc for M5BumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let align = layout.align();

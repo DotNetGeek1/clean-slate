@@ -13,7 +13,12 @@
 //! The legacy block/net drivers never reach this module: it matches only
 //! modern-only device IDs (`0x1040 + id`, revision >= 1).
 
-#![cfg_attr(not(feature = "m10-virtio-modern-self-test"), allow(dead_code))]
+// Only the modern-transport self-test kernel reaches every path; its host-test build drops
+// the boot-tail callers like every other test build (#213).
+#![cfg_attr(
+    any(test, not(feature = "m10-virtio-modern-self-test")),
+    allow(dead_code)
+)]
 
 pub(crate) mod caps;
 #[cfg(test)]

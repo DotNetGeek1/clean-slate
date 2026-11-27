@@ -7,15 +7,13 @@
 //! `cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi` line in `pr.yml`. A set
 //! assembled at run time from separate literals is not seen here; write it as one slice.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 use crate::workspace_root;
 
-const KERNEL_CLIPPY: &str = "cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi";
-
-type FeatureSet = BTreeSet<String>;
+use crate::kernel_host_tests::{linted_feature_sets, FeatureSet, KERNEL_CLIPPY};
 
 /// `kernel/Cargo.toml` features, each with the kernel features it enables directly.
 fn kernel_features(manifest: &str) -> BTreeMap<String, Vec<String>> {
@@ -157,29 +155,6 @@ fn lane_feature_sets(source: &str, features: &BTreeMap<String, Vec<String>>) -> 
         }
     }
     sets
-}
-
-/// The feature set of every kernel UEFI clippy line in `workflow`.
-fn linted_feature_sets(workflow: &str) -> Vec<FeatureSet> {
-    workflow
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let command = line.strip_prefix("run:").map_or(line, str::trim_start);
-            command.strip_prefix(KERNEL_CLIPPY)
-        })
-        .map(|rest| {
-            let mut words = rest.split_whitespace();
-            let mut set = FeatureSet::new();
-            while let Some(word) = words.next() {
-                if word == "--features" {
-                    let list = words.next().expect("--features takes a value");
-                    set.extend(list.split(',').map(str::to_owned));
-                }
-            }
-            set
-        })
-        .collect()
 }
 
 fn rust_sources(dir: &Path, out: &mut Vec<(String, String)>) {
