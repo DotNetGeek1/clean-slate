@@ -1396,7 +1396,6 @@ impl<P: WindowPolicy> Compositor<P> {
                                 focused: self.wm.focus == Some(key),
                                 hovered: control(self.wm.hover),
                                 pressed: control(self.wm.control_press),
-                                maximized: false,
                             },
                         })
                     }

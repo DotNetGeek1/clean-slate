@@ -774,10 +774,10 @@ fn long_titles_stop_before_the_controls() {
             },
         )
     });
-    let minimize = chrome.control_rect(frame, ChromeControl::Minimize);
+    let leftmost = chrome.control_rect(frame, ChromeControl::LEFTMOST);
     let bar = THEME.palette.chrome_active_bar;
-    let gap_x = minimize.x - 4;
-    for y in minimize.y..minimize.bottom() {
+    let gap_x = leftmost.x - 4;
+    for y in leftmost.y..leftmost.bottom() {
         assert_eq!(buf.rgb(Point { x: gap_x, y }), bar);
     }
 }
@@ -950,7 +950,7 @@ fn golden_cases() -> Vec<Case> {
                     "Playground",
                     ChromeState {
                         focused,
-                        hovered: Some(ChromeControl::Maximize),
+                        hovered: Some(ChromeControl::Close),
                         ..ChromeState::default()
                     },
                 )
@@ -1046,9 +1046,9 @@ const GOLDENS: &[(&str, u32)] = &[
     ("rail.item.selected", 0x4DD636C3),
     ("rail.item.focused", 0x2F4A8B31),
     ("rail.item.running", 0x82B8EB47),
-    ("chrome.focused.q0", 0x31856294),
-    ("chrome.inactive.q0", 0x8EF80909),
-    ("chrome.focused.q1", 0x87695C3E),
+    ("chrome.focused.q0", 0xAFFBC855),
+    ("chrome.inactive.q0", 0x5894DF96),
+    ("chrome.focused.q1", 0x1917F6FF),
     ("cursor.arrow", 0xE40C4E42),
     ("icons", 0x1B10B562),
     ("search.field", 0xAD241DA3),

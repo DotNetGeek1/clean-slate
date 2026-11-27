@@ -88,7 +88,64 @@ pub(crate) fn run_m5_block_self_test() -> Result<(), &'static str> {
         return Err("virtio block completions did not raise queue interrupts");
     }
 
+    run_dropped_completion_recovery(
+        &mut device,
+        start_lba,
+        transfer_blocks,
+        &mut write_buffer[..transfer_bytes],
+        &mut read_buffer[..transfer_bytes],
+    )?;
+
     serial_write_line("[M5.2] PASS");
+    Ok(())
+}
+
+/// #199: a request whose completion is dropped times out, the timeout resets
+/// the device, and a write, flush and read after the reset succeed.
+fn run_dropped_completion_recovery(
+    device: &mut VirtioBlockDevice,
+    lba: u64,
+    blocks: u32,
+    write_buffer: &mut [u8],
+    read_buffer: &mut [u8],
+) -> Result<(), &'static str> {
+    device.drop_next_completion();
+    device
+        .submit_read(lba, blocks, read_buffer.len())
+        .map_err(map_block_io_error)?;
+    match await_completion(device, Some(read_buffer)) {
+        Err(BlockIoError::Transport(BlockTransportError::Timeout)) => {}
+        Err(error) => return Err(map_block_io_error(error)),
+        Ok(()) => return Err("dropped virtio block completion still completed"),
+    }
+    if !device.is_ready() || device.reset_count() != 1 {
+        return Err("virtio block timeout did not reset the device");
+    }
+    serial_write_fmt(format_args!(
+        "[BLK ] fault dropped-completion timed out; resets={}\n",
+        device.reset_count()
+    ));
+
+    for (index, slot) in write_buffer.iter_mut().enumerate() {
+        *slot = ((index * 53 + 7) & 0xff) as u8;
+    }
+    device
+        .submit_write(lba, blocks, write_buffer)
+        .map_err(map_block_io_error)?;
+    await_completion(device, None).map_err(map_block_io_error)?;
+    device.submit_flush().map_err(map_block_io_error)?;
+    await_completion(device, None).map_err(map_block_io_error)?;
+    read_buffer.fill(0);
+    device
+        .submit_read(lba, blocks, read_buffer.len())
+        .map_err(map_block_io_error)?;
+    await_completion(device, Some(read_buffer)).map_err(map_block_io_error)?;
+    if read_buffer != write_buffer {
+        return Err("virtio block readback mismatch after reset");
+    }
+    serial_write_fmt(format_args!(
+        "[BLK ] after reset write+flush+read lba={lba} blocks={blocks} OK\n"
+    ));
     Ok(())
 }
 
@@ -106,7 +163,9 @@ fn await_completion(
             return result;
         }
         if monotonic_ns() >= deadline_ns {
-            device.abandon_in_flight();
+            // A failed reset leaves the device failed closed; every later
+            // submission then reports reset-required.
+            let _ = device.abandon_in_flight();
             return Err(BlockIoError::Transport(BlockTransportError::Timeout));
         }
         enable_interrupts_and_halt();

@@ -747,13 +747,12 @@ impl<P: WindowPolicy> Compositor<P> {
         }
     }
 
-    /// Server-side decoration actions. Minimise and maximise are reserved vocabulary in M10.
+    /// Server-side decoration actions. Close is the only control the chrome draws (#115).
     fn control_action(&mut self, key: SurfaceKey, control: ChromeControl) {
         match control {
             ChromeControl::Close => {
                 self.request_close(key);
             }
-            ChromeControl::Minimize | ChromeControl::Maximize => {}
         }
     }
 

@@ -3,11 +3,14 @@
 //! One request is in flight on the device at a time. A syscall submits it and
 //! blocks on [`BLOCK_COMPLETION_KEY`] with a real-time deadline; the device's
 //! queue interrupt wakes the key, and the restarted syscall harvests the
-//! completion. A request still in flight at its deadline is abandoned, which
-//! poisons the queue (the device may still own the descriptors), so it and
-//! every later request fail closed as reset-required.
+//! completion. A request still in flight at its deadline is abandoned: it
+//! completes as reset-required, and the driver resets the device (the device
+//! may still own the descriptors) so later requests go ahead (#199). If the
+//! reset fails, every later request fails closed as reset-required.
 
-use crate::device::virtio::block::{VirtioBlockDevice, BLOCK_COMPLETION_TIMEOUT_NS};
+use crate::device::virtio::block::{
+    BlockResetError, VirtioBlockDevice, BLOCK_COMPLETION_TIMEOUT_NS,
+};
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::sched::wait::{wake_all_registered, WaitKey};
 use crate::sync::global_cell::GlobalCell;
@@ -50,7 +53,8 @@ trait BlockQueue {
     fn submit_flush(&mut self) -> Result<(), BlockIoError>;
     fn take_completion(&mut self, read_into: Option<&mut [u8]>)
         -> Option<Result<(), BlockIoError>>;
-    fn abandon_in_flight(&mut self);
+    /// Give up on the in-flight request and reset the device.
+    fn abandon_in_flight(&mut self) -> Result<(), BlockResetError>;
 }
 
 impl BlockQueue for VirtioBlockDevice {
@@ -77,7 +81,7 @@ impl BlockQueue for VirtioBlockDevice {
         VirtioBlockDevice::take_completion(self, read_into)
     }
 
-    fn abandon_in_flight(&mut self) {
+    fn abandon_in_flight(&mut self) -> Result<(), BlockResetError> {
         VirtioBlockDevice::abandon_in_flight(self)
     }
 }
@@ -319,12 +323,19 @@ fn abandon<Q: BlockQueue>(
     queue: &mut Q,
     current: InFlightRequest,
 ) {
-    queue.abandon_in_flight();
+    let reset = queue.abandon_in_flight();
     *in_flight = None;
-    kernel_log_fmt(format_args!(
-        "[BLK ] request id={} timed out; device requires reset\n",
-        current.request.request_id
-    ));
+    match reset {
+        Ok(()) => kernel_log_fmt(format_args!(
+            "[BLK ] request id={} timed out; device reset\n",
+            current.request.request_id
+        )),
+        Err(error) => kernel_log_fmt(format_args!(
+            "[BLK ] request id={} timed out; device reset failed: {}\n",
+            current.request.request_id,
+            error.as_str()
+        )),
+    }
 }
 
 fn completion_status(result: Result<(), BlockIoError>) -> BlockTransportStatus {
@@ -417,6 +428,11 @@ mod tests {
         blocks: u32,
         complete: bool,
         abandoned: bool,
+        /// Like the driver: abandoning resets the device; a failed reset
+        /// leaves every later submission reset-required.
+        resets: u32,
+        reset_fails: bool,
+        failed_closed: bool,
     }
 
     impl DeferredQueue {
@@ -429,7 +445,17 @@ mod tests {
                 blocks: 0,
                 complete: false,
                 abandoned: false,
+                resets: 0,
+                reset_fails: false,
+                failed_closed: false,
             }
+        }
+
+        fn ensure_open(&self) -> Result<(), BlockIoError> {
+            if self.failed_closed {
+                return Err(BlockIoError::Transport(BlockTransportError::ResetRequired));
+            }
+            Ok(())
         }
 
         fn fill_block(&mut self, lba: usize, value: u8) {
@@ -444,6 +470,7 @@ mod tests {
 
         fn submit_read(&mut self, lba: u64, blocks: u32, len: usize) -> Result<(), BlockIoError> {
             self.geometry.validate_read(lba, blocks, len)?;
+            self.ensure_open()?;
             self.submitted = Some(BlockTransportOp::Read);
             (self.lba, self.blocks) = (lba, blocks);
             Ok(())
@@ -451,6 +478,7 @@ mod tests {
 
         fn submit_write(&mut self, lba: u64, blocks: u32, data: &[u8]) -> Result<(), BlockIoError> {
             self.geometry.validate_write(lba, blocks, data.len())?;
+            self.ensure_open()?;
             let start = lba as usize * TEST_BLOCK_BYTES;
             self.disk[start..start + data.len()].copy_from_slice(data);
             self.submitted = Some(BlockTransportOp::Write);
@@ -458,6 +486,7 @@ mod tests {
         }
 
         fn submit_flush(&mut self) -> Result<(), BlockIoError> {
+            self.ensure_open()?;
             self.submitted = Some(BlockTransportOp::Flush);
             Ok(())
         }
@@ -479,9 +508,15 @@ mod tests {
             Some(Ok(()))
         }
 
-        fn abandon_in_flight(&mut self) {
+        fn abandon_in_flight(&mut self) -> Result<(), BlockResetError> {
             self.submitted = None;
             self.abandoned = true;
+            if self.reset_fails || self.failed_closed {
+                self.failed_closed = true;
+                return Err(BlockResetError::Stuck);
+            }
+            self.resets += 1;
+            Ok(())
         }
     }
 
@@ -581,6 +616,101 @@ mod tests {
             BlockTransportStatus::ResetRequired
         );
         assert!(queue.abandoned);
+        assert!(in_flight.is_none());
+    }
+
+    /// #199: the timed-out caller fails, the device is reset, and the next
+    /// request (the same caller retrying) is submitted and completes.
+    #[test]
+    fn timeout_resets_device_and_next_request_succeeds() {
+        let mut queue = DeferredQueue::new();
+        queue.fill_block(2, 0x3c);
+        let mut in_flight = None;
+        let mut payload = [0u8; 512];
+        step(
+            &mut in_flight,
+            &mut queue,
+            OWNER,
+            &read_request(9),
+            &mut payload,
+            0,
+        );
+        let expired = step(
+            &mut in_flight,
+            &mut queue,
+            OWNER,
+            &read_request(9),
+            &mut payload,
+            BLOCK_COMPLETION_TIMEOUT_NS,
+        );
+        assert_eq!(
+            completed_status(expired),
+            BlockTransportStatus::ResetRequired
+        );
+        assert_eq!(queue.resets, 1);
+        assert_eq!(
+            payload, [0u8; 512],
+            "a failed read leaves the payload alone"
+        );
+
+        let now = BLOCK_COMPLETION_TIMEOUT_NS + 1;
+        let retry = step(
+            &mut in_flight,
+            &mut queue,
+            OWNER,
+            &read_request(10),
+            &mut payload,
+            now,
+        );
+        assert!(matches!(retry, BlockRequestStep::Wait { .. }));
+        queue.complete = true;
+        let done = step(
+            &mut in_flight,
+            &mut queue,
+            OWNER,
+            &read_request(10),
+            &mut payload,
+            now,
+        );
+        assert_eq!(completed_status(done), BlockTransportStatus::Ok);
+        assert_eq!(payload, [0x3c; 512]);
+    }
+
+    #[test]
+    fn failed_reset_fails_later_requests_closed() {
+        let mut queue = DeferredQueue::new();
+        queue.reset_fails = true;
+        let mut in_flight = None;
+        let mut payload = [0u8; 512];
+        step(
+            &mut in_flight,
+            &mut queue,
+            OWNER,
+            &read_request(11),
+            &mut payload,
+            0,
+        );
+        let expired = step(
+            &mut in_flight,
+            &mut queue,
+            OWNER,
+            &read_request(11),
+            &mut payload,
+            BLOCK_COMPLETION_TIMEOUT_NS,
+        );
+        assert_eq!(
+            completed_status(expired),
+            BlockTransportStatus::ResetRequired
+        );
+        let later = step(
+            &mut in_flight,
+            &mut queue,
+            OTHER,
+            &read_request(12),
+            &mut payload,
+            BLOCK_COMPLETION_TIMEOUT_NS + 1,
+        );
+        assert_eq!(completed_status(later), BlockTransportStatus::ResetRequired);
         assert!(in_flight.is_none());
     }
 
