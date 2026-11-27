@@ -1,9 +1,12 @@
-//! Bounded DNS codec (RFC 1035 subset), cache, and resolver over [`UdpTransport`].
+//! Bounded DNS codec (RFC 1035 subset), cache, and resolver over [`UdpTransport`], or over TCP
+//! (RFC 7766 framing) when the resolver is [`DnsResolver::set_over_tcp`]: the resolver then only
+//! hands out framed queries ([`DnsResolver::start_tcp_query`]) and takes back the replies; the
+//! caller owns the TCP connection.
 //!
-//! Supported subset: A/IN queries over UDP with RD=1, single question. An A record counts
+//! Supported subset: A/IN queries with RD=1, single question. An A record counts
 //! only when its owner is the queried name, or the name reached by following CNAMEs from
 //! that question in the same reply (at most [`MAX_CNAME_CHAIN`] names, question included).
-//! DNS-over-TCP and DNSSEC are deferred.
+//! TCP fallback on truncated UDP replies and DNSSEC are deferred.
 //!
 //! Capability checks (`NET_RESOLVE`) are performed by the network service **above** this
 //! layer; [`DnsResolver::resolve`] assumes the caller is already authorized.
@@ -33,6 +36,14 @@ pub const DNS_MAX_TTL_SECS: u32 = 86_400;
 pub const DNS_QUERY_TIMEOUT_MS: u64 = 500;
 /// Resolver query timeout at 1 ms/tick production (`DNS_QUERY_TIMEOUT_MS`).
 pub const DNS_QUERY_TIMEOUT_TICKS: u64 = DNS_QUERY_TIMEOUT_MS;
+
+/// Query timeout (ms, = ticks at 1 ms/tick) over TCP: the connection's handshake and close are
+/// part of it.
+pub const DNS_TCP_QUERY_TIMEOUT_TICKS: u64 = 3_000;
+
+/// Largest DNS-over-TCP message the resolver sends or accepts, with its two-byte length prefix
+/// (RFC 7766 section 8). Replies are held to the classic 512-byte UDP limit.
+pub const DNS_TCP_MAX_MESSAGE: usize = 2 + 512;
 
 /// Interval (ms, = ticks at 1 ms/tick) after which an unanswered query is sent again with the
 /// same ID, until [`DNS_QUERY_TIMEOUT_TICKS`] expires: four sends within the deadline.
@@ -212,6 +223,21 @@ fn encode_qname(name: &str, out: &mut [u8]) -> Result<usize, DnsError> {
     }
     out[offset] = 0;
     Ok(offset + 1)
+}
+
+/// Encodes a standard query as a DNS-over-TCP message: the two-byte length, then the query.
+pub fn encode_tcp_query(id: u16, name: &str, out: &mut [u8]) -> Result<usize, DnsError> {
+    let body = out.get_mut(2..).ok_or(DnsError::Truncated)?;
+    let len = encode_query(id, name, body)?;
+    out[..2].copy_from_slice(&(len as u16).to_be_bytes());
+    Ok(len + 2)
+}
+
+/// The full length (prefix included) of the DNS-over-TCP message whose first bytes are `head`,
+/// once two bytes are in; `None` before that.
+pub fn tcp_message_len(head: &[u8]) -> Option<usize> {
+    let prefix: [u8; 2] = head.get(..2)?.try_into().ok()?;
+    Some(usize::from(u16::from_be_bytes(prefix)) + 2)
 }
 
 /// Encodes a standard query (QTYPE A, QCLASS IN, RD=1) into `out`.
@@ -842,6 +868,25 @@ pub struct DnsResolver<L: NetworkLink> {
     generation: SessionGeneration,
     ticks_per_sec: u64,
     stats: DnsResolverStats,
+    /// Queries go over TCP, through the caller (see the module docs).
+    over_tcp: bool,
+}
+
+/// A DNS-over-TCP query [`DnsResolver::start_tcp_query`] hands out: send `message()` to the
+/// resolver's server on a new TCP connection and pass the reply to
+/// [`DnsResolver::complete_tcp_query`].
+#[derive(Clone, Copy)]
+pub struct DnsTcpQuery {
+    pub query_id: u32,
+    pub server: SocketAddrV4,
+    message: [u8; DNS_TCP_MAX_MESSAGE],
+    len: usize,
+}
+
+impl DnsTcpQuery {
+    pub fn message(&self) -> &[u8] {
+        &self.message[..self.len]
+    }
 }
 
 impl<L: NetworkLink> DnsResolver<L> {
@@ -863,6 +908,7 @@ impl<L: NetworkLink> DnsResolver<L> {
             generation,
             ticks_per_sec: ticks_per_sec.max(1),
             stats: DnsResolverStats::default(),
+            over_tcp: false,
         }
     }
 
@@ -894,6 +940,7 @@ impl<L: NetworkLink> DnsResolver<L> {
             (*slot).generation = generation;
             (*slot).ticks_per_sec = ticks_per_sec.max(1);
             (*slot).stats = DnsResolverStats::default();
+            (*slot).over_tcp = false;
         }
     }
 
@@ -927,6 +974,15 @@ impl<L: NetworkLink> DnsResolver<L> {
 
     pub fn udp_mut(&mut self) -> &mut UdpTransport<L> {
         &mut self.udp
+    }
+
+    /// Sends queries over TCP from now on (set before the first resolve).
+    pub fn set_over_tcp(&mut self, over_tcp: bool) {
+        self.over_tcp = over_tcp;
+    }
+
+    pub fn over_tcp(&self) -> bool {
+        self.over_tcp
     }
 
     /// A random query ID that no live query is using.
@@ -977,6 +1033,26 @@ impl<L: NetworkLink> DnsResolver<L> {
         validate_dns_name(name)?;
 
         let slot = self.find_pending_slot().ok_or(DnsError::QueueFull)?;
+        if self.over_tcp {
+            let (name_buf, name_len) = Self::store_name(name)?;
+            let dns_id = self.alloc_dns_id();
+            let query_id = self.alloc_query_id();
+            // Not sent yet: `start_tcp_query` hands it out.
+            self.pending[slot] = PendingQuery {
+                live: true,
+                query_id,
+                dns_id,
+                owner,
+                name_len,
+                name: name_buf,
+                endpoint: SessionId::new(SessionGeneration::new(0), 0),
+                deadline: now.saturating_add(DNS_TCP_QUERY_TIMEOUT_TICKS),
+                next_send: now,
+                sends: 0,
+                state: PendingState::InFlight,
+            };
+            return Ok(ResolveOutcome::Pending { query_id });
+        }
         let endpoint = self
             .udp
             .table_mut()
@@ -1033,7 +1109,7 @@ impl<L: NetworkLink> DnsResolver<L> {
     }
 
     fn finish_pending(&mut self, index: usize, result: PendingState) {
-        if matches!(self.pending[index].state, PendingState::InFlight) {
+        if !self.over_tcp && matches!(self.pending[index].state, PendingState::InFlight) {
             let owner = self.pending[index].owner;
             let endpoint = self.pending[index].endpoint;
             let _ = self.udp.table_mut().close(endpoint, owner);
@@ -1053,6 +1129,9 @@ impl<L: NetworkLink> DnsResolver<L> {
         }
 
         self.udp.poll(now).map_err(DnsError::Transport)?;
+        if self.over_tcp {
+            return Ok(());
+        }
 
         let mut buf = [0u8; MAX_UDP_PAYLOAD];
         for i in 0..PENDING_SLOTS {
@@ -1132,6 +1211,84 @@ impl<L: NetworkLink> DnsResolver<L> {
         Ok(())
     }
 
+    /// The oldest query not yet sent, marked sent, as a DNS-over-TCP message. Over TCP only.
+    pub fn start_tcp_query(&mut self) -> Option<DnsTcpQuery> {
+        if !self.over_tcp {
+            return None;
+        }
+        let index = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.live && p.sends == 0 && matches!(p.state, PendingState::InFlight))
+            .min_by_key(|(_, p)| p.query_id)?
+            .0;
+        let mut message = [0u8; DNS_TCP_MAX_MESSAGE];
+        let pending = &self.pending[index];
+        let Ok(len) = encode_tcp_query(pending.dns_id, Self::pending_name(pending), &mut message)
+        else {
+            self.finish_pending(index, PendingState::DoneErr(DnsError::InvalidName));
+            return None;
+        };
+        self.pending[index].sends = 1;
+        self.stats.queries_sent += 1;
+        Some(DnsTcpQuery {
+            query_id: self.pending[index].query_id,
+            server: self.server,
+            message,
+            len,
+        })
+    }
+
+    /// Whether `query_id` is still waiting for its reply (not answered, timed out or dropped
+    /// with its holder).
+    pub fn tcp_query_waiting(&self, query_id: u32) -> bool {
+        self.pending
+            .iter()
+            .any(|p| p.live && p.query_id == query_id && matches!(p.state, PendingState::InFlight))
+    }
+
+    /// Finishes `query_id` with the DNS-over-TCP `message` its connection returned (length
+    /// prefix included), or with `Err` when the connection failed. There is no retry over TCP:
+    /// a reply that does not check out fails the query.
+    pub fn complete_tcp_query(
+        &mut self,
+        query_id: u32,
+        message: Result<&[u8], DnsError>,
+        now: u64,
+    ) {
+        let Some(index) = self.pending.iter().position(|p| {
+            p.live && p.query_id == query_id && matches!(p.state, PendingState::InFlight)
+        }) else {
+            return;
+        };
+        let result = message.and_then(|message| {
+            let body = message.get(2..).ok_or(DnsError::Truncated)?;
+            let name = Self::pending_name(&self.pending[index]);
+            let answer = parse_response(body, self.pending[index].dns_id, name)?;
+            let _ = self
+                .cache
+                .insert(name, answer.addr, answer.ttl, now, self.ticks_per_sec);
+            Ok(answer)
+        });
+        let state = match result {
+            Ok(answer) => {
+                self.stats.responses_ok += 1;
+                PendingState::DoneOk {
+                    addr: answer.addr,
+                    ttl: answer.ttl,
+                }
+            }
+            Err(err) => {
+                if matches!(err, DnsError::IdMismatch | DnsError::Malformed) {
+                    self.stats.dropped_mismatch += 1;
+                }
+                PendingState::DoneErr(err)
+            }
+        };
+        self.finish_pending(index, state);
+    }
+
     /// Earliest tick at which [`Self::poll`] retransmits or times out an in-flight query (`poll`
     /// expires a query once `now` passes its deadline), or `None` with nothing in flight.
     ///
@@ -1143,7 +1300,8 @@ impl<L: NetworkLink> DnsResolver<L> {
             .filter(|p| p.live && matches!(p.state, PendingState::InFlight))
             .map(|p| {
                 let expiry = p.deadline.saturating_add(1);
-                if p.sends > 0 {
+                // Over TCP nothing is resent: the caller's connection carries the query.
+                if p.sends > 0 && !self.over_tcp {
                     expiry.min(p.next_send)
                 } else {
                     expiry
@@ -1861,6 +2019,111 @@ mod tests {
                 resolver.reset().unwrap();
                 assert_eq!(resolver.udp_mut().table().endpoints_in_use(), 0);
             });
+        }
+
+        /// The reply to `message` (a DNS-over-TCP query) as a DNS-over-TCP message.
+        fn tcp_reply(message: &[u8], addr: Ipv4Addr, ttl: u32) -> Vec<u8> {
+            assert_eq!(tcp_message_len(message), Some(message.len()));
+            let id = u16::from_be_bytes([message[2], message[3]]);
+            let body = build_valid_response(id, FIXTURE_HOSTNAME, addr, ttl);
+            let mut out = (body.len() as u16).to_be_bytes().to_vec();
+            out.extend_from_slice(&body);
+            out
+        }
+
+        #[test]
+        fn over_tcp_the_caller_carries_the_query_and_the_answer_is_cached() {
+            run_on_large_stack(|| {
+                let (a, _b) = FakeLink::pair();
+                let mut resolver = make_resolver(a);
+                assert!(resolver.start_tcp_query().is_none(), "UDP resolver");
+                resolver.set_over_tcp(true);
+                let ResolveOutcome::Pending { query_id } =
+                    resolver.resolve(0, OWNER, FIXTURE_HOSTNAME).unwrap()
+                else {
+                    panic!("expected pending");
+                };
+                // Nothing goes out over UDP.
+                assert_eq!(resolver.udp_mut().table().endpoints_in_use(), 0);
+                let query = resolver.start_tcp_query().expect("a query to carry");
+                assert_eq!(query.query_id, query_id);
+                assert_eq!(query.server, DNS_SERVER_ADDR);
+                assert!(resolver.start_tcp_query().is_none(), "handed out once");
+                assert!(resolver.tcp_query_waiting(query_id));
+                assert!(resolver.take_result(query_id, OWNER).is_none());
+
+                let reply = tcp_reply(query.message(), FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS);
+                resolver.complete_tcp_query(query_id, Ok(&reply), 5);
+                assert!(!resolver.tcp_query_waiting(query_id));
+                assert_eq!(
+                    resolver.take_result(query_id, OWNER),
+                    Some(Ok((FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS)))
+                );
+                assert!(matches!(
+                    resolver.resolve(10, OWNER, FIXTURE_HOSTNAME).unwrap(),
+                    ResolveOutcome::Cached { .. }
+                ));
+            });
+        }
+
+        #[test]
+        fn over_tcp_a_bad_reply_a_failed_connection_or_the_deadline_fail_the_query() {
+            run_on_large_stack(|| {
+                let (a, _b) = FakeLink::pair();
+                let mut resolver = make_resolver(a);
+                resolver.set_over_tcp(true);
+                let pending = |resolver: &mut DnsResolver<FakeLink>, name: &str| match resolver
+                    .resolve(0, OWNER, name)
+                    .unwrap()
+                {
+                    ResolveOutcome::Pending { query_id } => query_id,
+                    _ => panic!("expected pending"),
+                };
+
+                let wrong_id = pending(&mut resolver, FIXTURE_HOSTNAME);
+                let query = resolver.start_tcp_query().unwrap();
+                let mut reply = tcp_reply(query.message(), FIXTURE_A_RECORD, 60);
+                reply[2] ^= 0xff;
+                resolver.complete_tcp_query(wrong_id, Ok(&reply), 1);
+                assert_eq!(
+                    resolver.take_result(wrong_id, OWNER),
+                    Some(Err(DnsError::IdMismatch))
+                );
+
+                let reset = pending(&mut resolver, FIXTURE_HOSTNAME);
+                resolver.start_tcp_query().unwrap();
+                resolver.complete_tcp_query(
+                    reset,
+                    Err(DnsError::Transport(NetworkError::Reset)),
+                    1,
+                );
+                assert_eq!(
+                    resolver.take_result(reset, OWNER),
+                    Some(Err(DnsError::Transport(NetworkError::Reset)))
+                );
+
+                let slow = pending(&mut resolver, FIXTURE_HOSTNAME);
+                resolver.start_tcp_query().unwrap();
+                assert_eq!(
+                    resolver.next_deadline(),
+                    Some(DNS_TCP_QUERY_TIMEOUT_TICKS + 1)
+                );
+                resolver.poll(DNS_TCP_QUERY_TIMEOUT_TICKS + 1).unwrap();
+                assert!(!resolver.tcp_query_waiting(slow));
+                assert_eq!(
+                    resolver.take_result(slow, OWNER),
+                    Some(Err(DnsError::Timeout))
+                );
+            });
+        }
+
+        #[test]
+        fn tcp_framing_prefixes_the_length() {
+            let mut out = [0u8; DNS_TCP_MAX_MESSAGE];
+            let len = encode_tcp_query(0x1234, FIXTURE_HOSTNAME, &mut out).unwrap();
+            assert_eq!(tcp_message_len(&out[..len]), Some(len));
+            assert_eq!(&out[2..4], &[0x12, 0x34]);
+            assert_eq!(tcp_message_len(&out[..1]), None);
         }
     }
 }

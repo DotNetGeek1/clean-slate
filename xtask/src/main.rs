@@ -31,6 +31,7 @@ mod m8_fixture;
 mod m9_fixture;
 mod m9_userspace_validate;
 mod marker_spec;
+mod net_acceptance;
 mod ovmf_vars;
 mod qmp;
 mod raster_font;
@@ -1436,6 +1437,13 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
         ParsedCommand::TestM10NativeMemory => run_m10_native_memory_acceptance(),
         ParsedCommand::TestM10Clock => m10_clock::run(),
+        ParsedCommand::TestNetAcceptance => net_acceptance::run(),
+        ParsedCommand::NetAcceptanceRelay => match trailing_args.as_slice() {
+            [port] => net_acceptance::run_relay(&port.to_string_lossy()),
+            _ => Err(XtaskError::InvalidOption(
+                "net-acceptance-relay takes one port".to_owned(),
+            )),
+        },
         ParsedCommand::TestM10Storage => m10_storage::run(),
         ParsedCommand::TestQmpSmoke => run_qmp_smoke_acceptance(),
         ParsedCommand::TestM10Desktop => m10_desktop_lane::run(),
@@ -5742,6 +5750,9 @@ fn print_help() {
         "  test-m10-clock  #308 native clock: clock host tests, then two m10-clock-self-test QEMU boots: monotonic time across a wait and a wall clock within 3 s of the host's (-rtc base=now), and no wall clock from an RTC before the build floor; prints [M10.clock] lane PASS (aliases: m10-clock, m10.308)"
     );
     println!(
+        "  test-net-acceptance  #355 network acceptance: the M7.8 converged lane on QEMU slirp (restrict=on, DHCP) with a lane-generated CA as the only trust anchor; DNS over TCP and two HTTPS fetches through loopback guestfwd, wall-clock certificate time, no M7 test CA in the image, no network::fixture in the net service; prints [NET ] test-net-acceptance PASS (alias: net-acceptance)"
+    );
+    println!(
         "  test-m10-storage  #312 native storage: storage host tests, then three m10-storage-self-test QEMU boots on one disk: a native app writes a named 1 MiB entry through a shared buffer and commits, reads it back by name and truncates it, then reads the 4 KiB back and unlinks it; prints [M10.storage] lane PASS (aliases: m10-storage, m10.312)"
     );
     println!(
@@ -5918,6 +5929,8 @@ enum ParsedCommand {
     TestM10Port,
     TestM10NativeMemory,
     TestM10Clock,
+    TestNetAcceptance,
+    NetAcceptanceRelay,
     TestM10Storage,
     TestQmpSmoke,
     TestM10VirtioModern,
@@ -6087,6 +6100,10 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m10-clock" || cmd == "m10-clock" || cmd == "m10.308" => {
             ParsedCommand::TestM10Clock
         }
+        Some(cmd) if cmd == "test-net-acceptance" || cmd == "net-acceptance" => {
+            ParsedCommand::TestNetAcceptance
+        }
+        Some(cmd) if cmd == net_acceptance::RELAY_COMMAND => ParsedCommand::NetAcceptanceRelay,
         Some(cmd) if cmd == "test-m10-storage" || cmd == "m10-storage" || cmd == "m10.312" => {
             ParsedCommand::TestM10Storage
         }
@@ -6886,6 +6903,16 @@ mod tests {
                 ParsedCommand::TestSystemDisplay
             );
         }
+        for alias in ["test-net-acceptance", "net-acceptance"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestNetAcceptance
+            );
+        }
+        assert_eq!(
+            parse_command(Some(net_acceptance::RELAY_COMMAND.as_ref())),
+            ParsedCommand::NetAcceptanceRelay
+        );
         assert_eq!(
             parse_command(Some("run-m10-desktop".as_ref())),
             ParsedCommand::RunM10Desktop
