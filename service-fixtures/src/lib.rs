@@ -77,6 +77,7 @@ pub use network_transport::{
     NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_MASK, NET_WAIT_WORK_REQUESTS,
     NET_WAIT_WORK_RX,
 };
+pub use network_transport::{NetLeaseEvent, NetLeaseReport};
 pub use object_capability::{
     object_status_to_native, ObjectServiceDecodeError, ObjectServiceRequest, ObjectSubmitAt,
     ObjectSubmitAtError, OBJECT_EPOCH_UNBOUND, OBJECT_MAX_BUFFER_PAYLOAD_BYTES,

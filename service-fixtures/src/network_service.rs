@@ -184,6 +184,10 @@ where
         self.generation
     }
 
+    pub fn authorizer_mut(&mut self) -> &mut A {
+        &mut self.authorizer
+    }
+
     pub fn attach_backend(&mut self, link: L) {
         self.link = Some(link);
     }
