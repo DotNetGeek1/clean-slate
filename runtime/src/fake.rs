@@ -10,11 +10,18 @@ use std::vec::Vec;
 
 use clean_slate_capability::{HolderId, Rights};
 use clean_slate_native_abi::desktop::SYSCALL_NR_IPC_SEND;
+use clean_slate_native_abi::object::{
+    ObjectSubmitAt, OBJECT_OP_COMMIT, OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE_AT,
+    OBJECT_SUBMIT_AT_BYTES, OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT_AT, SYSCALL_NR_CAP_OBJECT,
+};
 use clean_slate_native_abi::port::{
     PORT_FRAME_BYTES, PORT_OP_BIND_EVENTS, PORT_OP_CLOSE, PORT_OP_CONNECT, PORT_OP_FIND_HANDLE,
     PORT_OP_RECV_EVENT, PORT_OP_SEND, PORT_RECV_NONBLOCK,
 };
-use clean_slate_native_abi::status::{STATUS_EAGAIN, STATUS_EINVAL, STATUS_ENOSYS};
+use clean_slate_native_abi::status::{
+    STATUS_EACCES, STATUS_EAGAIN, STATUS_EINVAL, STATUS_ENOENT, STATUS_ENOSPC, STATUS_ENOSYS,
+    STATUS_ESTALE,
+};
 use clean_slate_native_abi::work_set::SYSCALL_NR_WORK_SET;
 use clean_slate_native_abi::{
     ConnectionId, PortEventRecord, PortParams, SharedBufferId, SHARED_BUFFER_SUBOP_ALLOCATE,
@@ -34,6 +41,29 @@ struct Buffer {
     mapped: bool,
 }
 
+/// A persistent object the fake keeps: its staged bytes, and the bytes of the last commit.
+struct FakeObject {
+    id: u64,
+    staged: Option<Vec<u8>>,
+    committed: Option<Vec<u8>>,
+}
+
+/// The fake's object capability (syscall 8): grants, objects and completed requests.
+#[derive(Default)]
+struct FakeObjects {
+    /// `(handle, object id, write right)`.
+    grants: Vec<(u64, u64, bool)>,
+    objects: Vec<FakeObject>,
+    /// Objects whose epoch-bound capability is stale: every request polls `ESTALE`.
+    gone: Vec<u64>,
+    budget: Option<usize>,
+    next_request: u64,
+    /// `(request id, poll result, bytes read)`.
+    done: Vec<(u64, u64, Vec<u8>)>,
+    /// `(op, object id, offset, len)` of every submitted request.
+    requests: Vec<(u64, u64, u64, u64)>,
+}
+
 pub struct FakeKernel {
     port: FakePort,
     client_cap: Option<u64>,
@@ -43,6 +73,7 @@ pub struct FakeKernel {
     canned: VecDeque<(u64, u64)>,
     calls: Vec<(u64, [u64; 6])>,
     console: Vec<Vec<u8>>,
+    objects: FakeObjects,
 }
 
 impl FakeKernel {
@@ -69,6 +100,169 @@ impl FakeKernel {
             canned: VecDeque::new(),
             calls: Vec::new(),
             console: Vec::new(),
+            objects: FakeObjects::default(),
+        }
+    }
+
+    /// Gives the client `handle`, authorising object `id` (`READ`, and `WRITE` when `write`).
+    pub fn grant_object(&mut self, handle: u64, id: u64, write: bool) {
+        self.objects.grants.retain(|grant| grant.0 != handle);
+        self.objects.grants.push((handle, id, write));
+    }
+
+    /// Object `id`'s bytes as staged, if it exists.
+    pub fn object_staged(&self, id: u64) -> Option<&[u8]> {
+        self.find_object(id)
+            .and_then(|object| object.staged.as_deref())
+    }
+
+    /// Object `id`'s bytes as of the last commit, if it existed then.
+    pub fn object_committed(&self, id: u64) -> Option<&[u8]> {
+        self.find_object(id)
+            .and_then(|object| object.committed.as_deref())
+    }
+
+    /// The store's live-byte budget: a write past it polls `ENOSPC`.
+    pub fn set_object_budget(&mut self, bytes: usize) {
+        self.objects.budget = Some(bytes);
+    }
+
+    /// Object `id` was deleted under the client's epoch-bound capability.
+    pub fn object_gone(&mut self, id: u64) {
+        self.objects.gone.push(id);
+    }
+
+    /// `(op, object id, offset, len)` of every object request submitted.
+    pub fn object_requests(&self) -> &[(u64, u64, u64, u64)] {
+        &self.objects.requests
+    }
+
+    fn find_object(&self, id: u64) -> Option<&FakeObject> {
+        self.objects.objects.iter().find(|object| object.id == id)
+    }
+
+    fn object_call(&mut self, args: [u64; 6]) -> u64 {
+        match args[0] {
+            OBJECT_SUBOP_SUBMIT_AT => {
+                if args[3] != OBJECT_SUBMIT_AT_BYTES as u64 {
+                    return STATUS_EINVAL;
+                }
+                // SAFETY: the client passes a pointer to a live descriptor.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(args[2] as *const u8, OBJECT_SUBMIT_AT_BYTES)
+                };
+                let Ok(submit) = ObjectSubmitAt::decode(bytes) else {
+                    return STATUS_EINVAL;
+                };
+                let Some(&(_, id, write)) =
+                    self.objects.grants.iter().find(|grant| grant.0 == args[1])
+                else {
+                    return STATUS_EACCES;
+                };
+                if id != submit.object_id || (submit.op != OBJECT_OP_READ_AT && !write) {
+                    return STATUS_EACCES;
+                }
+                let payload = if submit.op == OBJECT_OP_WRITE_AT {
+                    // SAFETY: the client passes `len` live bytes at `data`.
+                    unsafe {
+                        std::slice::from_raw_parts(submit.data as *const u8, submit.len as usize)
+                    }
+                    .to_vec()
+                } else {
+                    Vec::new()
+                };
+                self.objects
+                    .requests
+                    .push((submit.op, id, submit.offset, submit.len));
+                let (result, read) = self.serve_object(&submit, &payload);
+                self.objects.next_request += 1;
+                let request_id = self.objects.next_request;
+                self.objects.done.push((request_id, result, read));
+                request_id
+            }
+            OBJECT_SUBOP_POLL => {
+                let Some(index) = self.objects.done.iter().position(|d| d.0 == args[1]) else {
+                    return STATUS_EINVAL;
+                };
+                let (_, result, read) = self.objects.done.remove(index);
+                if read.len() > args[2] as usize {
+                    return STATUS_EINVAL;
+                }
+                // SAFETY: the client passes `args[2]` writable bytes at `args[3]`.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(read.as_ptr(), args[3] as *mut u8, read.len());
+                }
+                result
+            }
+            _ => STATUS_EINVAL,
+        }
+    }
+
+    /// Runs one request like the storage service: the poll result and the bytes read.
+    fn serve_object(&mut self, submit: &ObjectSubmitAt, payload: &[u8]) -> (u64, Vec<u8>) {
+        let id = submit.object_id;
+        if self.objects.gone.contains(&id) {
+            return (STATUS_ESTALE, Vec::new());
+        }
+        let live: usize = self
+            .objects
+            .objects
+            .iter()
+            .filter_map(|object| object.staged.as_ref().map(Vec::len))
+            .sum();
+        let index = match self.objects.objects.iter().position(|o| o.id == id) {
+            Some(index) => index,
+            None => {
+                self.objects.objects.push(FakeObject {
+                    id,
+                    staged: None,
+                    committed: None,
+                });
+                self.objects.objects.len() - 1
+            }
+        };
+        let object = &mut self.objects.objects[index];
+        let offset = submit.offset as usize;
+        let current = object.staged.as_ref().map_or(0, Vec::len);
+        let new_len = match submit.op {
+            OBJECT_OP_WRITE_AT => current.max(offset + payload.len()),
+            OBJECT_OP_TRUNCATE => offset,
+            _ => current,
+        };
+        if new_len > current
+            && self
+                .objects
+                .budget
+                .is_some_and(|budget| live + new_len - current > budget)
+        {
+            return (STATUS_ENOSPC, Vec::new());
+        }
+        let object = &mut self.objects.objects[index];
+        match submit.op {
+            OBJECT_OP_READ_AT => match &object.staged {
+                Some(bytes) => {
+                    let start = offset.min(bytes.len());
+                    let end = (start + submit.len as usize).min(bytes.len());
+                    let read = bytes[start..end].to_vec();
+                    (read.len() as u64, read)
+                }
+                None => (STATUS_ENOENT, Vec::new()),
+            },
+            OBJECT_OP_WRITE_AT | OBJECT_OP_TRUNCATE => {
+                let bytes = object.staged.get_or_insert_with(Vec::new);
+                bytes.resize(new_len, 0);
+                if submit.op == OBJECT_OP_WRITE_AT {
+                    bytes[offset..offset + payload.len()].copy_from_slice(payload);
+                }
+                (0, Vec::new())
+            }
+            OBJECT_OP_COMMIT => {
+                for object in &mut self.objects.objects {
+                    object.committed = object.staged.clone();
+                }
+                (0, Vec::new())
+            }
+            _ => (STATUS_EINVAL, Vec::new()),
         }
     }
 
@@ -259,6 +453,7 @@ impl Syscalls for FakeKernel {
         match nr {
             SYSCALL_NR_SERVICE_PORT => self.port_call(args),
             SYSCALL_NR_SHARED_BUFFER => self.buffer_call(args),
+            SYSCALL_NR_CAP_OBJECT => self.object_call(args),
             SYSCALL_NR_WORK_SET => 1,
             SYSCALL_NR_IPC_SEND => {
                 // SAFETY: the client passes a live slice.

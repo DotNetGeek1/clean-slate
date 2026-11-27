@@ -430,7 +430,8 @@ pub const TERMINAL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: 0,
 };
 
-/// The desktop profile: the five system rows followed by the three desktop rows.
+/// The bare desktop profile (`q0-bare`, `q1-bare`): the five system rows followed by the three
+/// desktop rows.
 pub const SYSTEM_DESKTOP_MANIFEST: &[ServiceSpec] = &[
     STORAGE_SERVICE_SPEC,
     NETWORK_SERVICE_SPEC,
@@ -444,8 +445,8 @@ pub const SYSTEM_DESKTOP_MANIFEST: &[ServiceSpec] = &[
 
 const _: () = assert!(validate_manifest(SYSTEM_DESKTOP_MANIFEST).is_ok());
 
-/// The desktop profile with the terminal (`q0-terminal`, `q1-terminal`): the desktop rows, then
-/// the terminal's shell and the terminal (#311).
+/// The default desktop profile (`q0`, `q1`): the bare desktop's rows, then the terminal's shell
+/// and the terminal (#311).
 pub const SYSTEM_TERMINAL_DESKTOP_MANIFEST: &[ServiceSpec] = &[
     SYSTEM_MANIFEST[0],
     SYSTEM_MANIFEST[1],
@@ -461,8 +462,8 @@ pub const SYSTEM_TERMINAL_DESKTOP_MANIFEST: &[ServiceSpec] = &[
 
 const _: () = assert!(validate_manifest(SYSTEM_TERMINAL_DESKTOP_MANIFEST).is_ok());
 
-/// The manifest for an `InitBootstrap.desktop_mode` word: [`SYSTEM_DESKTOP_MANIFEST`] for `q0`
-/// or `q1`, [`SYSTEM_TERMINAL_DESKTOP_MANIFEST`] for those with the terminal, else
+/// The manifest for an `InitBootstrap.desktop_mode` word: [`SYSTEM_DESKTOP_MANIFEST`] for
+/// `q0-bare` or `q1-bare`, [`SYSTEM_TERMINAL_DESKTOP_MANIFEST`] for the default desktop, else
 /// [`SYSTEM_MANIFEST`] (off, or a word init does not understand). The kernel and init both
 /// select with this, so they cannot disagree about the rows.
 pub const fn manifest_for(desktop_mode: u64) -> &'static [ServiceSpec] {

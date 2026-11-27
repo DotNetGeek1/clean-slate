@@ -60,6 +60,7 @@ extern crate alloc;
 
 mod crc32c;
 pub mod heap;
+pub mod service;
 
 use alloc::string::String;
 use alloc::vec;

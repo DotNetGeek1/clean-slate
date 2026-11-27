@@ -12,6 +12,8 @@
 //! - [`console`]: console lines over the console capability (syscall 3).
 //! - [`heap`]: a `GlobalAlloc` over the native memory call (syscall 23, #306).
 //! - [`process`]: exit, abort and the service ready report (syscall 22).
+//! - [`storage`]: offset reads, writes, truncates and commits on a persistent object (syscall 8,
+//!   #312).
 //! - `fake` (feature `fake`): a host stand-in for the kernel, for clients' host tests.
 //!
 //! The wire definitions stay in `clean-slate-native-abi` and `clean-slate-graphics`; this crate is
@@ -27,6 +29,7 @@ pub mod error;
 pub mod heap;
 pub mod port;
 pub mod process;
+pub mod storage;
 pub mod sys;
 
 #[cfg(any(test, feature = "fake"))]

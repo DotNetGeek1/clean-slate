@@ -1,6 +1,6 @@
 //! `cargo xtask test-system-tablet` (#313): the system image's desktop with a virtio keyboard
 //! and tablet beside the PS/2 controller, driven over QMP on the hooks build with
-//! `opt/clean-slate/desktop=q1` on a modern-only VirtIO-GPU.
+//! `opt/clean-slate/desktop=q1-bare` (the desktop without the terminal) on a modern-only VirtIO-GPU.
 //!
 //! QMP input goes to QEMU's active handlers, and a virtio input device becomes the active one
 //! for its event types once the guest sets it running, ahead of the PS/2 devices. So an

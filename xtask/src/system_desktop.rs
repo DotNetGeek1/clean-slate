@@ -1,6 +1,6 @@
 //! `test-system`'s three desktop boots (#218 S6c, S6f), all headless and on the hooks build.
 //!
-//! 1. **Desktop.** `opt/clean-slate/desktop=q1` and a modern-only VirtIO-GPU: the kernel declares
+//! 1. **Desktop.** `opt/clean-slate/desktop=q1-bare` (the desktop without the terminal rows) and a modern-only VirtIO-GPU: the kernel declares
 //!    the five base rows and the compositor, desktop shell and app rows, and init launches all
 //!    eight. Each desktop row must hold exactly its manifest grants (the kernel's `[GFX ]`, `[DISP]`,
 //!    `[SEAT]` and, for the app's and the serial shell's console streams, `[CONS]` grant lines, then a launch audit that matches the row), report ready from its
@@ -71,7 +71,7 @@ pub(crate) struct DesktopMachine {
     /// Names the run's artifacts and serial log.
     pub(crate) name: &'static str,
     pub(crate) tier: QualityTier,
-    /// `-vga std` and no GPU, with `opt/clean-slate/desktop=q0`; otherwise a modern-only
+    /// `-vga std` and no GPU, with `opt/clean-slate/desktop=q0-bare`; otherwise a modern-only
     /// VirtIO-GPU, `-vga none` and `q1`.
     pub(crate) framebuffer: bool,
     /// The `[DISP] backend=` the kernel must install.
@@ -207,7 +207,7 @@ impl AcceptanceDriver for DesktopWatch {
 /// Both boots, on `disk`; the shell boot that follows gets a fresh disk.
 pub(crate) fn run(features: &[&str], disk: &Path) -> Result<(), XtaskError> {
     println!(
-        "[STM ] desktop boot: fw_cfg opt/clean-slate/desktop=q1 with virtio-gpu-pci, COM1 driven"
+        "[STM ] desktop boot: fw_cfg opt/clean-slate/desktop=q1-bare with virtio-gpu-pci, COM1 driven"
     );
     let mut check = |done: usize, segment: &str, before: Option<&Desktop>| {
         let result = check_desktop_step(done, segment, before);
@@ -229,10 +229,12 @@ pub(crate) fn run(features: &[&str], disk: &Path) -> Result<(), XtaskError> {
         first.port, last.rows[0].pid, last.rows[0].generation, last.port
     );
 
-    println!("[STM ] desktop boot with no display: opt/clean-slate/desktop=q1, -vga none, no GPU");
+    println!(
+        "[STM ] desktop boot with no display: opt/clean-slate/desktop=q1-bare, -vga none, no GPU"
+    );
     let args = [
         "-fw_cfg",
-        "name=opt/clean-slate/desktop,string=q1",
+        "name=opt/clean-slate/desktop,string=q1-bare",
         "-vga",
         "none",
     ]
@@ -252,11 +254,11 @@ pub(crate) fn run(features: &[&str], disk: &Path) -> Result<(), XtaskError> {
     println!("[STM ] desktop boot with no display: one {NO_DISPLAY:?}, base rows only");
 
     println!(
-        "[STM ] desktop boot on the framebuffer alone: opt/clean-slate/desktop=q1, -vga std, no GPU"
+        "[STM ] desktop boot on the framebuffer alone: opt/clean-slate/desktop=q1-bare, -vga std, no GPU"
     );
     let args = [
         "-fw_cfg",
-        "name=opt/clean-slate/desktop,string=q1",
+        "name=opt/clean-slate/desktop,string=q1-bare",
         "-vga",
         "std",
     ]

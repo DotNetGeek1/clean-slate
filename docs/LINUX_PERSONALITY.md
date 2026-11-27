@@ -265,11 +265,12 @@ code is `process::linux_fs::home_table` (layout, pure) and `home_backend` (reque
 
 **Protocol.** The object capability gains `READ_AT`, `WRITE_AT` and `TRUNCATE`, which
 carry an `offset` (request bytes 40..48; the payload moves to 48). `WRITE_AT` and
-`TRUNCATE` are staged, not committed; the next whole-object `WRITE` or `DELETE` commits
-them with it. The new ops are only reachable from the kernel's `/home` broker, which
-authorises every request against the caller's right on the table object: native
-`SYSCALL_NR_CAP_OBJECT` submissions of them are `EINVAL`. The storage service answers
-`NO_SPACE` (status 5) past its live-bytes budget or a full object table.
+`TRUNCATE` are staged, not committed; the next whole-object `WRITE` or `DELETE`, or a
+`COMMIT`, commits them with it. The `/home` broker authorises every request against the
+caller's right on the table object. Native holders reach the same ops through
+`OBJECT_SUBOP_SUBMIT_AT` (#312; see [ARCHITECTURE.md](ARCHITECTURE.md#m63-persistent-object-capability-surface)).
+The storage service answers `NO_SPACE` (status 5) past its live-bytes budget or a full
+object table.
 
 **Durability.** Writing the table, with every file's current length, commits the table
 and all staged file bytes together. It is written on create, rename and unlink, and by

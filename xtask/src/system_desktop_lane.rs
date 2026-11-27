@@ -1,7 +1,7 @@
 //! `cargo xtask test-system-desktop` (#218 S6e): the system image's desktop, driven over QMP and
-//! COM1 on the hooks build, with `opt/clean-slate/desktop=q1` on a modern-only VirtIO-GPU.
+//! COM1 on the hooks build, with `opt/clean-slate/desktop=q1-bare` on a modern-only VirtIO-GPU.
 //! `test-m10-desktop` (S6f) runs the same driver on that machine and on the `-vga std`
-//! framebuffer with `q0` ([`run_each`]).
+//! framebuffer with `q0-bare` ([`run_each`]).
 //!
 //! 1. **Boot**: init's eight-row settle line, so only the system image passes, then
 //!    `test-system`'s eight-row checks ([`check_baseline_boot`]) at the machine's tier.

@@ -1,54 +1,9 @@
 //! M6.3 object-capability request/response protocol shared by kernel, storage service, and clients.
+//!
+//! The client-facing wire definitions live in [`clean_slate_native_abi::object`]; this module
+//! re-exports them and adds the storage service's request frame.
 
-pub const OBJECT_SUBOP_SUBMIT: u64 = 1;
-/// `rsi` = request id, `rdx` = output capacity, `r10` = output pointer, `r8` = deadline
-/// (absolute `WORK_SET` `NOW` nanoseconds, [`OBJECT_POLL_NO_DEADLINE`] = wait until
-/// completion). A pending request whose deadline has passed returns `ETIMEDOUT` and stays
-/// queued, so the caller may poll it again.
-pub const OBJECT_SUBOP_POLL: u64 = 2;
-pub const OBJECT_SUBOP_SERVICE_NEXT: u64 = 3;
-pub const OBJECT_SUBOP_SERVICE_COMPLETE: u64 = 4;
-pub const OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT: u64 = 5;
-
-pub const OBJECT_OP_READ: u64 = 1;
-pub const OBJECT_OP_WRITE: u64 = 2;
-/// Removes the object; it takes effect at the storage service's next commit, which the
-/// service runs before completing the request. Needs `Rights::WRITE`, like a write.
-pub const OBJECT_OP_DELETE: u64 = 3;
-/// Reads up to `len` bytes (at most [`OBJECT_MAX_PAYLOAD_BYTES`]) from `offset`; the
-/// completion's payload holds the bytes, fewer at the object's end. Needs `Rights::READ`.
-pub const OBJECT_OP_READ_AT: u64 = 4;
-/// Stages the payload at `offset`, creating the object when it is missing and zero-filling
-/// past its end. It is not committed: `OBJECT_STATUS_OK` means staged, and the next
-/// committing op ([`OBJECT_OP_WRITE`] or [`OBJECT_OP_DELETE`]) makes it durable. A crash
-/// or service restart before then forgets it. Needs `Rights::WRITE`.
-pub const OBJECT_OP_WRITE_AT: u64 = 5;
-/// Stages the object cut or zero-extended to `offset` bytes, creating it when it is
-/// missing. Staged like [`OBJECT_OP_WRITE_AT`]. Needs `Rights::WRITE`.
-pub const OBJECT_OP_TRUNCATE: u64 = 6;
-
-pub const OBJECT_MAX_PAYLOAD_BYTES: usize = 512;
-pub const OBJECT_REQUEST_SLOTS: usize = 4;
-
-pub const OBJECT_POLL_NO_DEADLINE: u64 = 0;
-
-pub const OBJECT_STATUS_PENDING: u64 = u64::MAX - 200;
-pub const OBJECT_STATUS_OK: u64 = 0;
-pub const OBJECT_STATUS_NOT_FOUND: u64 = 1;
-pub const OBJECT_STATUS_STORE_ERROR: u64 = 2;
-pub const OBJECT_STATUS_TOO_LARGE: u64 = 3;
-/// The request's capability is bound to an object epoch, and the object it names is gone
-/// or was deleted and re-created under the same id with a later epoch.
-pub const OBJECT_STATUS_STALE: u64 = 4;
-/// The write would take the store's live bytes past the service's budget: the store is
-/// full. Nothing was staged.
-pub const OBJECT_STATUS_NO_SPACE: u64 = 5;
-
-/// [`ObjectServiceRequest::epoch`] for a capability not bound to one object epoch: it
-/// reaches whatever object currently has the id.
-pub const OBJECT_EPOCH_UNBOUND: u64 = 0;
-
-pub const OBJECT_SERVICE_ROLE_ID: u64 = u64::MAX;
+pub use clean_slate_native_abi::object::*;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,6 +98,7 @@ mod tests {
         assert_eq!(OBJECT_SUBOP_SERVICE_NEXT, 3);
         assert_eq!(OBJECT_SUBOP_SERVICE_COMPLETE, 4);
         assert_eq!(OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, 5);
+        assert_eq!(OBJECT_SUBOP_SUBMIT_AT, 6);
     }
 
     #[test]
@@ -165,9 +121,10 @@ mod tests {
                 OBJECT_OP_DELETE,
                 OBJECT_OP_READ_AT,
                 OBJECT_OP_WRITE_AT,
-                OBJECT_OP_TRUNCATE
+                OBJECT_OP_TRUNCATE,
+                OBJECT_OP_COMMIT
             ],
-            [1, 2, 3, 4, 5, 6]
+            [1, 2, 3, 4, 5, 6, 7]
         );
         assert_eq!(
             [
