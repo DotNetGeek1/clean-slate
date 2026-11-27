@@ -3004,6 +3004,17 @@ fn run_m10_compositor_acceptance() -> Result<(), XtaskError> {
     Ok(())
 }
 
+/// The `-Z build-std` set for a native package: `alloc` for the apps on the runtime heap
+/// (#356), as `kernel/build.rs` `userspace_embed_recipe` and the workflow build them.
+fn native_build_std(package: &str) -> &'static str {
+    match package {
+        "clean-slate-desktop-shell" | "clean-slate-playground" | "clean-slate-terminal" => {
+            "build-std=core,alloc,compiler_builtins"
+        }
+        _ => "build-std=core,compiler_builtins",
+    }
+}
+
 /// Release CPL3 build of one `userspace`-feature binary (what `kernel/build.rs` embeds).
 fn build_native_userspace_bin(package: &str, bin: &str) -> Result<(), XtaskError> {
     let mut cmd = Command::new("cargo");
@@ -3018,7 +3029,7 @@ fn build_native_userspace_bin(package: &str, bin: &str) -> Result<(), XtaskError
         .arg("--target")
         .arg("x86_64-unknown-none")
         .arg("-Z")
-        .arg("build-std=core,compiler_builtins")
+        .arg(native_build_std(package))
         .arg("--release")
         .env("RUSTC_BOOTSTRAP", "1");
     run_build_command(&mut cmd)

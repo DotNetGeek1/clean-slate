@@ -395,6 +395,17 @@ pub const COMPOSITOR_SLOT_ALLOWANCE: usize =
 
 const _: () = assert!(COMPOSITOR_SERVICE_SPEC.grants.len() == COMPOSITOR_LAUNCH_RECORDS);
 
+/// Native heap budgets (#356), in pages of `memory_pages`. Each is at least one heap chunk
+/// (`clean_slate_runtime::heap::CHUNK_PAGES`, 16 pages); `docs/SDK-APPLICATIONS.md` says how
+/// they were picked.
+///
+/// The shell's window list and the playground fit in one chunk; two leave room for a second.
+pub const DESKTOP_SHELL_MEMORY_PAGES: u64 = 32;
+pub const PLAYGROUND_MEMORY_PAGES: u64 = 32;
+/// The terminal's rows: 1025 rows of 960 bytes at full scrollback (~1 MiB), plus the old
+/// allocation while the last growth copies (~0.75 MiB), plus a chunk, with room to spare.
+pub const TERMINAL_MEMORY_PAGES: u64 = 768;
+
 /// The panel and background. Ready is both surfaces committed. It lists and starts the
 /// launchable rows through init's launcher port (#237).
 pub const DESKTOP_SHELL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
@@ -409,7 +420,7 @@ pub const DESKTOP_SHELL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     restart: DESKTOP_RESTART,
     depends_on: &[COMPOSITOR_SERVICE_ID],
     slot_allowance: None,
-    memory_pages: 0,
+    memory_pages: DESKTOP_SHELL_MEMORY_PAGES,
     launch_name: None,
     start: Start::AtBoot,
 };
@@ -429,7 +440,7 @@ pub const PLAYGROUND_SERVICE_SPEC: ServiceSpec = ServiceSpec {
         CONSOLE_SERVICE_ID,
     ],
     slot_allowance: None,
-    memory_pages: 0,
+    memory_pages: PLAYGROUND_MEMORY_PAGES,
     launch_name: Some("playground"),
     start: Start::AtBoot,
 };
@@ -477,7 +488,7 @@ pub const TERMINAL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
         PLAYGROUND_SERVICE_ID,
     ],
     slot_allowance: None,
-    memory_pages: 0,
+    memory_pages: TERMINAL_MEMORY_PAGES,
     launch_name: Some("terminal"),
     start: Start::AtBoot,
 };
@@ -929,6 +940,26 @@ mod tests {
             COMPOSITOR_SLOT_ALLOWANCE,
             COMPOSITOR_SERVICE_SPEC.grants.len() + MAX_REGISTERED_BUFFERS + 4
         );
+    }
+
+    #[test]
+    fn the_native_apps_have_a_heap_and_nothing_else_does() {
+        // One heap chunk (`clean_slate_runtime::heap::CHUNK_PAGES`).
+        const CHUNK_PAGES: u64 = 16;
+        for spec in SYSTEM_TERMINAL_DESKTOP_MANIFEST {
+            let app = [
+                DESKTOP_SHELL_SERVICE_ID,
+                PLAYGROUND_SERVICE_ID,
+                TERMINAL_SERVICE_ID,
+            ]
+            .contains(&spec.id);
+            if app {
+                assert!(spec.memory_pages >= CHUNK_PAGES, "{:?}", spec.id);
+            } else {
+                assert_eq!(spec.memory_pages, 0, "{:?}", spec.id);
+            }
+        }
+        assert_eq!(validate_manifest(SYSTEM_TERMINAL_DESKTOP_MANIFEST), Ok(()));
     }
 
     #[test]

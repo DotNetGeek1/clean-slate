@@ -1,6 +1,11 @@
-//! The character grid: [`ROWS`] screen rows over a ring of [`SCROLLBACK`] history rows, a cursor,
+//! The character grid: [`ROWS`] screen rows under up to [`SCROLLBACK`] history rows, a cursor,
 //! the current drawing attributes, and which rows of the visible view changed since the last
 //! repaint.
+//!
+//! The rows live on the heap (#356). A new screen holds none and reads as blank; its first write
+//! allocates the live rows, and history grows as rows scroll off, up to the screen's scrollback.
+//! When the heap refuses more history the oldest row is reused instead, so a full budget costs
+//! scrollback, never the terminal.
 //!
 //! The screen knows nothing about escape sequences ([`crate::vt`] turns bytes into these
 //! operations) or about pixels ([`crate::render`] paints the view).
@@ -9,10 +14,10 @@
 pub const COLS: usize = 80;
 /// Rows of the live screen.
 pub const ROWS: usize = 25;
-/// Rows kept above the live screen once they scroll off.
-pub const SCROLLBACK: usize = 200;
+/// Rows kept above the live screen once they scroll off, by default.
+pub const SCROLLBACK: usize = 1000;
 
-const RING: usize = ROWS + SCROLLBACK;
+use alloc::collections::VecDeque;
 
 /// A colour: the default for its role, or one of the 16 ANSI colours (8..16 are the bright ones).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,16 +72,17 @@ impl Cell {
 
 type Row = [Cell; COLS];
 
+const BLANK_ROW: Row = [Cell::BLANK; COLS];
+
 /// Rows of the view as a bit set: bit `r` is view row `r`.
 const ALL_ROWS: u32 = (1 << ROWS) - 1;
 const _: () = assert!(ROWS < 32);
 
 pub struct Screen {
-    ring: [Row; RING],
-    /// Ring index of live row 0.
-    top: usize,
-    /// History rows filled, at most [`SCROLLBACK`].
-    history: usize,
+    /// History rows, oldest first, then the [`ROWS`] live rows; empty until the first write.
+    rows: VecDeque<Row>,
+    /// Most history rows kept.
+    scrollback: usize,
     row: usize,
     col: usize,
     /// The last write filled the last column: the next printable starts a new line first.
@@ -96,11 +102,16 @@ impl Default for Screen {
 }
 
 impl Screen {
+    /// A blank screen keeping [`SCROLLBACK`] history rows. Allocates nothing yet.
     pub const fn new() -> Self {
+        Self::with_scrollback(SCROLLBACK)
+    }
+
+    /// A blank screen keeping at most `scrollback` history rows.
+    pub const fn with_scrollback(scrollback: usize) -> Self {
         Self {
-            ring: [[Cell::BLANK; COLS]; RING],
-            top: 0,
-            history: 0,
+            rows: VecDeque::new(),
+            scrollback,
             row: 0,
             col: 0,
             wrap_pending: false,
@@ -127,8 +138,18 @@ impl Screen {
         self.attr
     }
 
-    pub const fn history(&self) -> usize {
-        self.history
+    /// History rows held, at most [`Self::scrollback`].
+    pub fn history(&self) -> usize {
+        self.rows.len().saturating_sub(ROWS)
+    }
+
+    pub const fn scrollback(&self) -> usize {
+        self.scrollback
+    }
+
+    /// Rows the screen has room for on the heap (tests and diagnostics).
+    pub fn allocated_rows(&self) -> usize {
+        self.rows.capacity()
     }
 
     pub const fn view_offset(&self) -> usize {
@@ -137,13 +158,13 @@ impl Screen {
 
     /// Live row `row`.
     pub fn live_row(&self, row: usize) -> &Row {
-        &self.ring[(self.top + row) % RING]
+        self.rows.get(self.history() + row).unwrap_or(&BLANK_ROW)
     }
 
     /// View row `row`: a live row, or a history row while scrolled back.
     pub fn view_row(&self, row: usize) -> &Row {
-        let index = (self.top + RING + row - self.view_offset) % RING;
-        &self.ring[index]
+        let index = self.history() + row - self.view_offset;
+        self.rows.get(index).unwrap_or(&BLANK_ROW)
     }
 
     /// The text of live row `row`, trailing blanks removed (tests and diagnostics).
@@ -189,7 +210,7 @@ impl Screen {
     }
 
     fn set_view_offset(&mut self, offset: usize) {
-        let offset = offset.min(self.history);
+        let offset = offset.min(self.history());
         if offset != self.view_offset {
             self.view_offset = offset;
             self.dirty = ALL_ROWS;
@@ -211,9 +232,33 @@ impl Screen {
         }
     }
 
+    /// The live rows, allocated on first use (an allocation the screen cannot do without).
+    fn ensure_live(&mut self) {
+        if self.rows.len() < ROWS {
+            self.rows.resize(ROWS, BLANK_ROW);
+        }
+    }
+
     fn live_row_mut(&mut self, row: usize) -> &mut Row {
+        self.ensure_live();
         self.touch_live(row);
-        &mut self.ring[(self.top + row) % RING]
+        let index = self.history() + row;
+        &mut self.rows[index]
+    }
+
+    /// Room for one more history row, growing towards the full scrollback; `false` when the
+    /// scrollback is full or the heap refuses.
+    fn reserve_history_row(&mut self) -> bool {
+        if self.history() >= self.scrollback {
+            return false;
+        }
+        let len = self.rows.len();
+        if len < self.rows.capacity() {
+            return true;
+        }
+        // Double, but never past the full scrollback.
+        let grow = len.min(ROWS + self.scrollback - len).max(1);
+        self.rows.try_reserve_exact(grow).is_ok()
     }
 
     /// Moves the cursor; the rows it leaves and enters repaint.
@@ -274,17 +319,20 @@ impl Screen {
 
     /// Live row 0 goes into history; a blank row enters at the bottom.
     fn scroll_up(&mut self) {
-        self.top = (self.top + 1) % RING;
-        if self.history < SCROLLBACK {
-            self.history += 1;
+        self.ensure_live();
+        let blank = [Cell::erased(self.attr); COLS];
+        if self.reserve_history_row() {
+            self.rows.push_back(blank);
+        } else {
+            // At the scrollback (or the budget): the oldest row's slot takes the new one, so
+            // this push never allocates.
+            self.rows.pop_front();
+            self.rows.push_back(blank);
         }
         // A view scrolled back keeps showing the same rows, as far as history reaches.
         if self.view_offset > 0 {
-            self.view_offset = (self.view_offset + 1).min(self.history);
+            self.view_offset = (self.view_offset + 1).min(self.history());
         }
-        let blank = Cell::erased(self.attr);
-        let bottom = (self.top + ROWS - 1) % RING;
-        self.ring[bottom] = [blank; COLS];
         self.dirty = ALL_ROWS;
     }
 
@@ -359,7 +407,8 @@ impl Screen {
                     self.erase_cells(r, 0, COLS);
                 }
                 if mode == 3 {
-                    self.history = 0;
+                    let history = self.history();
+                    self.rows.drain(..history);
                     self.set_view_offset(0);
                 }
             }
@@ -402,9 +451,10 @@ impl Screen {
     pub fn insert_lines(&mut self, n: usize) {
         let row = self.row;
         let n = n.min(ROWS - row);
+        self.ensure_live();
+        let base = self.history();
         for r in (row + n..ROWS).rev() {
-            let from = self.ring[(self.top + r - n) % RING];
-            self.ring[(self.top + r) % RING] = from;
+            self.rows[base + r] = self.rows[base + r - n];
         }
         for r in row..row + n {
             self.erase_cells(r, 0, COLS);
@@ -417,9 +467,10 @@ impl Screen {
     pub fn delete_lines(&mut self, n: usize) {
         let row = self.row;
         let n = n.min(ROWS - row);
+        self.ensure_live();
+        let base = self.history();
         for r in row..ROWS - n {
-            let from = self.ring[(self.top + r + n) % RING];
-            self.ring[(self.top + r) % RING] = from;
+            self.rows[base + r] = self.rows[base + r + n];
         }
         for r in ROWS - n..ROWS {
             self.erase_cells(r, 0, COLS);
@@ -448,14 +499,10 @@ impl Screen {
         self.attr = attr;
     }
 
-    /// `RIS`: a blank screen, no history, default attributes. Cleared in place: a fresh
-    /// `Screen` is far larger than a CPL3 stack.
+    /// `RIS`: a blank screen, no history, default attributes. The rows' memory is kept for
+    /// the next writes.
     pub fn reset(&mut self) {
-        for row in &mut self.ring {
-            *row = [Cell::BLANK; COLS];
-        }
-        self.top = 0;
-        self.history = 0;
+        self.rows.clear();
         self.row = 0;
         self.col = 0;
         self.wrap_pending = false;
