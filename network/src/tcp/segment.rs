@@ -231,6 +231,7 @@ fn write_options(segment: &TcpSegment, out: &mut [u8]) -> Result<(), ParseError>
 }
 
 /// Builds a segment template for SYN with our MSS option (24-byte header).
+#[cfg(test)]
 pub fn syn_segment(src_port: u16, dst_port: u16, seq: u32) -> TcpSegment {
     TcpSegment {
         src_port,

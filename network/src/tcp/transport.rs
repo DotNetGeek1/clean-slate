@@ -11,18 +11,51 @@ use crate::protocol::TrustedCaller;
 use crate::rng::{IssKey, NetRng};
 use crate::session::{SessionGeneration, SessionId};
 use crate::stack::{self, L3Stack};
-use crate::tcp::conn::{write_tcp_to_buf, SegmentAction, TcpConnection, TimerAction};
-use crate::tcp::segment::{parse as parse_tcp, syn_segment, TcpFlags, MAX_TCP_PAYLOAD};
+use crate::tcp::conn::{write_tcp_to_buf, SegmentAction, TcpConnection, TcpTimers, TimerAction};
+use crate::tcp::segment::{parse as parse_tcp, TcpFlags, TcpSegment, MAX_TCP_PAYLOAD};
 use crate::tcp::state::TcpState;
 use crate::tcp::stats::TcpStats;
 
 /// Max inbound frames one [`TcpTransport::poll`] processes (one device RX queue's worth).
 pub const TCP_POLL_RX_BUDGET: usize = crate::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize;
 
+/// Listening ports per transport.
+pub const MAX_TCP_LISTENERS: usize = 4;
+
+/// Connections a listener holds that the application has not accepted yet (half-open
+/// SYN-RECEIVED ones included), so a SYN flood cannot take the whole table.
+pub const TCP_LISTEN_BACKLOG: usize = 4;
+
+/// Most segments one send pass puts on the wire for a connection.
+const TCP_SEND_BURST: usize = 8;
+
+/// A listening port, from [`TcpTransport::listen`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListenerId(SessionId);
+
+impl ListenerId {
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(SessionId::from_raw(raw))
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0.raw()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Listener {
+    owner: TrustedCaller,
+    port: u16,
+}
+
 /// Fixed-size connection table keyed by [`SessionId`] index.
 pub struct TcpTable {
     generation: SessionGeneration,
     pub(crate) slots: [Option<TcpConnection>; MAX_TCP_CONNECTIONS as usize],
+    listeners: [Option<Listener>; MAX_TCP_LISTENERS],
+    timers: TcpTimers,
+    established_counter: u64,
     /// Ephemeral ports.
     rng: NetRng,
     /// RFC 6528 initial sequence numbers.
@@ -35,15 +68,21 @@ impl TcpTable {
         self.generation = generation;
         self.iss_key = IssKey::new(&mut rng);
         self.rng = rng;
+        self.timers = TcpTimers::DEFAULT;
+        self.established_counter = 0;
         for slot in self.slots.iter_mut() {
             *slot = None;
         }
+        self.listeners = [None; MAX_TCP_LISTENERS];
     }
 
     pub fn new(generation: SessionGeneration, mut rng: NetRng) -> Self {
         Self {
             generation,
             slots: [const { None }; MAX_TCP_CONNECTIONS as usize],
+            listeners: [None; MAX_TCP_LISTENERS],
+            timers: TcpTimers::DEFAULT,
+            established_counter: 0,
             iss_key: IssKey::new(&mut rng),
             rng,
         }
@@ -70,13 +109,78 @@ impl TcpTable {
             .position(Option::is_none)
             .ok_or(NetworkError::SessionExhausted)?;
         let slots = &self.slots;
+        let listeners = &self.listeners;
         let port = self
             .rng
-            .ephemeral_port(|port| slots.iter().flatten().any(|c| c.local.port == port))
+            .ephemeral_port(|port| {
+                slots.iter().flatten().any(|c| c.local.port == port)
+                    || listeners.iter().flatten().any(|l| l.port == port)
+            })
             .ok_or(NetworkError::SessionExhausted)?;
         let local = SocketAddrV4::new(our_ip, port);
         let iss = self.iss_key.iss(local, remote, now);
-        self.slots[index] = Some(TcpConnection::new(owner, local, remote, iss));
+        self.slots[index] = Some(TcpConnection::with_timers(
+            owner,
+            local,
+            remote,
+            iss,
+            self.timers,
+        ));
+        Ok(index)
+    }
+
+    /// A SYN reached listener `listener`: a SYN-RECEIVED slot, if the backlog has room.
+    fn alloc_passive_slot(
+        &mut self,
+        now: u64,
+        listener: usize,
+        local: SocketAddrV4,
+        remote: SocketAddrV4,
+        syn: &TcpSegment,
+    ) -> Option<usize> {
+        let owner = self.listeners.get(listener)?.as_ref()?.owner;
+        let waiting = self
+            .slots
+            .iter()
+            .flatten()
+            .filter(|c| c.listener == Some(listener as u8) && !c.accepted)
+            .count();
+        if waiting >= TCP_LISTEN_BACKLOG {
+            return None;
+        }
+        let index = self.slots.iter().position(Option::is_none)?;
+        let iss = self.iss_key.iss(local, remote, now);
+        self.slots[index] = Some(TcpConnection::new_passive(
+            owner,
+            local,
+            remote,
+            iss,
+            syn,
+            listener as u8,
+            self.timers,
+        ));
+        Some(index)
+    }
+
+    fn listener_for_port(&self, port: u16) -> Option<usize> {
+        self.listeners
+            .iter()
+            .position(|l| l.is_some_and(|l| l.port == port))
+    }
+
+    fn check_listener(&self, id: ListenerId, owner: TrustedCaller) -> Result<usize, NetworkError> {
+        if !id.0.matches_generation(self.generation) {
+            return Err(NetworkError::Denied(DenialReason::StaleGeneration));
+        }
+        let index = id.0.index() as usize;
+        let listener = self
+            .listeners
+            .get(index)
+            .and_then(|l| l.as_ref())
+            .ok_or(NetworkError::NotFound)?;
+        if listener.owner != owner {
+            return Err(NetworkError::Denied(DenialReason::NoCapability));
+        }
         Ok(index)
     }
 
@@ -89,6 +193,10 @@ impl TcpTable {
             return Err(NetworkError::NotFound);
         }
         let slot = self.slots[index].as_ref().ok_or(NetworkError::NotFound)?;
+        if slot.listener.is_some() && !slot.accepted {
+            // Not handed out by `accept` yet: nobody holds this id.
+            return Err(NetworkError::NotFound);
+        }
         if slot.owner != owner {
             return Err(NetworkError::Denied(DenialReason::NoCapability));
         }
@@ -144,6 +252,11 @@ impl TcpTable {
         for slot in self.slots.iter_mut() {
             *slot = None;
         }
+        self.listeners = [None; MAX_TCP_LISTENERS];
+    }
+
+    pub fn listeners_in_use(&self) -> usize {
+        self.listeners.iter().filter(|l| l.is_some()).count()
     }
 }
 
@@ -211,8 +324,10 @@ impl<L: NetworkLink> TcpTransport<L> {
     }
 
     /// The length of one `now` tick, for the ISS clock (see [`IssKey::set_tick_period_ns`]).
+    /// Also sets the TCP timers (RTO bounds, TIME-WAIT, connect timeout) for new connections.
     pub fn set_tick_period_ns(&mut self, tick_period_ns: u64) {
         self.table.iss_key.set_tick_period_ns(tick_period_ns);
+        self.table.timers = TcpTimers::from_tick_period_ns(tick_period_ns);
     }
 
     pub fn stack(&self) -> &L3Stack<L> {
@@ -330,7 +445,8 @@ impl<L: NetworkLink> TcpTransport<L> {
         let index = self.table.check_id(id, owner)?;
         let start = self.table.slots[index].as_mut().unwrap().start_close();
         if start {
-            self.send_fin_at(now, index)?;
+            // The FIN follows any queued data, as the windows allow.
+            self.try_send_data_at(now, index)?;
         }
         Ok(())
     }
@@ -344,12 +460,116 @@ impl<L: NetworkLink> TcpTransport<L> {
         Ok(())
     }
 
+    /// Passive open: SYNs to `port` on our address start connections for `owner` to
+    /// [`Self::accept`].
+    pub fn listen(&mut self, owner: TrustedCaller, port: u16) -> Result<ListenerId, NetworkError> {
+        if port == 0 {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let in_use = self.table.listener_for_port(port).is_some()
+            || self
+                .table
+                .slots
+                .iter()
+                .flatten()
+                .any(|c| c.local.port == port);
+        if in_use {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let index = self
+            .table
+            .listeners
+            .iter()
+            .position(Option::is_none)
+            .ok_or(NetworkError::SessionExhausted)?;
+        self.table.listeners[index] = Some(Listener { owner, port });
+        Ok(ListenerId(SessionId::new(
+            self.table.generation,
+            index as u32,
+        )))
+    }
+
+    /// The oldest established connection on `listener` not yet accepted, now the caller's.
+    pub fn accept(
+        &mut self,
+        listener: ListenerId,
+        owner: TrustedCaller,
+    ) -> Result<Option<SessionId>, NetworkError> {
+        let index = self.table.check_listener(listener, owner)?;
+        let ready = self
+            .table
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.as_ref().map(|c| (i, c)))
+            .filter(|(_, c)| {
+                c.listener == Some(index as u8) && !c.accepted && c.state != TcpState::SynReceived
+            })
+            .min_by_key(|(_, c)| c.established_order)
+            .map(|(i, _)| i);
+        let Some(slot) = ready else {
+            return Ok(None);
+        };
+        self.table.slots[slot].as_mut().unwrap().accepted = true;
+        Ok(Some(SessionId::new(self.table.generation, slot as u32)))
+    }
+
+    /// Connections on `listener` that [`Self::accept`] would hand out now.
+    pub fn pending_accepts(
+        &self,
+        listener: ListenerId,
+        owner: TrustedCaller,
+    ) -> Result<usize, NetworkError> {
+        let index = self.table.check_listener(listener, owner)?;
+        Ok(self
+            .table
+            .slots
+            .iter()
+            .flatten()
+            .filter(|c| {
+                c.listener == Some(index as u8) && !c.accepted && c.state != TcpState::SynReceived
+            })
+            .count())
+    }
+
+    /// Stops listening; connections not yet accepted are reset, accepted ones are kept.
+    pub fn close_listener(
+        &mut self,
+        now: u64,
+        listener: ListenerId,
+        owner: TrustedCaller,
+    ) -> Result<(), NetworkError> {
+        let index = self.table.check_listener(listener, owner)?;
+        self.drop_listener(now, index);
+        Ok(())
+    }
+
+    fn drop_listener(&mut self, now: u64, index: usize) {
+        self.table.listeners[index] = None;
+        for i in 0..self.table.slots.len() {
+            let orphan = self.table.slots[i]
+                .as_ref()
+                .is_some_and(|c| c.listener == Some(index as u8) && !c.accepted);
+            if orphan {
+                let _ = self.send_rst_at(now, i);
+                self.stats.resets_sent += 1;
+                self.table.slots[i].as_mut().unwrap().abort();
+                self.table.free_slot(i);
+            }
+        }
+    }
+
     pub fn on_holder_exit(
         &mut self,
         now: u64,
         owner: TrustedCaller,
     ) -> Result<usize, NetworkError> {
         let mut count = 0;
+        for l in 0..MAX_TCP_LISTENERS {
+            if self.table.listeners[l].is_some_and(|l| l.owner == owner) {
+                self.drop_listener(now, l);
+            }
+        }
         for i in 0..self.table.slots.len() {
             let should_abort = self.table.slots[i]
                 .as_ref()
@@ -366,8 +586,8 @@ impl<L: NetworkLink> TcpTransport<L> {
         Ok(count)
     }
 
-    /// Earliest tick at which [`Self::poll`] has timer work (retransmit, connect timeout,
-    /// TIME-WAIT expiry) across all connections, or `None` when no timer is armed.
+    /// Earliest tick at which [`Self::poll`] has timer work (retransmit, persist probe,
+    /// connect timeout, TIME-WAIT expiry, window update) across all connections, or `None`.
     pub fn next_timer_deadline(&self) -> Option<u64> {
         self.table
             .slots
@@ -377,7 +597,7 @@ impl<L: NetworkLink> TcpTransport<L> {
             .min()
     }
 
-    /// Drives RX, timers, SYN retry, and retransmits.
+    /// Drives RX, timers, SYN retry, data and window updates.
     ///
     /// At most [`TCP_POLL_RX_BUDGET`] inbound frames are processed per call so a
     /// peer flood cannot keep the caller from observing connection state.
@@ -401,42 +621,9 @@ impl<L: NetworkLink> TcpTransport<L> {
                     let local_port = seg.dst_port;
                     let remote = SocketAddrV4::new(src, seg.src_port);
                     if let Some(index) = self.table.find_by_quad(local_port, remote) {
-                        let action = self.table.slots[index].as_mut().unwrap().on_segment(
-                            &seg,
-                            data,
-                            &mut self.stats,
-                        );
-                        match action {
-                            SegmentAction::SendAck => {
-                                self.send_ack_at(now, index)?;
-                                if self.table.slots[index].as_ref().unwrap().state
-                                    == TcpState::TimeWait
-                                {
-                                    self.table.slots[index]
-                                        .as_mut()
-                                        .unwrap()
-                                        .enter_time_wait(now);
-                                }
-                            }
-                            SegmentAction::MaybeSendData => {
-                                let _ = self.try_send_data_at(now, index);
-                            }
-                            SegmentAction::Closed => {
-                                self.table.free_slot(index);
-                            }
-                            SegmentAction::Failed(_) => {
-                                let conn = self.table.slots[index].as_mut().unwrap();
-                                if conn.has_buffered_recv() {
-                                    // Let `receive` drain in-order data before freeing the slot.
-                                } else {
-                                    conn.abort();
-                                    self.table.free_slot(index);
-                                }
-                            }
-                            SegmentAction::None => {}
-                        }
+                        self.dispatch(now, index, &seg, data)?;
                     } else {
-                        self.stats.dropped_no_conn += 1;
+                        self.on_unmatched(now, SocketAddrV4::new(dst, local_port), remote, &seg);
                     }
                 }
                 Err(_) => {
@@ -451,16 +638,15 @@ impl<L: NetworkLink> TcpTransport<L> {
                     TimerAction::Retransmit => {
                         self.retransmit_at(now, i)?;
                     }
+                    TimerAction::Probe => {
+                        let (seg, dst) = (conn.probe_segment(), conn.remote.addr);
+                        self.transmit_tcp_at(now, i, dst, &seg, &[])?;
+                    }
                     TimerAction::Closed => {
                         self.table.free_slot(i);
                     }
                     TimerAction::Failed(_) => {
-                        if conn.has_buffered_recv() {
-                            // Defer until the application drains the recv ring.
-                        } else {
-                            conn.abort();
-                            self.table.free_slot(i);
-                        }
+                        self.on_failed(i);
                     }
                     TimerAction::None => {}
                 }
@@ -468,41 +654,132 @@ impl<L: NetworkLink> TcpTransport<L> {
         }
 
         for i in 0..self.table.slots.len() {
-            let retry = self.table.slots[i]
-                .as_ref()
-                .map(|c| c.needs_syn_retry())
-                .unwrap_or(false);
-            if retry {
+            let Some(conn) = self.table.slots[i].as_ref() else {
+                continue;
+            };
+            if conn.needs_syn_retry() {
                 if self.send_syn_at(now, i).is_ok() {
                     self.table.slots[i].as_mut().unwrap().clear_pending_syn();
                 }
-            } else if self.table.slots[i]
-                .as_ref()
-                .map(|c| matches!(c.state, TcpState::Established | TcpState::CloseWait))
-                .unwrap_or(false)
-            {
+                continue;
+            }
+            if conn.state.is_synchronized() {
                 let _ = self.try_send_data_at(now, i);
+            }
+            if self.table.slots[i]
+                .as_ref()
+                .is_some_and(|c| c.window_update_due())
+            {
+                self.send_ack_at(now, i)?;
             }
         }
         Ok(())
     }
 
+    fn dispatch(
+        &mut self,
+        now: u64,
+        index: usize,
+        seg: &TcpSegment,
+        data: &[u8],
+    ) -> Result<(), NetworkError> {
+        let conn = self.table.slots[index].as_mut().unwrap();
+        let was_handshaking = conn.state == TcpState::SynReceived;
+        let action = conn.on_segment(seg, data, now, &mut self.stats);
+        if was_handshaking && conn.state.is_synchronized() {
+            self.table.established_counter += 1;
+            conn.established_order = self.table.established_counter;
+        }
+        match action {
+            SegmentAction::SendAck => {
+                self.send_ack_at(now, index)?;
+                if self.table.slots[index].as_ref().unwrap().state == TcpState::TimeWait {
+                    self.table.slots[index]
+                        .as_mut()
+                        .unwrap()
+                        .enter_time_wait(now);
+                }
+            }
+            SegmentAction::SendSynAck => {
+                let _ = self.send_syn_at(now, index);
+            }
+            SegmentAction::MaybeSendData => {
+                let _ = self.try_send_data_at(now, index);
+            }
+            SegmentAction::Retransmit => {
+                self.fast_retransmit_at(now, index)?;
+            }
+            SegmentAction::Closed => {
+                self.table.free_slot(index);
+            }
+            SegmentAction::Failed(_) => self.on_failed(index),
+            SegmentAction::None => {}
+        }
+        Ok(())
+    }
+
+    fn on_failed(&mut self, index: usize) {
+        let conn = self.table.slots[index].as_mut().unwrap();
+        // A passive connection nobody accepted has no reader: free it now.
+        let unread = conn.has_buffered_recv() && (conn.listener.is_none() || conn.accepted);
+        if !unread {
+            conn.abort();
+            self.table.free_slot(index);
+        }
+        // Otherwise `receive` drains in-order data before the slot is freed.
+    }
+
+    /// A segment for no connection: a SYN to a listener starts a passive open; anything
+    /// else is dropped (no RST, so closed ports stay quiet).
+    fn on_unmatched(
+        &mut self,
+        now: u64,
+        local: SocketAddrV4,
+        remote: SocketAddrV4,
+        seg: &TcpSegment,
+    ) {
+        let is_syn = seg.flags.contains(TcpFlags::SYN)
+            && !seg.flags.contains(TcpFlags::ACK)
+            && !seg.flags.contains(TcpFlags::RST);
+        let listener = self.table.listener_for_port(local.port);
+        let (true, Some(listener)) = (is_syn, listener) else {
+            self.stats.dropped_no_conn += 1;
+            return;
+        };
+        if local.addr != self.stack.our_ip() {
+            self.stats.dropped_no_conn += 1;
+            return;
+        }
+        let Some(index) = self
+            .table
+            .alloc_passive_slot(now, listener, local, remote, seg)
+        else {
+            self.stats.dropped_syn_backlog += 1;
+            return;
+        };
+        self.stats.passive_opens += 1;
+        let _ = self.send_syn_at(now, index);
+    }
+
+    /// Our SYN (active) or SYN-ACK (passive).
     fn send_syn_at(&mut self, now: u64, index: usize) -> Result<(), NetworkError> {
         let (seg, dst) = {
             let conn = self.table.slots[index].as_mut().unwrap();
-            let seg = syn_segment(conn.local.port, conn.remote.port, conn.iss);
-            conn.record_unacked(conn.iss, &[], true, false, now);
-            conn.touch_connect_deadline(now);
-            (seg, conn.remote.addr)
+            (conn.syn_segment(), conn.remote.addr)
         };
-        match self.transmit_raw(now, dst, &seg, &[]) {
+        let result = self.transmit_raw(now, dst, &seg, &[]);
+        let conn = self.table.slots[index].as_mut().unwrap();
+        match result {
             Err(NetworkError::Unreachable) => {
-                self.table.slots[index].as_mut().unwrap().on_unreachable();
+                conn.on_unreachable();
+                // A passive open still waits on its RTO for the SYN-ACK retry.
+                if conn.state == TcpState::SynReceived {
+                    conn.on_syn_transmitted(now);
+                }
                 Err(NetworkError::Unreachable)
             }
             Ok(()) => {
-                let conn = self.table.slots[index].as_mut().unwrap();
-                conn.snd_nxt = conn.iss.wrapping_add(1);
+                conn.on_syn_transmitted(now);
                 Ok(())
             }
             other => other,
@@ -512,21 +789,7 @@ impl<L: NetworkLink> TcpTransport<L> {
     fn send_ack_at(&mut self, now: u64, index: usize) -> Result<(), NetworkError> {
         let (seg, dst) = {
             let conn = self.table.slots[index].as_mut().unwrap();
-            let seg =
-                conn.build_segment(TcpFlags::ACK, conn.snd_nxt, conn.rcv_nxt, &[], false, false);
-            (seg, conn.remote.addr)
-        };
-        self.transmit_tcp_at(now, index, dst, &seg, &[])
-    }
-
-    fn send_fin_at(&mut self, now: u64, index: usize) -> Result<(), NetworkError> {
-        let (seg, dst) = {
-            let conn = self.table.slots[index].as_mut().unwrap();
-            let seq = conn.snd_nxt;
-            let seg = conn.build_segment(TcpFlags::ACK, seq, conn.rcv_nxt, &[], false, true);
-            conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
-            conn.record_unacked(seq, &[], false, true, now);
-            (seg, conn.remote.addr)
+            (conn.ack_segment(), conn.remote.addr)
         };
         self.transmit_tcp_at(now, index, dst, &seg, &[])
     }
@@ -538,7 +801,6 @@ impl<L: NetworkLink> TcpTransport<L> {
                 TcpFlags::RST.union(TcpFlags::ACK),
                 conn.snd_nxt,
                 conn.rcv_nxt,
-                &[],
                 false,
                 false,
             );
@@ -548,60 +810,41 @@ impl<L: NetworkLink> TcpTransport<L> {
         Ok(())
     }
 
+    /// The RTO fired: SYN or SYN-ACK again, or data from `snd_una` (already rewound).
     fn retransmit_at(&mut self, now: u64, index: usize) -> Result<(), NetworkError> {
-        let mut buf = [0u8; MAX_TCP_PAYLOAD];
-        let (seg, n, dst) = {
-            let conn = self.table.slots[index].as_mut().unwrap();
-            let (seg, payload) = conn
-                .unacked_for_retransmit()
-                .ok_or(NetworkError::Protocol)?;
-            let n = payload.len();
-            buf[..n].copy_from_slice(payload);
-            (seg, n, conn.remote.addr)
-        };
-        self.transmit_tcp_at(now, index, dst, &seg, &buf[..n])?;
-        if self.table.slots[index].as_ref().unwrap().state == TcpState::SynSent {
-            self.table.slots[index]
-                .as_mut()
-                .unwrap()
-                .touch_connect_deadline(now);
+        let state = self.table.slots[index].as_ref().unwrap().state;
+        if matches!(state, TcpState::SynSent | TcpState::SynReceived) {
+            let _ = self.send_syn_at(now, index);
+            return Ok(());
         }
-        Ok(())
+        self.try_send_data_at(now, index)
+    }
+
+    fn fast_retransmit_at(&mut self, now: u64, index: usize) -> Result<(), NetworkError> {
+        let mut buf = [0u8; MAX_TCP_PAYLOAD];
+        let Some((seg, n, dst)) = ({
+            let conn = self.table.slots[index].as_mut().unwrap();
+            conn.head_segment(&mut buf)
+                .map(|(seg, n)| (seg, n, conn.remote.addr))
+        }) else {
+            return Ok(());
+        };
+        self.transmit_tcp_at(now, index, dst, &seg, &buf[..n])
     }
 
     fn try_send_data_at(&mut self, now: u64, index: usize) -> Result<(), NetworkError> {
         let mut buf = [0u8; MAX_TCP_PAYLOAD];
-        let (seg, n, dst) = {
-            let conn = self.table.slots[index].as_mut().unwrap();
-            if conn.has_active_retransmit() || !conn.send_buf_has_data() {
+        for _ in 0..TCP_SEND_BURST {
+            let Some((seg, n, dst)) = ({
+                let conn = self.table.slots[index].as_mut().unwrap();
+                conn.next_segment(now, &mut buf)
+                    .map(|(seg, n)| (seg, n, conn.remote.addr))
+            }) else {
                 return Ok(());
-            }
-            if !matches!(conn.state, TcpState::Established | TcpState::CloseWait) {
-                return Ok(());
-            }
-            let max = conn
-                .peer_mss
-                .min(conn.peer_window)
-                .min(MAX_TCP_PAYLOAD as u16) as usize;
-            let (n, chunk) = conn.pop_send_chunk(max);
-            if n == 0 {
-                return Ok(());
-            }
-            buf[..n].copy_from_slice(&chunk[..n]);
-            let seq = conn.snd_nxt;
-            let seg = conn.build_segment(
-                TcpFlags::ACK.union(TcpFlags::PSH),
-                seq,
-                conn.rcv_nxt,
-                &buf[..n],
-                false,
-                false,
-            );
-            conn.snd_nxt = conn.snd_nxt.wrapping_add(n as u32);
-            conn.record_unacked(seq, &buf[..n], false, false, now);
-            (seg, n, conn.remote.addr)
-        };
-        self.transmit_tcp_at(now, index, dst, &seg, &buf[..n])
+            };
+            self.transmit_tcp_at(now, index, dst, &seg, &buf[..n])?;
+        }
+        Ok(())
     }
 
     /// Like [`Self::transmit_raw`], but ARP miss defers to a later poll instead of failing the driver.
@@ -610,7 +853,7 @@ impl<L: NetworkLink> TcpTransport<L> {
         now: u64,
         index: usize,
         dst: Ipv4Addr,
-        seg: &crate::tcp::segment::TcpSegment,
+        seg: &TcpSegment,
         payload: &[u8],
     ) -> Result<(), NetworkError> {
         match self.transmit_raw(now, dst, seg, payload) {
@@ -626,7 +869,7 @@ impl<L: NetworkLink> TcpTransport<L> {
         &mut self,
         now: u64,
         dst: Ipv4Addr,
-        seg: &crate::tcp::segment::TcpSegment,
+        seg: &TcpSegment,
         payload: &[u8],
     ) -> Result<(), NetworkError> {
         let src = self.stack.our_ip();

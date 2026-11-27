@@ -392,38 +392,49 @@ Non-UDP `Inbound` from `L3Stack::poll` is ignored by UDP `poll` today; #88 will 
 
 ## M7.4c TCP
 
-Issue #125 adds a **client-only** TCP transport in `network/src/tcp/` over [`L3Stack`](network/src/stack.rs). UDP inbound on the same stack is ignored here; lane #88 will fan out `Inbound` to UDP and TCP dispatchers.
+Issue #125 added the TCP transport in `network/src/tcp/` over [`L3Stack`](network/src/stack.rs); #221 stage F made it reliable and added passive open. UDP inbound on the same stack is ignored here; lane #88 will fan out `Inbound` to UDP and TCP dispatchers.
 
 ### Supported subset
 
-- Active open only (`SynSent` → `Established`); no `LISTEN` / `SYN-RCVD`.
-- In-order delivery: segments must arrive with `seq == rcv_nxt`; out-of-order segments are dropped and counted.
-- **Server-first data:** payload piggybacked on the SYN-ACK is accepted at `IRS + 1`; non-SYN segments in `SynSent` are dropped (RFC 793). Every accepted segment is ACKed even while guest data is unacknowledged, and unacceptable (duplicate / out-of-window) data or FIN segments are answered with an ACK. M9 acceptance adds fixture TCP **4002** (`M9BannerService`): banner on accept, guest `connect` → `nanosleep(100 ms)` → `recv` byte-exact (`[M9.P] banner ok`). HTTP on **4001** (`M9HttpService`) answers only after the guest's whole request head has arrived (see [Fixture peer](#fixture-peer-xtask)).
-- Stop-and-go: at most **one** unacknowledged data segment in flight.
-- Fixed RTO ([`TCP_RTO_TICKS`](../network/src/tcp/conn.rs)); separate connect timeout ([`TCP_CONNECT_TIMEOUT_TICKS`](../network/src/tcp/conn.rs)). Data-phase RTO exhaustion uses [`TCP_MAX_RETRIES`](../network/src/tcp/conn.rs); `SynSent` retries until connect timeout.
-- TCP options on the wire: EOL, NOP, MSS (kind 2, len 4) only; MSS is sent on SYN only.
+- **Active and passive open.** `connect` goes `SynSent` → `Established`. `listen(owner, port)` returns a `ListenerId` (at most [`MAX_TCP_LISTENERS`](../network/src/tcp/transport.rs) = 4); a SYN to that port on our address starts a `SynReceived` connection owned by the listener's holder, answered with SYN-ACK (MSS option) and retransmitted with backoff up to [`TCP_SYN_ACK_RETRIES`](../network/src/tcp/conn.rs). A peer SYN retransmission gets the same SYN-ACK again; an acceptable RST drops the half-open connection quietly. `accept(listener, owner)` hands out established connections oldest first (`Ok(None)` when none is ready); until then their slot ids are refused with `NotFound`. Each listener holds at most [`TCP_LISTEN_BACKLOG`](../network/src/tcp/transport.rs) = 4 connections not yet accepted, half-open ones included, so a SYN flood cannot fill the table; more SYNs are dropped and counted (`dropped_syn_backlog`). `close_listener` and holder exit reset connections nobody accepted and keep accepted ones. Segments for no connection and no listener are dropped without a RST. Listening is a transport API only: the network service protocol does not expose it yet.
+- **Send side.** The send ring holds every byte from `snd_una` on, so retransmissions re-read it. Several segments may be in flight, bounded by the peer's window and a congestion window (RFC 5681 slow start and congestion avoidance; initial window `min(4·MSS, max(2·MSS, 4380))`). Three duplicate ACKs fast-retransmit the segment at `snd_una`. The peer's window follows the RFC 793 SND.WL1/WL2 rule. `close` queues the FIN behind any unsent data.
+- **Retransmission timeout.** RFC 6298: SRTT/RTTVAR from one timed segment at a time, Karn's rule (no sample from a retransmitted segment), RTO clamped to [`TCP_RTO_MIN_MS`, `TCP_RTO_MAX_MS`], doubled on each expiry. A timeout collapses the congestion window to one segment and resends from `snd_una` (go-back-N). [`TCP_MAX_RETRIES`](../network/src/tcp/conn.rs) expiries without a new ACK fail the connection with `Timeout`; `SynSent` retries until the connect timeout instead. Timers are milliseconds converted with the tick period the service passes to `set_tick_period_ns`.
+- **Zero window.** A closed peer window with data waiting arms the persist timer. A probe is an ACK carrying `snd_una - 1`, which the peer must answer with its window, so no probe byte is left in flight. Probes back off up to the maximum RTO and continue for as long as the peer answers; `TCP_MAX_RETRIES` unanswered probes fail the connection.
+- **Receive window and reassembly.** The advertised window is the receive ring's free space, so its right edge never moves left. Segments are checked against it (RFC 793 §3.9) and trimmed on both edges. Data ahead of `rcv_nxt` inside the window is written into the ring's free space at its offset and tracked as at most [`TCP_MAX_OOO_RANGES`](../network/src/tcp/conn.rs) = 4 ranges (a segment needing a fifth is dropped); an out-of-order FIN is remembered. Each out-of-order segment draws an immediate duplicate ACK. When the gap fills, the held bytes become readable at once. After the application reads, a window update goes out once the right edge has grown by `min(MSS, ring / 2)` (receiver silly-window avoidance); `next_timer_deadline` reports it as due now.
+- **Segment checks.** Segments with no sequence space (pure ACKs) are accepted from one maximum window below `rcv_nxt` to the right edge, so a peer that rewound to retransmit still gets its ACKs through; those below `rcv_nxt` (zero-window probes) are answered. An ACK above `snd_max` or more than a maximum window below `snd_una` is dropped with a challenge ACK (RFC 5961 §5.2). RST needs the exact `rcv_nxt` (in `SynSent`, an ACK of our SYN); an in-window SYN gets a challenge ACK. Pure ACKs carry `snd_max`.
+- **Server-first data:** payload piggybacked on the SYN-ACK is accepted at `IRS + 1`; non-SYN segments in `SynSent` are dropped (RFC 793). Every accepted segment is ACKed even while guest data is unacknowledged, and unacceptable (duplicate / out-of-window) segments are answered with an ACK. M9 acceptance adds fixture TCP **4002** (`M9BannerService`): banner on accept, guest `connect` → `nanosleep(100 ms)` → `recv` byte-exact (`[M9.P] banner ok`). HTTP on **4001** (`M9HttpService`) answers only after the guest's whole request head has arrived (see [Fixture peer](#fixture-peer-xtask)).
+- TCP options on the wire: EOL, NOP, MSS (kind 2, len 4) only; MSS is sent on SYN and SYN-ACK only. A peer SYN without MSS gets the RFC 1122 default of 536.
 - Advertised MSS = [`MAX_TCP_PAYLOAD`](../network/src/tcp/segment.rs) = `MAX_L3_PAYLOAD_BYTES - 40` (1460 on Ethernet MTU).
+
+Host tests in `network/src/tcp/reliability_tests.rs` script every segment from a raw peer, and run two transports against each other through a relay that drops and reorders frames (`soak_many_seeds`, ignored by default, covers 999 seeds up to 24% loss and 19% reordering).
 
 ### Constants (authoritative: `network/src/tcp/`)
 
 | Constant | Value | Role |
 |----------|------:|------|
 | `MAX_TCP_CONNECTIONS` | 32 | Table slots (= `SessionId` index) |
-| `TCP_SEND_BUFFER_BYTES` / `TCP_RECV_BUFFER_BYTES` | 4096 each | Per-connection rings |
-| `TCP_MAX_RETRIES` | 5 | Data-phase RTO cap |
-| `TCP_RTO_TICKS` | 50 | Retransmission interval (ticks) |
-| `TCP_TIME_WAIT_TICKS` | 200 | TIME-WAIT before slot free |
-| `TCP_CONNECT_TIMEOUT_TICKS` | 500 | Active-open timeout |
-| Ephemeral ports | 49152–65535 | Random start, next free ([Randomness](#randomness-221)) |
+| `MAX_TCP_LISTENERS` / `TCP_LISTEN_BACKLOG` | 4 / 4 | Listening ports; unaccepted connections per listener |
+| `TCP_SEND_BUFFER_BYTES` / `TCP_RECV_BUFFER_BYTES` | 4096 each | Per-connection rings (send ring includes bytes in flight) |
+| `TCP_MAX_OOO_RANGES` | 4 | Out-of-order ranges held per connection |
+| `TCP_MAX_RETRIES` | 8 | RTO expiries (or unanswered zero-window probes) before `Timeout` |
+| `TCP_SYN_ACK_RETRIES` | 4 | SYN-ACK retransmissions for a passive open |
+| `TCP_RTO_INITIAL_MS` / `TCP_RTO_MIN_MS` / `TCP_RTO_MAX_MS` | 100 / 50 / 4000 | Retransmission timeout before a sample, floor, ceiling (with backoff) |
+| `TCP_DUP_ACK_THRESHOLD` | 3 | Duplicate ACKs before a fast retransmit |
+| `TCP_TIME_WAIT_MS` | 200 | TIME-WAIT before slot free |
+| `TCP_CONNECT_TIMEOUT_MS` | 500 | Active-open timeout |
+| Ephemeral ports | 49152–65535 | Random start, next free, never a listening port ([Randomness](#randomness-221)) |
+
+The RTO values are lab-network defaults, below RFC 6298's 1 s floor; real-network values arrive with launch-time configuration.
 
 **ISS:** RFC 6528 from the transport's `NetRng` ([Randomness](#randomness-221)).
 
-### Client state diagram (text)
+### State diagram (text)
 
 ```text
-Closed → SynSent → Established → FinWait1 → FinWait2 → TimeWait → Closed
-                              ↘ CloseWait (peer FIN) → LastAck → Closed
-Any phase → Reset (RST / timeout / abort)
+Closed → SynSent ─────→ Established → FinWait1 → FinWait2 → TimeWait → Closed
+listener SYN → SynReceived ↗      │        ↘ Closing (simultaneous close) ↗
+                                  ↘ CloseWait (peer FIN) → LastAck → Closed
+Any phase → Reset (RST / timeout / abort); SynReceived + RST or SYN-ACK retries → Closed
 ```
 
 Terminal states release send/recv buffers and the table slot (after TIME-WAIT expiry where applicable).
@@ -438,13 +449,14 @@ Terminal states release send/recv buffers and the table slot (after TIME-WAIT ex
 | `NotFound` | Free / unknown slot |
 | `Unreachable` | `connect`/`send` ARP miss (caller should `poll` and retry) |
 | `QueueFull` | Send ring full (non-blocking) |
-| `Timeout` | Connect or data RTO exhausted |
+| `Timeout` | Connect timeout, data RTO or zero-window probes exhausted |
+| `InvalidRequest` | `listen` on port 0 or on a port already listening or bound |
 | `Reset` | Peer RST |
 | `Closed` | Peer FIN received and recv buffer drained |
 
 ### Memory footprint (per connection, order-of-magnitude)
 
-~8 KiB rings + ~1.5 KiB unacked snapshot + connection metadata; **32 slots** heap-allocated when `feature = "alloc"` (host tests / service).
+~8 KiB rings + connection metadata (bytes in flight stay in the send ring; out-of-order bytes in the receive ring); **32 slots** heap-allocated when `feature = "alloc"` (host tests / service).
 
 ### Restart and holder exit
 
@@ -558,7 +570,7 @@ The pass boot runs twice, the second time on the [impaired wire](#impaired-wire-
 - DNS: the first copy of each query ID is dropped unanswered. Before the answer to the resend, the peer sends five forgeries carrying the decoy address `10.77.0.66`: wrong ID, `TC=1`, cut two bytes short, and a well-formed answer whose A owner is `forged.fixture.test` (all from port 53), plus a well-formed answer from port 5353. The real answer is held back 20 ms so every forgery reaches the guest first. A guest that prints `10.77.0.66` accepted a forgery.
 - ARP: on the guest's request for the peer, the wire sends one gratuitous ARP reply for that IP from `02:21:00:00:00:66` and holds that request for 100 ms. If the guest addresses any frame to that MAC, the request is dropped and no real reply is ever sent. Otherwise the held request is delivered once, so a guest that ignored the poison still learns the peer. Count: one poison per impaired boot.
 - TCP, guest → peer: the first SYN and the first data segment of each connection are dropped.
-- TCP, peer → guest: the peer's first data segment on each connection is replaced by a blind RST (sequence one past the expected value), then the segment split in two and delivered second half first, then the first half, the second half again, and a stale copy of the first half. The re-delivery is part of the script, so recovery does not depend on the peer's own retransmission timer (≥ 1 s in smoltcp, longer than the guest's 2 s TLS phase budget allows for safely). This proves out-of-order segments are dropped and the in-order copy accepted; there is still no reassembly.
+- TCP, peer → guest: the peer's first data segment on each connection is replaced by a blind RST (sequence one past the expected value), then the segment split in two and delivered second half first, then the first half, the second half again, and a stale copy of the first half. The re-delivery is part of the script, so recovery does not depend on the peer's own retransmission timer (≥ 1 s in smoltcp, longer than the guest's 2 s TLS phase budget allows for safely). Since #221 stage F the guest holds the second half until the first arrives, and the re-delivered copies are trimmed as duplicates.
 
 Log lines: `[FIX ] impair dns query dropped id=…`, `[FIX ] impair dns forged replies=5`, `[FIX ] impair arp poison reply`, `[FIX ] impair tcp SynDropped|GuestDataDropped|FixtureDataScripted`.
 
