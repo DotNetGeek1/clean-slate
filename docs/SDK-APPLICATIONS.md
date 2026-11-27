@@ -76,6 +76,29 @@ network = false
 
 The manifest is both a packaging declaration and a security contract.
 
+### Heap budget
+
+A native app gets a heap by installing the runtime's allocator and asking for pages in its manifest row (`ServiceSpec::memory_pages` today, #356):
+
+```rust
+#[global_allocator]
+static HEAP: clean_slate_runtime::heap::RuntimeHeap = clean_slate_runtime::heap::RuntimeHeap::new();
+```
+
+The budget is a hard page count the kernel sets when it starts the row; the app cannot raise it. To pick one:
+
+- **At least one chunk.** Small allocations (up to 2 KiB) come from 16-page (64 KiB) chunks, so any heap at all needs 16 pages.
+- **Add the largest live set.** Sum what the app holds at its busiest. Allocations over 2 KiB take whole pages of their own.
+- **Add the overlap from growing.** Growing a large `Vec` or `VecDeque` maps the new block before it frees the old one, so the last growth needs both at once. Growing towards a known limit (`try_reserve_exact` up to the cap) keeps that overlap small.
+- **Round up with room to spare.** Pages are cheap until the address space limit (`NATIVE_MEMORY_MAX_BUDGET_PAGES`, 64 MiB). Running out is the thing to avoid.
+
+The shipped rows give the desktop shell and the playground 32 pages, two chunks for a window list and little else. The terminal gets 768 pages (3 MiB) for 1,000 rows of scrollback: about 1 MiB of rows, plus 0.75 MiB while the last growth copies, plus a chunk.
+
+When the heap refuses an allocation, what happens depends on how the app asked:
+
+- A fallible request (`try_reserve`, `try_reserve_exact`) gets an error and the app decides. The terminal reuses its oldest scrollback row instead of growing, so a full budget costs history, not the window.
+- Anything else ends in the app's `#[alloc_error_handler]`. Call `clean_slate_runtime::heap::exit_out_of_memory` there. It writes one console line, `<tag> exit reason=out-of-memory bytes=N pages=USED/BUDGET`, and exits normally, so the row's restart policy starts a fresh instance. The binary is built with `-Z build-std=core,alloc,compiler_builtins`.
+
 ## Typed capabilities
 
 Rust makes it practical to express authority in the type system.

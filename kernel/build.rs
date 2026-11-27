@@ -855,7 +855,8 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 }
 
 /// Package and `-Z build-std` set for an embedded userspace bin.
-/// Storage and network are not the supervisor package, and they need `alloc`.
+/// Storage and network are not the supervisor package, and they need `alloc`, as do the
+/// desktop shell, playground and terminal, which run on the runtime heap (#356).
 fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
     match bin_name {
         "clean-slate-supervisor-userspace"
@@ -875,10 +876,14 @@ fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
         }
         "clean-slate-compositor-userspace" => ("clean-slate-compositor", "core,compiler_builtins"),
         "clean-slate-desktop-shell-userspace" => {
-            ("clean-slate-desktop-shell", "core,compiler_builtins")
+            ("clean-slate-desktop-shell", "core,alloc,compiler_builtins")
         }
-        "clean-slate-playground-userspace" => ("clean-slate-playground", "core,compiler_builtins"),
-        "clean-slate-terminal-userspace" => ("clean-slate-terminal", "core,compiler_builtins"),
+        "clean-slate-playground-userspace" => {
+            ("clean-slate-playground", "core,alloc,compiler_builtins")
+        }
+        "clean-slate-terminal-userspace" => {
+            ("clean-slate-terminal", "core,alloc,compiler_builtins")
+        }
         _ => panic!("unexpected userspace bin {bin_name}"),
     }
 }

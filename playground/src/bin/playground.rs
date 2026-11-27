@@ -10,23 +10,35 @@
 
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
+extern crate alloc;
+
+use core::alloc::Layout;
 use core::ptr::addr_of_mut;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use clean_slate_graphics::abi::display::{DISPLAY_ABI_VERSION, DISPLAY_SUBOP_FIND_HANDLE};
 use clean_slate_graphics::abi::input::{INPUT_ABI_VERSION, INPUT_SUBOP_FIND_HANDLE};
-use clean_slate_native_abi::desktop::ConsoleLine;
+use clean_slate_native_abi::desktop::{ConsoleLine, NO_CONSOLE};
 use clean_slate_native_abi::is_status;
 use clean_slate_playground::host::{allocate_buffers, Client};
 use clean_slate_playground::launch::{PlaygroundBootstrap, BOOTSTRAP_ADDRESS};
 use clean_slate_playground::{diag, ExitReason, Outcome, Session};
 use clean_slate_runtime::console::{Console, ConsoleStream};
+use clean_slate_runtime::heap::{exit_out_of_memory, RuntimeHeap};
 use clean_slate_runtime::port::{Deadline, Wait};
 use clean_slate_runtime::{process, Error, Kernel, Syscalls};
 use clean_slate_ui::QualityTier;
 
 const SYSCALL_NR_DISPLAY: u64 = 18;
 const SYSCALL_NR_INPUT: u64 = 19;
+
+#[global_allocator]
+static HEAP: RuntimeHeap = RuntimeHeap::new();
+
+/// The console handle the out-of-memory line goes to, once the launch page is read.
+static LOG_HANDLE: AtomicU64 = AtomicU64::new(NO_CONSOLE);
 
 /// Kept out of the user stack, whose size is the launch policy's choice.
 static mut SESSION: Session = Session::new(QualityTier::Q1);
@@ -144,6 +156,7 @@ pub extern "C" fn _start() -> ! {
     } else {
         QualityTier::Q1
     };
+    LOG_HANDLE.store(boot.console().unwrap_or(NO_CONSOLE), Ordering::Relaxed);
     // SAFETY: single-threaded process; this is the only reference to `SESSION`.
     let session = unsafe { &mut *addr_of_mut!(SESSION) };
     *session = Session::new(tier);
@@ -151,6 +164,12 @@ pub extern "C" fn _start() -> ! {
     greet_console();
     run(&boot, session, tier);
     process::exit();
+}
+
+#[alloc_error_handler]
+fn out_of_memory(layout: Layout) -> ! {
+    let handle = LOG_HANDLE.load(Ordering::Relaxed);
+    exit_out_of_memory((handle != NO_CONSOLE).then_some(handle), "[APP ]", layout)
 }
 
 #[panic_handler]

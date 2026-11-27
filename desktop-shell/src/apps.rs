@@ -7,7 +7,8 @@
 //! asks init to start it. Nothing here does I/O: the session sends `ActivateWindow` and the
 //! binary sends the launcher's `START`.
 
-use clean_slate_graphics::limits::MAX_WINDOWS;
+use alloc::vec::Vec;
+
 use clean_slate_graphics::protocol::Event;
 use clean_slate_graphics::window::WindowHandle;
 use clean_slate_native_abi::launcher::{AppEntry, AppName, AppState, LauncherEvent};
@@ -30,10 +31,13 @@ struct Window {
 }
 
 /// Launcher rows in the order init first listed them, and the open windows.
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// The window list is on the heap (#356): it holds every window the compositor announces, in
+/// the order it announced them, with no limit of its own.
+#[derive(Clone, Debug, Default)]
 pub struct Apps {
     rows: [Option<AppEntry>; RAIL_APPS],
-    windows: [Option<Window>; MAX_WINDOWS],
+    windows: Vec<Window>,
     focused: Option<WindowHandle>,
 }
 
@@ -41,9 +45,14 @@ impl Apps {
     pub const fn new() -> Self {
         Self {
             rows: [None; RAIL_APPS],
-            windows: [None; MAX_WINDOWS],
+            windows: Vec::new(),
             focused: None,
         }
+    }
+
+    /// Open windows the compositor has announced.
+    pub fn window_count(&self) -> usize {
+        self.windows.len()
     }
 
     /// Folds a launcher event in; `true` when the rail may look different.
@@ -59,29 +68,19 @@ impl Apps {
     pub fn on_window(&mut self, event: &Event) -> bool {
         match *event {
             Event::WindowAdded { window, pid } => {
-                if self.windows.iter().flatten().any(|w| w.handle == window) {
+                if self.windows.iter().any(|w| w.handle == window) {
                     return false;
                 }
-                match self.windows.iter_mut().find(|w| w.is_none()) {
-                    Some(slot) => {
-                        *slot = Some(Window {
-                            handle: window,
-                            pid,
-                        });
-                        true
-                    }
-                    None => false,
-                }
+                self.windows.push(Window {
+                    handle: window,
+                    pid,
+                });
+                true
             }
             Event::WindowRemoved { window } => {
-                let mut removed = false;
-                for slot in &mut self.windows {
-                    if slot.is_some_and(|w| w.handle == window) {
-                        *slot = None;
-                        removed = true;
-                    }
-                }
-                removed
+                let before = self.windows.len();
+                self.windows.retain(|w| w.handle != window);
+                self.windows.len() != before
             }
             Event::WindowFocused { window } => {
                 let changed = self.focused != window;
@@ -173,7 +172,7 @@ impl Apps {
             return None;
         }
         let mut first = None;
-        for window in self.windows.iter().flatten().filter(|w| w.pid == row.pid) {
+        for window in self.windows.iter().filter(|w| w.pid == row.pid) {
             if Some(window.handle) == self.focused {
                 return Some(window.handle);
             }
@@ -184,12 +183,7 @@ impl Apps {
 
     fn owner_of(&self, window: Option<WindowHandle>) -> Option<usize> {
         let window = window?;
-        let pid = self
-            .windows
-            .iter()
-            .flatten()
-            .find(|w| w.handle == window)?
-            .pid;
+        let pid = self.windows.iter().find(|w| w.handle == window)?.pid;
         self.rows
             .iter()
             .position(|row| row.is_some_and(|row| row.pid != 0 && row.pid == pid))
@@ -363,5 +357,31 @@ mod tests {
         }
         assert_eq!(apps.len(), RAIL_APPS);
         assert_eq!(apps.rail().len(), RAIL_APPS);
+    }
+
+    #[test]
+    fn the_window_list_has_no_fixed_limit() {
+        use clean_slate_graphics::limits::MAX_WINDOWS;
+        let mut apps = listed();
+        let count = MAX_WINDOWS as u32 * 3;
+        for handle in 1..=count {
+            assert!(apps.on_window(&Event::WindowAdded {
+                window: WindowHandle(handle),
+                pid: 40,
+            }));
+        }
+        assert_eq!(apps.window_count(), count as usize);
+        // The newest window, past the compositor's old limit, still belongs to its app.
+        apps.on_window(&Event::WindowFocused {
+            window: Some(WindowHandle(count)),
+        });
+        assert_eq!(apps.rail().selected, Some(0));
+        assert!(apps.on_window(&Event::WindowRemoved {
+            window: WindowHandle(count),
+        }));
+        assert!(!apps.on_window(&Event::WindowRemoved {
+            window: WindowHandle(count),
+        }));
+        assert_eq!(apps.window_count(), count as usize - 1);
     }
 }

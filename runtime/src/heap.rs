@@ -18,17 +18,25 @@
 //! ```
 //!
 //! and a manifest row whose `memory_pages` covers at least one chunk.
+//!
+//! An allocation the program cannot do without (anything but a `try_reserve`) that the heap
+//! refuses ends in the program's `#[alloc_error_handler]`. Native apps call
+//! [`exit_out_of_memory`] there: one console line, then a normal exit, so the row's restart
+//! policy starts a fresh instance instead of the kernel tearing down a faulted one.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::ptr::{null_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use clean_slate_native_abi::desktop::ConsoleLine;
 use clean_slate_native_abi::memory::{
-    MEMORY_PAGE_BYTES, MEMORY_SUBOP_MAP, MEMORY_SUBOP_UNMAP, SYSCALL_NR_MEMORY,
+    MemoryUsage, MEMORY_PAGE_BYTES, MEMORY_SUBOP_MAP, MEMORY_SUBOP_QUERY, MEMORY_SUBOP_UNMAP,
+    SYSCALL_NR_MEMORY,
 };
 
-use crate::{Kernel, Syscalls};
+use crate::console::Console;
+use crate::{process, Kernel, Syscalls};
 
 pub const PAGE_BYTES: usize = MEMORY_PAGE_BYTES as usize;
 /// Pages mapped at a time for small allocations.
@@ -360,6 +368,39 @@ impl Default for RuntimeHeap {
     }
 }
 
+/// This process's pages in use and its budget (syscall 23 `QUERY`); `None` when refused.
+pub fn usage<S: Syscalls>(sys: &mut S) -> Option<MemoryUsage> {
+    let raw = sys.syscall(SYSCALL_NR_MEMORY, [MEMORY_SUBOP_QUERY, 0, 0, 0, 0, 0]);
+    MemoryUsage::decode(raw)
+}
+
+/// `<tag> exit reason=out-of-memory bytes=N pages=USED/BUDGET`, the line a native app writes
+/// before it exits on a refused allocation (one console message; the kernel ends the line).
+/// `pages=?` when the budget could not be read.
+pub fn out_of_memory_line(tag: &str, layout: Layout, usage: Option<MemoryUsage>) -> ConsoleLine {
+    let bytes = layout.size();
+    match usage {
+        Some(usage) => ConsoleLine::format(format_args!(
+            "{tag} exit reason=out-of-memory bytes={bytes} pages={}/{}",
+            usage.used_pages, usage.budget_pages
+        )),
+        None => ConsoleLine::format(format_args!(
+            "{tag} exit reason=out-of-memory bytes={bytes} pages=?"
+        )),
+    }
+}
+
+/// What a native app's `#[alloc_error_handler]` does: writes [`out_of_memory_line`] to
+/// `console` (when it has one) and exits normally, so the row's restart policy brings the app
+/// back. Nothing here allocates.
+pub fn exit_out_of_memory(console: Option<u64>, tag: &str, layout: Layout) -> ! {
+    if let Some(handle) = console {
+        let line = out_of_memory_line(tag, layout, usage(&mut Kernel));
+        let _ = Console::new(handle).send(&mut Kernel, line.as_bytes());
+    }
+    process::exit();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,6 +603,41 @@ mod tests {
             GlobalAlloc::dealloc(&heap, zeroed, layout);
         }
         assert_eq!(heap.stats().large_pages, 0);
+    }
+
+    #[test]
+    fn the_out_of_memory_line_names_the_request_and_the_budget() {
+        let usage = MemoryUsage {
+            used_pages: 510,
+            budget_pages: 512,
+        };
+        let line = out_of_memory_line("[TERM]", layout(12_288, 8), Some(usage));
+        assert_eq!(
+            line.as_str(),
+            "[TERM] exit reason=out-of-memory bytes=12288 pages=510/512"
+        );
+        let line = out_of_memory_line("[SHELL]", layout(64, 8), None);
+        assert_eq!(
+            line.as_str(),
+            "[SHELL] exit reason=out-of-memory bytes=64 pages=?"
+        );
+    }
+
+    #[test]
+    fn usage_is_syscall_23_query() {
+        let mut kernel = FakeKernel::new();
+        let usage = MemoryUsage {
+            used_pages: 16,
+            budget_pages: 32,
+        };
+        kernel.answer_next(SYSCALL_NR_MEMORY, usage.encode());
+        assert_eq!(super::usage(&mut kernel), Some(usage));
+        assert_eq!(
+            kernel.last_call(),
+            (SYSCALL_NR_MEMORY, [MEMORY_SUBOP_QUERY, 0, 0, 0, 0, 0])
+        );
+        kernel.answer_next(SYSCALL_NR_MEMORY, STATUS_ENOSPC);
+        assert_eq!(super::usage(&mut kernel), None);
     }
 
     #[test]
