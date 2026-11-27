@@ -68,11 +68,19 @@ jobs:
               # The app and shell exit reasons after the compositor fault, per machine.
               grep -h "exit reason=" "target/xtask-artifacts/$m/serial.log" 2>/dev/null | sed "s/^/$run $m: /" >> soak/exit-reasons.txt || true
             done
-            echo "$run $result ${secs}s $(grep -m1 -E 'did not|FAIL|error' "soak/$run.log" || true)" | tee -a soak/summary.txt
+            echo "$run $result ${secs}s" | tee -a soak/summary.txt
+            if [ "$result" = FAIL ]; then
+              # The lane's own failure message: the log tail without the console stats lines.
+              echo "::group::$run failure (last 40 lines)"
+              grep -v '^\[SVC \] console input so far' "soak/$run.log" | tail -n 40
+              echo "::endgroup::"
+              grep -v '^\[SVC \] console input so far' "soak/$run.log" | tail -n 3 | sed "s/^/  $run: /" >> soak/summary.txt
+            fi
           done
           echo "shard ${{ matrix.shard }}: pass=$pass fail=$fail" | tee -a soak/summary.txt
           echo "### shard ${{ matrix.shard }}: $pass/$RUNS_PER_SHARD passed" >> "$GITHUB_STEP_SUMMARY"
           sed 's/^/    /' soak/summary.txt >> "$GITHUB_STEP_SUMMARY"
+          echo "::group::exit reasons"; cat soak/exit-reasons.txt 2>/dev/null || true; echo "::endgroup::"
           [ "$fail" -eq 0 ]
 
       - name: Upload soak logs
