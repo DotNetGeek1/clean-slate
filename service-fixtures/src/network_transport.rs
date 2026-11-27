@@ -17,6 +17,11 @@ pub const NETWORK_SERVICE_LAUNCH_OFFSET: u64 = 1024;
 /// User address of the [`NetworkServiceLaunch`] block.
 pub const NETWORK_SERVICE_LAUNCH_ADDRESS: u64 =
     NETWORK_SERVICE_BOOTSTRAP_ADDRESS + NETWORK_SERVICE_LAUNCH_OFFSET;
+/// User address of the service's trust anchors: a `clean_slate_network::config::TrustAnchors`
+/// store on [`NETWORK_SERVICE_TRUST_PAGES`] read-only pages of their own (#221), clear of the
+/// bootstrap page and the stack above it.
+pub const NETWORK_SERVICE_TRUST_ADDRESS: u64 = 0x0000_4000_0030_0000;
+pub const NETWORK_SERVICE_TRUST_PAGES: usize = clean_slate_network::config::TRUST_STORE_PAGES;
 
 pub const NETWORK_CAPABILITY_VERSION: u16 = 1;
 
@@ -237,17 +242,17 @@ impl NetworkProbe {
 
 /// What the launcher hands the network image beside its [`NetworkServiceBootstrap`], at
 /// [`NETWORK_SERVICE_LAUNCH_OFFSET`] in the same page (#221 stage D): the network to bring
-/// up, the certificate authorities to trust, and, for client-mode probes, what to probe.
+/// up and, for client-mode probes, what to probe. The certificate authorities to trust are on
+/// their own pages ([`NETWORK_SERVICE_TRUST_ADDRESS`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetworkServiceLaunch {
     pub network: clean_slate_network::config::NetworkConfig,
     pub probe: NetworkProbe,
-    pub trust: clean_slate_network::config::TrustAnchors,
 }
 
 const _: () = assert!(
-    core::mem::size_of::<NetworkServiceLaunch>() == 88 + 204 + 2_576,
+    core::mem::size_of::<NetworkServiceLaunch>() == 88 + 204,
     "no padding: the launch block crosses the user/kernel boundary as bytes"
 );
 const _: () = assert!(

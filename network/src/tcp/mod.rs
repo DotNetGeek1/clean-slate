@@ -32,7 +32,8 @@ pub use test_peer::TestPeer;
 
 #[cfg(any(test, feature = "host-tls-peer"))]
 pub use tls_test_peer::{
-    load_fixture_server_config, server_config_from_der, TlsPeerCert, TlsPeerFault, TlsTestPeer,
+    load_fixture_server_config, server_config_from_chain, server_config_from_der, TlsPeerCert,
+    TlsPeerFault, TlsTestPeer,
 };
 
 #[cfg(all(test, feature = "alloc"))]

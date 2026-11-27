@@ -16,7 +16,7 @@ use clean_slate_network::addr::{
     BoundedHostname, EtherType, IpProtocol, Ipv4Addr, MacAddr, SocketAddrV4,
 };
 use clean_slate_network::buffer::FrameBuf;
-use clean_slate_network::config::{ServiceNetwork, TrustAnchorSet};
+use clean_slate_network::config::{ServiceNetwork, TrustAnchorSet, TrustAnchors};
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
 use clean_slate_network::dhcp::{DhcpClient, DhcpEvent};
 use clean_slate_network::dns::{DnsResolver, ResolveOutcome};
@@ -34,8 +34,9 @@ use clean_slate_network::tcp::TcpState;
 use clean_slate_network::tcp::TcpTransport;
 use clean_slate_network::tls::{
     tls_transaction, TlsConfig, TlsError, TlsTransactionBudget, TlsTransactionClock,
-    TLS_RECORD_BUFFER_BYTES,
+    TLS_RECORD_BUFFER_BYTES, TLS_SCRATCH_PAGES,
 };
+use clean_slate_runtime::heap::{ArenaPages, Heap};
 use clean_slate_service_fixtures::ready_detail::NetworkReadyDetail;
 use clean_slate_service_fixtures::{
     AllowAllAuthorizer, NetworkProbe, NetworkService, NetworkServiceBootstrap,
@@ -47,10 +48,11 @@ use clean_slate_service_fixtures::{
     NETWORK_SERVICE_MODE_INFLIGHT_ARM, NETWORK_SERVICE_MODE_STALE_CLOSE,
     NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, NETWORK_SERVICE_NEXT_METADATA_BYTES,
     NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_SERVICE_RESULT_ERROR, NETWORK_SERVICE_RESULT_OK,
-    NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
-    NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
-    NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
-    NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
+    NETWORK_SERVICE_TRUST_ADDRESS, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT,
+    NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY,
+    NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
+    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK,
+    NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
 };
 use core::alloc::{GlobalAlloc, Layout};
 use core::future::Future;
@@ -83,35 +85,83 @@ static mut HEAP: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 static TLS_SCRATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
 static TLS_HEAP_CHECKPOINT: AtomicUsize = AtomicUsize::new(0);
 
-unsafe impl GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let align_mask = layout.align().saturating_sub(1);
-        let mut current = NEXT_HEAP_OFFSET.load(Ordering::Relaxed);
-        loop {
-            let aligned = current.saturating_add(align_mask) & !align_mask;
-            let next = match aligned.checked_add(layout.size()) {
-                Some(next) => next,
-                None => return ptr::null_mut(),
-            };
-            if next > HEAP_BYTES {
-                return ptr::null_mut();
-            }
-            match NEXT_HEAP_OFFSET.compare_exchange(
-                current,
-                next,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => {
-                    let heap = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-                    return unsafe { heap.add(aligned) };
-                }
-                Err(observed) => current = observed,
-            }
+/// TLS scratch heap (#221): what a TLS transaction allocates (`embedded-tls`'s certificate
+/// parser, RSA verification's big integers) comes from `clean_slate_runtime`'s size-class
+/// heap over these pages, only while the service loop polls the transaction
+/// ([`with_tls_scratch`]). The heap is reset once the transaction's future is dropped
+/// ([`drop_tls_future`]). The main heap never moves during a transaction, as before. Running
+/// out fails the allocation, which stops the service (`alloc_error`).
+#[repr(C, align(4096))]
+struct ScratchPages([u8; TLS_SCRATCH_PAGES * 4096]);
+
+static mut TLS_SCRATCH_PAGES_MEM: ScratchPages = ScratchPages([0; TLS_SCRATCH_PAGES * 4096]);
+static mut TLS_SCRATCH_HEAP: Heap<ArenaPages> = Heap::new(ArenaPages::empty());
+static TLS_SCRATCH_POLLING: AtomicBool = AtomicBool::new(false);
+
+/// Bumps `next` within `base[..cap]` for `layout`; null when it does not fit.
+fn bump(next: &AtomicUsize, base: *mut u8, cap: usize, layout: Layout) -> *mut u8 {
+    let align_mask = layout.align().saturating_sub(1);
+    let mut current = next.load(Ordering::Relaxed);
+    loop {
+        let aligned = current.saturating_add(align_mask) & !align_mask;
+        let end = match aligned.checked_add(layout.size()) {
+            Some(end) if end <= cap => end,
+            _ => return ptr::null_mut(),
+        };
+        match next.compare_exchange(current, end, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return unsafe { base.add(aligned) },
+            Err(observed) => current = observed,
         }
     }
+}
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+/// The scratch heap. The service is single-threaded and the allocator below is its only
+/// other user, never while this reference is held.
+fn tls_scratch_heap() -> &'static mut Heap<ArenaPages> {
+    unsafe { &mut *core::ptr::addr_of_mut!(TLS_SCRATCH_HEAP) }
+}
+
+/// An empty scratch heap over the scratch pages.
+fn reset_tls_scratch() {
+    let base = core::ptr::addr_of_mut!(TLS_SCRATCH_PAGES_MEM) as *mut u8;
+    // SAFETY: the pages are only ever handed out by this heap, and nothing from the previous
+    // heap is live (its only user, the TLS future, was dropped).
+    *tls_scratch_heap() = Heap::new(unsafe {
+        ArenaPages::new(core::ptr::NonNull::new_unchecked(base), TLS_SCRATCH_PAGES)
+    });
+}
+
+/// Runs `poll` (one poll of the TLS transaction) with allocations going to the scratch heap.
+fn with_tls_scratch<T>(poll: impl FnOnce() -> T) -> T {
+    TLS_SCRATCH_POLLING.store(true, Ordering::SeqCst);
+    let out = poll();
+    TLS_SCRATCH_POLLING.store(false, Ordering::SeqCst);
+    out
+}
+
+/// Drops the TLS transaction's future, then resets the scratch heap: only that future
+/// allocated from it, so nothing there is live any more.
+fn drop_tls_future<F>(future: &mut Pin<&mut Option<F>>) {
+    future.set(None);
+    reset_tls_scratch();
+}
+
+unsafe impl GlobalAlloc for BumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if TLS_SCRATCH_POLLING.load(Ordering::Relaxed) {
+            return tls_scratch_heap().allocate(layout);
+        }
+        let heap = core::ptr::addr_of_mut!(HEAP) as *mut u8;
+        bump(&NEXT_HEAP_OFFSET, heap, HEAP_BYTES, layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let scratch = tls_scratch_heap();
+        if scratch.source().contains(ptr) {
+            // SAFETY: the scratch heap handed out `ptr` for `layout`.
+            unsafe { scratch.deallocate(ptr, layout) };
+        }
+    }
 }
 
 #[alloc_error_handler]
@@ -158,6 +208,11 @@ fn bootstrap_mut() -> &'static mut NetworkServiceBootstrap {
 /// What the launcher handed this instance (#221 stage D). Read only.
 fn launch() -> &'static NetworkServiceLaunch {
     unsafe { &*(NETWORK_SERVICE_LAUNCH_ADDRESS as *const NetworkServiceLaunch) }
+}
+
+/// The launcher's trust anchors, on their own read-only pages (#221).
+fn trust_store() -> &'static TrustAnchors {
+    unsafe { &*(NETWORK_SERVICE_TRUST_ADDRESS as *const TrustAnchors) }
 }
 
 fn probe() -> &'static NetworkProbe {
@@ -927,7 +982,7 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     // #221 stage D: the network and the trust anchors come from the launcher. A launch block
     // that does not check out stops the service before it takes the device or is ready.
     let launch = launch();
-    let (network, anchors) = match (launch.network.parse(), launch.trust.set()) {
+    let (network, anchors) = match (launch.network.parse(), trust_store().set()) {
         (Ok(network), Ok(anchors)) => (network, anchors),
         _ => {
             bootstrap.result_code = NETWORK_SERVICE_RESULT_ERROR;
@@ -994,6 +1049,7 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             rng.fork(),
         );
         shared_tcp_transport_mut().set_tick_period_ns(tick_period_ns());
+        reset_tls_scratch();
         let heap_checkpoint = current_heap_offset();
         TLS_HEAP_CHECKPOINT.store(heap_checkpoint, Ordering::SeqCst);
         bootstrap.tls_heap_checkpoint = heap_checkpoint as u64;
@@ -1989,13 +2045,13 @@ fn pump_tls_job<F: Future<Output = TlsJobOutput>>(
         return false;
     };
     TLS_CLOCK.set_now(now);
-    let output = match future.poll(&mut Context::from_waker(Waker::noop())) {
+    let output = match with_tls_scratch(|| future.poll(&mut Context::from_waker(Waker::noop()))) {
         Poll::Ready(output) => Some(output),
         Poll::Pending if now >= TLS_CLOCK.phase_deadline() => None,
         Poll::Pending => return false,
     };
     // Dropping an unfinished transaction aborts its TCP connection.
-    tls.future.set(None);
+    drop_tls_future(&mut tls.future);
     let Some(active) = tls.active.take() else {
         return true;
     };
@@ -2037,7 +2093,7 @@ fn cancel_tls_job_for<F>(
     {
         return;
     }
-    tls.future.set(None);
+    drop_tls_future(&mut tls.future);
     if let Some(active) = tls.active.take() {
         let reset = NetworkResponse::Error {
             code: NetworkError::Reset.code(),

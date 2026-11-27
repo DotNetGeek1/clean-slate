@@ -75,7 +75,8 @@ use clean_slate_service_fixtures::manifest::{Grant, ServiceSpec};
 )))]
 use clean_slate_service_fixtures::{
     NetworkProbe, NetworkServiceBootstrap, NetworkServiceLaunch, NETWORK_SERVICE_BOOTSTRAP_ADDRESS,
-    NETWORK_SERVICE_ID, NETWORK_SERVICE_LAUNCH_OFFSET, NETWORK_UNAUTHORIZED_SERVICE_ID,
+    NETWORK_SERVICE_ID, NETWORK_SERVICE_LAUNCH_OFFSET, NETWORK_SERVICE_TRUST_ADDRESS,
+    NETWORK_UNAUTHORIZED_SERVICE_ID,
 };
 #[cfg(not(any(
     feature = "m1-self-test",
@@ -1722,7 +1723,7 @@ const NETWORK_SERVICE_STACK_PAGES: u64 = 80;
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
-const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 302;
+const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 420;
 #[cfg(not(any(
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",
@@ -1853,8 +1854,32 @@ fn launch_network_userspace_with_bootstrap(
             };
             launch.network = crate::service::net_launch::network_config();
             launch.probe = probe;
-            crate::service::net_launch::fill_trust_anchors(&mut launch.trust)
-                .map_err(|_| "network trust anchors do not fit the launch block")?;
+            // The trust anchors, read-only, on pages of their own.
+            let trust = crate::service::net_launch::TRUST_STORE.as_bytes();
+            for (index, bytes) in trust.chunks(PAGE_SIZE as usize).enumerate() {
+                let frame = allocator
+                    .allocate_page()
+                    .ok_or("allocator could not provide a network trust page")?;
+                zero_page(frame);
+                // SAFETY: a fresh, zeroed, mapped kernel view of one page; `bytes` is at most
+                // a page.
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        phys_to_virt(frame) as *mut u8,
+                        bytes.len(),
+                    );
+                }
+                map_process_page(
+                    address_space,
+                    NETWORK_SERVICE_TRUST_ADDRESS + index as u64 * PAGE_SIZE,
+                    frame,
+                    PageTableFlags::PRESENT
+                        | PageTableFlags::NO_EXECUTE
+                        | PageTableFlags::USER_ACCESSIBLE,
+                    allocator,
+                )?;
+            }
             map_process_page(
                 address_space,
                 NETWORK_SERVICE_BOOTSTRAP_ADDRESS,

@@ -158,6 +158,8 @@ const BUMP_ALLOCATOR_FEATURES: &[&str] = &[
     "m5-crash-recovery-self-test",
     "m6-object-self-test",
     "m6-capabilities-self-test",
+    // The kernel-side TLS client: certificate parsing and RSA verification allocate (#221).
+    "m7-tls-self-test",
 ];
 
 fn emit_bump_allocator_cfg() {

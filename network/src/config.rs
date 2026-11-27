@@ -18,10 +18,14 @@ use crate::limits::MAX_REQUEST_HOSTNAME_LEN;
 pub const NETWORK_CONFIG_VERSION: u32 = 1;
 
 /// Most anchors one [`TrustAnchors`] store holds.
-pub const MAX_TRUST_ANCHORS: usize = 4;
-/// DER bytes one [`TrustAnchors`] store holds, all anchors together. Sized so the store fits the
-/// network service's one-page bootstrap beside the rest of it.
-pub const TRUST_ANCHOR_STORE_BYTES: usize = 2_560;
+pub const MAX_TRUST_ANCHORS: usize = 32;
+/// Pages one [`TrustAnchors`] store fills exactly. The launcher maps it read-only into the
+/// network service on its own pages (`NETWORK_SERVICE_TRUST_ADDRESS`).
+pub const TRUST_STORE_PAGES: usize = 8;
+/// [`TrustAnchors`] header: `count`, `lens` and `_reserved`.
+const TRUST_STORE_HEADER_BYTES: usize = 2 + 2 * MAX_TRUST_ANCHORS + 6;
+/// DER bytes one [`TrustAnchors`] store holds, all anchors together.
+pub const TRUST_ANCHOR_STORE_BYTES: usize = TRUST_STORE_PAGES * 4096 - TRUST_STORE_HEADER_BYTES;
 
 /// The local address, its on-link prefix and the default gateway.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,8 +407,9 @@ fn usable_host(addr: Ipv4Addr, prefix_len: u8) -> bool {
     host != 0 && host != !prefix_mask(prefix_len)
 }
 
-/// Trust anchors (DER X.509 certificates), packed back to back. The launcher picks them: test
-/// kernels hand the network service the M7 test CA, production kernels the bundled root set.
+/// Trust anchors (DER X.509 certificates), packed back to back on [`TRUST_STORE_PAGES`] pages.
+/// The launcher picks them: test kernels hand the network service the M7 test CA, production
+/// kernels the bundled public root set.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TrustAnchors {
@@ -415,8 +420,8 @@ pub struct TrustAnchors {
 }
 
 const _: () = assert!(
-    core::mem::size_of::<TrustAnchors>() == 16 + TRUST_ANCHOR_STORE_BYTES,
-    "TrustAnchors layout is part of the bootstrap ABI"
+    core::mem::size_of::<TrustAnchors>() == TRUST_STORE_PAGES * 4096,
+    "TrustAnchors layout is part of the launch ABI: no padding, whole pages"
 );
 
 /// A checked view of a [`TrustAnchors`] store.
@@ -470,7 +475,48 @@ impl TrustAnchors {
         Ok(store)
     }
 
-    /// [`Self::from_ders`] in place (the store is 2.5 KiB; launchers fill it where it lives).
+    /// `ders` packed at compile time: a launcher's store is a `static`, and a set that does
+    /// not fit fails the build. Same rules as [`Self::from_ders`].
+    pub const fn pack(ders: &[&[u8]]) -> Self {
+        assert!(
+            ders.len() <= MAX_TRUST_ANCHORS,
+            "more trust anchors than the store holds"
+        );
+        let mut store = Self::EMPTY;
+        let mut at = 0;
+        let mut i = 0;
+        while i < ders.len() {
+            let der = ders[i];
+            assert!(!der.is_empty(), "an empty trust anchor");
+            assert!(
+                at + der.len() <= TRUST_ANCHOR_STORE_BYTES,
+                "the trust anchors do not fit the store"
+            );
+            let mut j = 0;
+            while j < der.len() {
+                store.der[at + j] = der[j];
+                j += 1;
+            }
+            store.lens[i] = der.len() as u16;
+            at += der.len();
+            i += 1;
+        }
+        store.count = ders.len() as u16;
+        store
+    }
+
+    /// The store's bytes, as a launcher copies them into the service's pages.
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `repr(C)`, integer fields only, and no padding (asserted above).
+        unsafe {
+            core::slice::from_raw_parts(
+                (self as *const Self).cast::<u8>(),
+                core::mem::size_of::<Self>(),
+            )
+        }
+    }
+
+    /// [`Self::from_ders`] in place (the store is 32 KiB; launchers fill it where it lives).
     /// On error the store is left empty.
     pub fn fill(&mut self, ders: &[&[u8]]) -> Result<(), ConfigError> {
         *self = Self::EMPTY;
@@ -706,6 +752,17 @@ mod tests {
         let set = store.set().unwrap();
         assert_eq!(set.as_slice(), &[&a[..], &b[..]]);
         assert!(TrustAnchors::EMPTY.set().unwrap().is_empty());
+    }
+
+    #[test]
+    fn packed_store_matches_from_ders() {
+        const A: &[u8] = &[1; 300];
+        const B: &[u8] = &[2; 500];
+        static PACKED: TrustAnchors = TrustAnchors::pack(&[A, B]);
+        let store = TrustAnchors::from_ders(&[A, B]).unwrap();
+        assert_eq!(PACKED, store);
+        assert_eq!(PACKED.as_bytes().len(), TRUST_STORE_PAGES * 4096);
+        assert_eq!(PACKED.set().unwrap().as_slice(), &[A, B]);
     }
 
     #[test]

@@ -85,6 +85,89 @@ impl<S: Syscalls> PageSource for MemoryPages<S> {
     }
 }
 
+/// Pages from a fixed region the caller owns (at most [`ArenaPages::MAX_PAGES`]), first fit,
+/// with freed runs reused. For a heap that must not grow, or that is thrown away whole: the
+/// network service's TLS scratch heap is one, reset after every transaction.
+pub struct ArenaPages {
+    base: usize,
+    pages: usize,
+    /// Bit `i` set: page `i` is mapped.
+    used: u64,
+    /// Most pages mapped at once.
+    high_water: usize,
+}
+
+impl ArenaPages {
+    pub const MAX_PAGES: usize = 64;
+
+    /// A region with no pages: every map is refused.
+    pub const fn empty() -> Self {
+        Self {
+            base: 0,
+            pages: 0,
+            used: 0,
+            high_water: 0,
+        }
+    }
+
+    /// The `pages` pages at `base` (page-aligned), all unmapped.
+    ///
+    /// # Safety
+    /// `base` is page-aligned, `pages * PAGE_BYTES` bytes from it are writable and used by
+    /// nothing else while this source (or a heap over it) hands them out.
+    pub unsafe fn new(base: NonNull<u8>, pages: usize) -> Self {
+        debug_assert!(base.as_ptr() as usize % PAGE_BYTES == 0);
+        Self {
+            base: base.as_ptr() as usize,
+            pages: pages.min(Self::MAX_PAGES),
+            used: 0,
+            high_water: 0,
+        }
+    }
+
+    /// Whether `ptr` is inside the region.
+    pub fn contains(&self, ptr: *const u8) -> bool {
+        let at = ptr as usize;
+        at >= self.base && at < self.base + self.pages * PAGE_BYTES
+    }
+
+    pub fn high_water_pages(&self) -> usize {
+        self.high_water
+    }
+
+    fn run_mask(start: usize, pages: usize) -> u64 {
+        let ones = if pages >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << pages) - 1
+        };
+        ones << start
+    }
+}
+
+impl PageSource for ArenaPages {
+    fn map_pages(&mut self, pages: usize) -> Option<NonNull<u8>> {
+        if pages == 0 || pages > self.pages {
+            return None;
+        }
+        let start = (0..=self.pages - pages)
+            .find(|&start| self.used & Self::run_mask(start, pages) == 0)?;
+        self.used |= Self::run_mask(start, pages);
+        self.high_water = self.high_water.max(self.used.count_ones() as usize);
+        NonNull::new((self.base + start * PAGE_BYTES) as *mut u8)
+    }
+
+    fn unmap_pages(&mut self, start: NonNull<u8>, pages: usize) {
+        if !self.contains(start.as_ptr()) {
+            return;
+        }
+        let first = (start.as_ptr() as usize - self.base) / PAGE_BYTES;
+        if first + pages <= self.pages {
+            self.used &= !Self::run_mask(first, pages);
+        }
+    }
+}
+
 /// Counters, for tests and diagnostics.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HeapStats {
@@ -148,6 +231,10 @@ impl<P: PageSource> Heap<P> {
 
     pub const fn stats(&self) -> HeapStats {
         self.stats
+    }
+
+    pub const fn source(&self) -> &P {
+        &self.source
     }
 
     /// A block for `layout`, or null.
@@ -337,6 +424,46 @@ mod tests {
 
     fn layout(size: usize, align: usize) -> Layout {
         Layout::from_size_align(size, align).unwrap()
+    }
+
+    /// A page-aligned host region of `pages` pages, leaked for the test's lifetime.
+    fn host_region(pages: usize) -> NonNull<u8> {
+        let layout = Layout::from_size_align(pages * PAGE_BYTES, PAGE_BYTES).unwrap();
+        // SAFETY: non-zero size.
+        NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap()
+    }
+
+    #[test]
+    fn arena_pages_reuse_freed_runs_first_fit() {
+        let base = host_region(8);
+        // SAFETY: the region is ours and unused.
+        let mut arena = unsafe { ArenaPages::new(base, 8) };
+        let a = arena.map_pages(3).unwrap();
+        let b = arena.map_pages(2).unwrap();
+        assert_eq!(a, base);
+        assert_eq!(b.as_ptr() as usize, base.as_ptr() as usize + 3 * PAGE_BYTES);
+        assert!(arena.map_pages(4).is_none(), "only 3 pages left");
+        arena.unmap_pages(a, 3);
+        assert_eq!(arena.map_pages(2), Some(a), "the freed run is reused");
+        assert_eq!(arena.high_water_pages(), 5);
+        assert!(arena.contains(b.as_ptr()));
+        assert!(!arena.contains((base.as_ptr() as usize + 8 * PAGE_BYTES) as *const u8));
+        assert!(ArenaPages::empty().map_pages(1).is_none());
+    }
+
+    #[test]
+    fn a_heap_over_arena_pages_refuses_past_the_region() {
+        let base = host_region(CHUNK_PAGES + 2);
+        // SAFETY: the region is ours and unused.
+        let mut heap = Heap::new(unsafe { ArenaPages::new(base, CHUNK_PAGES + 2) });
+        let small = heap.allocate(layout(64, 8));
+        assert!(!small.is_null());
+        let large = heap.allocate(layout(2 * PAGE_BYTES, 8));
+        assert!(!large.is_null());
+        assert!(heap.allocate(layout(PAGE_BYTES + 1, 8)).is_null());
+        // SAFETY: allocated above with this layout.
+        unsafe { heap.deallocate(large, layout(2 * PAGE_BYTES, 8)) };
+        assert!(!heap.allocate(layout(PAGE_BYTES + 1, 8)).is_null());
     }
 
     #[test]

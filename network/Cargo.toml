@@ -16,20 +16,30 @@ tls = [
     "dep:rand_core",
     "dep:sha2",
     "dep:aes",
+    "dep:p256",
+    "dep:p384",
+    "dep:rsa",
+    "dep:heapless",
 ]
 host-tls-peer = ["tls", "std", "dep:rustls"]
 m7-handshake-trace = ["tls"]
 
 [dependencies]
-embedded-tls = { version = "=0.19.0", default-features = false, features = ["rustpki"], optional = true }
+embedded-tls = { version = "=0.19.0", default-features = false, features = ["rustpki", "rsa", "p384"], optional = true }
 embedded-io = { version = "=0.7.1", default-features = false, optional = true }
 embedded-io-async = { version = "=0.7.0", default-features = false, optional = true }
 rand_core = { version = "=0.6.4", default-features = false, optional = true }
 sha2 = { version = "=0.10.9", default-features = false, features = ["force-soft"], optional = true }
 aes = { version = "=0.8.4", default-features = false, optional = true }
+# The CertificateVerify check in tls/verify.rs; the same versions embedded-tls verifies chains with.
+p256 = { version = "=0.13.2", default-features = false, features = ["ecdsa", "sha256"], optional = true }
+p384 = { version = "=0.13.1", default-features = false, features = ["ecdsa", "sha384"], optional = true }
+rsa = { version = "=0.9.10", default-features = false, features = ["sha2"], optional = true }
+heapless = { version = "=0.9.3", default-features = false, optional = true }
 rustls = { version = "=0.23.26", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 
 [dev-dependencies]
+clean-slate-runtime = { path = "../runtime" }
 rcgen = { version = "=0.13.2", default-features = false, features = ["pem", "crypto", "ring"] }
 rustls = { version = "=0.23.26", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "=2.2.0"
