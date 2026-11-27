@@ -50,6 +50,12 @@ clean-slate-native-abi = { path = "../native-abi" }
 clean-slate-runtime = { path = "../runtime" }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
+# The audit store's hash chain (#219 stage D); the same pinned, software-only build the network
+# service uses.
+sha2 = { version = "=0.10.9", default-features = false, features = ["force-soft"] }
+
+[dev-dependencies]
+clean-slate-runtime = { path = "../runtime", features = ["fake"] }
 
 [lints]
 workspace = true

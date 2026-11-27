@@ -8,6 +8,8 @@
 
 /// #219 stage B audit service drain.
 pub mod audit_reader;
+/// #219 stage D audit service store: the persisted, hash-chained log.
+pub mod audit_store;
 mod control;
 mod convergence;
 mod diagnostics;

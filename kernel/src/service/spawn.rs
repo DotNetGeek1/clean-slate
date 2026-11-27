@@ -222,7 +222,7 @@ include!(concat!(env!("OUT_DIR"), "/audit_userspace_entry.rs"));
 const AUDIT_USERSPACE_IMAGE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/audit_userspace.bin"));
 #[cfg(clean_slate_system_init)]
-const AUDIT_STACK_PAGES: u64 = 4;
+const AUDIT_STACK_PAGES: u64 = 8;
 #[cfg(clean_slate_system_init)]
 const _: () = assert!(AUDIT_USERSPACE_MAPPED_CODE_PAGES <= INIT_MAX_CODE_PAGES);
 #[cfg(clean_slate_system_init)]
@@ -1160,6 +1160,18 @@ impl crate::service::grants::BootstrapGrantAuthority for KernelBootstrapGrants {
             .map_err(|_| "audit reader grant failed")
     }
 
+    fn grant_audit_store(&mut self, pid: u64) -> Result<u64, &'static str> {
+        use clean_slate_capability::{HolderId, Rights};
+        use clean_slate_service_fixtures::audit_service::AUDIT_STORE_DIRECTORY_ID;
+        crate::capability::object::grant_object_capability(
+            HolderId(pid),
+            AUDIT_STORE_DIRECTORY_ID,
+            Rights::READ.union(Rights::WRITE).union(Rights::DIRECTORY),
+        )
+        .map(|handle| handle.encode())
+        .map_err(|_| "audit store grant failed")
+    }
+
     fn grant_console(&mut self, pid: u64) -> Result<u64, &'static str> {
         unsafe { crate::ipc::endpoint_table_mut() }.grant_console_capability_for_pid(pid)
     }
@@ -1199,8 +1211,9 @@ pub(crate) fn launch_init_image(
     )
 }
 
-/// Launches the audit service (`clean-slate-audit-userspace`, #219). Its two handles come from
-/// its manifest row; a row without either cannot launch it.
+/// Launches the audit service (`clean-slate-audit-userspace`, #219). Its three handles come from
+/// its manifest row; a row without any of them cannot launch it. The page also carries the log's
+/// read cursor, so the instance can tell the boot's first launch from a restart.
 #[cfg(clean_slate_system_init)]
 #[inline(never)]
 fn launch_audit_userspace_service(
@@ -1211,10 +1224,11 @@ fn launch_audit_userspace_service(
 ) -> Result<SpawnedServiceInstance, &'static str> {
     use crate::service::grants::apply_bootstrap_grants;
     use clean_slate_service_fixtures::audit_service::{
-        AuditServiceBootstrap, AUDIT_SERVICE_BOOTSTRAP_ADDRESS,
+        AuditServiceBootstrap, AUDIT_SERVICE_BOOTSTRAP_ADDRESS, AUDIT_STORE_DIRECTORY_ID,
     };
 
     let spec = context.spec.ok_or("audit service has no manifest row")?;
+    let log_read_through = crate::capability::audit::with_audit_log(|log| log.read_through());
     launch_bootstrap_page_image(
         allocator,
         kernel_stack_top,
@@ -1236,6 +1250,11 @@ fn launch_audit_userspace_service(
                 console_capability: handles
                     .console
                     .ok_or("audit service row grants no console")?,
+                store_capability: handles
+                    .audit_store
+                    .ok_or("audit service row grants no audit store")?,
+                store_directory_id: AUDIT_STORE_DIRECTORY_ID,
+                log_read_through,
             })
         },
     )

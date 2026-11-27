@@ -16,6 +16,12 @@
 //!   fits one message while its numbers stay within [`RECORD_LINE_MAX_NUMBER`];
 //! - `[ADT ] drained through=S records=R lost=L`, which the service prints after its first
 //!   drain and after any drain that printed one of the above.
+//!
+//! Everything one drain reads is handed to an [`AuditSink`] (stage D: the persisted log) at once,
+//! before any of its lines are printed, so a printed record is already kept, and the sink's own
+//! storage requests, which are audited too, come once per drain rather than once per read. A restarted service
+//! [resumes](AuditDrain::resume) from the cursor it persisted, without printing again the
+//! records an earlier instance of the boot printed.
 
 use core::fmt::{self, Write};
 use core::mem::offset_of;
@@ -29,6 +35,8 @@ use clean_slate_capability::{
 pub const AUDIT_READ_BATCH: usize = 8;
 /// Reads one drain makes at most; a log still not caught up is finished by the next drain.
 pub const AUDIT_DRAIN_MAX_READS: usize = 16;
+/// Records one drain hands its sink at most.
+pub const AUDIT_DRAIN_MAX_RECORDS: usize = AUDIT_READ_BATCH * AUDIT_DRAIN_MAX_READS;
 /// The console refuses longer messages; a longer line is cut to this length, its last byte `~`.
 pub const AUDIT_LINE_MAX_BYTES: usize = 64;
 
@@ -37,6 +45,39 @@ pub type AuditReadBuffer = [[u8; AUDIT_EVENT_SIZE_BYTES]; AUDIT_READ_BATCH];
 pub trait AuditLogSource {
     /// Reads the records from `since` into `out`. Returns how many, or the kernel's status.
     fn read(&mut self, since: u64, out: &mut AuditReadBuffer) -> Result<usize, u64>;
+}
+
+/// Where the drain keeps what it reads.
+pub trait AuditSink {
+    /// Keeps `batch`, one drain's records (at most [`AUDIT_DRAIN_MAX_RECORDS`]) in the order
+    /// the kernel handed them, after which the drain's cursor is `next_since`.
+    fn persist(
+        &mut self,
+        batch: &[[u8; AUDIT_EVENT_SIZE_BYTES]],
+        next_since: u64,
+    ) -> Result<(), clean_slate_runtime::Error>;
+}
+
+/// Keeps nothing.
+pub struct NoSink;
+
+impl AuditSink for NoSink {
+    fn persist(
+        &mut self,
+        _: &[[u8; AUDIT_EVENT_SIZE_BYTES]],
+        _: u64,
+    ) -> Result<(), clean_slate_runtime::Error> {
+        Ok(())
+    }
+}
+
+/// Why a drain stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrainError {
+    /// The kernel refused a read, with this status.
+    Read(u64),
+    /// The sink could not keep a batch; nothing of it was printed.
+    Persist(clean_slate_runtime::Error),
 }
 
 /// The fields of one [`AuditEvent`] the reader uses. Decoded byte by byte, so an enum byte the
@@ -77,6 +118,15 @@ impl AuditRecord {
     fn is_lost(&self) -> bool {
         self.kind == AuditKind::Lost as u8
     }
+
+    /// The first sequence after this record, or after the run it reports lost.
+    fn after(&self) -> u64 {
+        if self.is_lost() {
+            self.sequence.saturating_add(self.resource_id)
+        } else {
+            self.sequence.saturating_add(1)
+        }
+    }
 }
 
 /// What one drain was handed.
@@ -86,6 +136,7 @@ pub struct DrainSummary {
     pub through: u64,
     /// Stored records handed over (lost runs are not records).
     pub records: u64,
+    /// Denied and refused records printed (an earlier instance's are not printed again).
     pub denied: u64,
     pub refused: u64,
     /// Sequences the kernel reported lost.
@@ -103,6 +154,8 @@ impl DrainSummary {
 
 pub struct AuditDrain {
     next_since: u64,
+    /// Records and lost runs at or below this sequence were printed by an earlier instance.
+    printed_through: u64,
 }
 
 impl Default for AuditDrain {
@@ -114,28 +167,56 @@ impl Default for AuditDrain {
 impl AuditDrain {
     /// Starts at sequence 1, so whatever the log lost before the first read is reported too.
     pub const fn new() -> Self {
-        Self { next_since: 1 }
+        Self::resume(1, 0)
     }
 
-    /// Reads until the log is caught up or [`AUDIT_DRAIN_MAX_READS`] reads have been made,
-    /// emitting a line for every denied or refused record, lost run and unreported gap.
+    /// Starts at `next_since`, printing nothing about sequences at or below `printed_through`.
+    pub const fn resume(next_since: u64, printed_through: u64) -> Self {
+        Self {
+            next_since: if next_since == 0 { 1 } else { next_since },
+            printed_through,
+        }
+    }
+
+    /// The first sequence not yet handed over.
+    pub const fn next_since(&self) -> u64 {
+        self.next_since
+    }
+
+    /// Reads until the log is caught up or [`AUDIT_DRAIN_MAX_READS`] reads have been made, hands
+    /// everything read to `sink`, then emits a line for every denied or refused record, lost run
+    /// and unreported gap among it.
     pub fn drain(
         &mut self,
         source: &mut impl AuditLogSource,
+        sink: &mut impl AuditSink,
         emit: &mut impl FnMut(&str),
-    ) -> Result<DrainSummary, u64> {
+    ) -> Result<DrainSummary, DrainError> {
         let mut summary = DrainSummary::default();
-        let mut buffer = [[0u8; AUDIT_EVENT_SIZE_BYTES]; AUDIT_READ_BATCH];
+        let mut drained = [[0u8; AUDIT_EVENT_SIZE_BYTES]; AUDIT_DRAIN_MAX_RECORDS];
+        let mut len = 0;
+        let mut cursor = self.next_since;
         for _ in 0..AUDIT_DRAIN_MAX_READS {
+            let mut buffer = [[0u8; AUDIT_EVENT_SIZE_BYTES]; AUDIT_READ_BATCH];
             let count = source
-                .read(self.next_since, &mut buffer)?
+                .read(cursor, &mut buffer)
+                .map_err(DrainError::Read)?
                 .min(AUDIT_READ_BATCH);
             for raw in &buffer[..count] {
-                self.take(AuditRecord::decode(raw), &mut summary, emit);
+                cursor = cursor.max(AuditRecord::decode(raw).after());
             }
+            drained[len..len + count].copy_from_slice(&buffer[..count]);
+            len += count;
             if count < AUDIT_READ_BATCH {
                 break;
             }
+        }
+        if len > 0 {
+            sink.persist(&drained[..len], cursor)
+                .map_err(DrainError::Persist)?;
+        }
+        for raw in &drained[..len] {
+            self.take(AuditRecord::decode(raw), &mut summary, emit);
         }
         summary.through = self.next_since - 1;
         Ok(summary)
@@ -157,20 +238,24 @@ impl AuditDrain {
                 ),
             );
         }
-        let after = if record.is_lost() {
+        let after = record.after();
+        let printed = after.saturating_sub(1) <= self.printed_through;
+        if record.is_lost() {
             summary.lost = summary.lost.saturating_add(record.resource_id);
-            emit_line(
-                emit,
-                format_args!(
-                    "[ADT ] lost first={} missing={}",
-                    record.sequence, record.resource_id
-                ),
-            );
-            record.sequence.saturating_add(record.resource_id)
+            if !printed {
+                emit_line(
+                    emit,
+                    format_args!(
+                        "[ADT ] lost first={} missing={}",
+                        record.sequence, record.resource_id
+                    ),
+                );
+            }
         } else {
             summary.records = summary.records.saturating_add(1);
             match record.outcome.tag {
                 AuditOutcome::TAG_ALLOWED => {}
+                _ if printed => {}
                 AuditOutcome::TAG_DENIED => {
                     summary.denied += 1;
                     emit_line(emit, format_args!("{}", RecordLine(&record)));
@@ -180,8 +265,7 @@ impl AuditDrain {
                     emit_line(emit, format_args!("{}", RecordLine(&record)));
                 }
             }
-            record.sequence.saturating_add(1)
-        };
+        }
         // Never back: a sequence below the cursor is already reported as a gap.
         self.next_since = self.next_since.max(after);
     }
@@ -330,7 +414,7 @@ const fn class_name(class: ResourceClass) -> &'static str {
 
 /// Formats into one console message. What does not fit is cut, and the cut is marked by
 /// replacing the last byte with `~`, so a cut number is never read as a whole one.
-fn emit_line(emit: &mut impl FnMut(&str), args: fmt::Arguments<'_>) {
+pub fn emit_line(emit: &mut impl FnMut(&str), args: fmt::Arguments<'_>) {
     let mut line = Line {
         bytes: [0; AUDIT_LINE_MAX_BYTES],
         len: 0,
@@ -439,7 +523,9 @@ mod tests {
     fn drain(drain: &mut AuditDrain, script: &mut Script) -> (DrainSummary, Vec<String>) {
         let mut lines = Vec::new();
         let summary = drain
-            .drain(script, &mut |line: &str| lines.push(String::from(line)))
+            .drain(script, &mut NoSink, &mut |line: &str| {
+                lines.push(String::from(line))
+            })
             .expect("drain");
         (summary, lines)
     }
@@ -742,6 +828,102 @@ mod tests {
         assert_eq!(line, "[ADT ] #1 4 noright k238 c221");
     }
 
+    /// Records what it was handed, and fails when told to.
+    #[derive(Default)]
+    struct Keeper {
+        batches: Vec<(Vec<u64>, u64)>,
+        fail: bool,
+    }
+
+    impl AuditSink for Keeper {
+        fn persist(
+            &mut self,
+            batch: &[[u8; AUDIT_EVENT_SIZE_BYTES]],
+            next_since: u64,
+        ) -> Result<(), clean_slate_runtime::Error> {
+            if self.fail {
+                return Err(clean_slate_runtime::Error::Failed(7));
+            }
+            let sequences = batch
+                .iter()
+                .map(|raw| AuditRecord::decode(raw).sequence)
+                .collect();
+            self.batches.push((sequences, next_since));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_drain_is_kept_with_the_cursor_after_it_before_anything_is_printed() {
+        let mut reader = AuditDrain::new();
+        let first: Vec<_> = (1..=8).map(|seq| allowed(seq, 3)).collect();
+        let mut script = Script::new(vec![first, vec![AuditEvent::lost(9, 5), denied(14, 6)]]);
+        let mut keeper = Keeper::default();
+        let mut lines = Vec::new();
+        reader
+            .drain(&mut script, &mut keeper, &mut |line: &str| {
+                lines.push(String::from(line))
+            })
+            .unwrap();
+        assert_eq!(
+            keeper.batches,
+            [((1..=8).chain([9, 14]).collect(), 15)],
+            "one batch per drain"
+        );
+        assert_eq!(
+            lines,
+            [
+                "[ADT ] lost first=9 missing=5",
+                "[ADT ] #14 6 noright audit"
+            ]
+        );
+
+        let mut reader = AuditDrain::new();
+        let mut script = Script::new(vec![vec![denied(1, 6)]]);
+        let mut keeper = Keeper {
+            fail: true,
+            ..Keeper::default()
+        };
+        let mut lines = Vec::new();
+        assert_eq!(
+            reader.drain(&mut script, &mut keeper, &mut |line: &str| {
+                lines.push(String::from(line))
+            }),
+            Err(DrainError::Persist(clean_slate_runtime::Error::Failed(7)))
+        );
+        assert!(lines.is_empty(), "a record not kept is not printed");
+        assert_eq!(reader.next_since(), 1);
+    }
+
+    #[test]
+    fn a_resumed_drain_starts_at_its_cursor_and_does_not_print_again() {
+        let mut reader = AuditDrain::resume(4, 6);
+        let mut script = Script::new(vec![vec![
+            denied(4, 6),
+            AuditEvent::lost(5, 2),
+            denied(7, 6),
+            AuditEvent::lost(8, 3),
+        ]]);
+        let (summary, lines) = drain(&mut reader, &mut script);
+        assert_eq!(script.since, [4]);
+        assert_eq!(
+            lines,
+            ["[ADT ] #7 6 noright audit", "[ADT ] lost first=8 missing=3"]
+        );
+        assert_eq!(
+            summary,
+            DrainSummary {
+                through: 10,
+                records: 2,
+                denied: 1,
+                refused: 0,
+                lost: 5,
+                unreported_gaps: 0,
+            }
+        );
+        assert_eq!(AuditDrain::resume(0, 0).next_since(), 1);
+    }
+
     #[test]
     fn a_read_refusal_is_returned() {
         struct Refuses;
@@ -751,6 +933,9 @@ mod tests {
             }
         }
         let mut reader = AuditDrain::new();
-        assert_eq!(reader.drain(&mut Refuses, &mut |_: &str| {}), Err(0xdead));
+        assert_eq!(
+            reader.drain(&mut Refuses, &mut NoSink, &mut |_: &str| {}),
+            Err(DrainError::Read(0xdead))
+        );
     }
 }

@@ -72,6 +72,7 @@ impl LinuxGrants {
                 Grant::BlockDevice
                 | Grant::ObjectServiceRole
                 | Grant::AuditReader
+                | Grant::AuditStore
                 | Grant::NetworkService
                 | Grant::GraphicsPort
                 | Grant::DisplayPresenter

@@ -114,6 +114,9 @@ enum Expect {
     Fault,
     /// The flood and the audit service's report of it (see [`check_audit_flood`]).
     AuditFlood,
+    /// The audit service's fault, its restart, and the new instance resuming from its
+    /// persisted cursor without printing the flood again (see [`check_audit_fault`]).
+    AuditFault,
     /// The console service's fault, its restart, and the shell's client capability moved to
     /// the new instance (see [`check_console_fault`]).
     ConsoleFault,
@@ -148,11 +151,16 @@ const WGET: Step = Step {
     },
 };
 
-const STEPS: [Step; 9] = [
+const STEPS: [Step; 10] = [
     Step {
         name: "audit flood",
         send: &AUDIT_FLOOD_SEND,
         expect: Expect::AuditFlood,
+    },
+    Step {
+        name: "audit fault",
+        send: b"\x19",
+        expect: Expect::AuditFault,
     },
     NSLOOKUP,
     WGET,
@@ -200,6 +208,8 @@ struct State {
     shell: Shell,
     network: Network,
     audit_pid: u64,
+    /// The last sequence of the audit flood, once it has run.
+    flood_last: u64,
     /// The console service instance the console fault step restarted, once it has.
     console: Option<Network>,
 }
@@ -207,7 +217,7 @@ struct State {
 /// The kernel's launch audit for a network instance must be exactly the row's grants.
 fn expected_network_authority(pid: u64) -> String {
     format!(
-        "[SVC ] authority service={NETWORK_SERVICE} pid={pid} lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1"
+        "[SVC ] authority service={NETWORK_SERVICE} pid={pid} lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1"
     )
 }
 
@@ -271,6 +281,7 @@ fn check_boot_segment(segment: &str) -> Result<State, String> {
         shell,
         network,
         audit_pid: number(audit, "pid")?,
+        flood_last: 0,
         console: None,
     })
 }
@@ -369,7 +380,10 @@ fn check_audit_flood(segment: &str, state: State) -> Result<State, String> {
             ));
         }
     }
-    Ok(state)
+    Ok(State {
+        flood_last: last,
+        ..state
+    })
 }
 
 /// Offset of the first line containing `needle` in `segment`.
@@ -474,6 +488,149 @@ fn check_fault(segment: &str, state: State) -> Result<State, String> {
     }
     Ok(State {
         network: next,
+        ..state
+    })
+}
+
+/// Everything Ctrl-Y must cause, in `segment` (the output since it was typed): the audit
+/// service faults and is reaped, init restarts it once, and generation 2 holds exactly its row,
+/// finds its store from this boot (`boot=1`, the lane's disk being fresh) and resumes from the
+/// cursor the first instance persisted (`store resumed next=N printed=K`, with `K` at least the
+/// flood's last sequence, since the first instance printed the flood, and `N` no further than
+/// `K + 1`), prints nothing about a sequence at or below `K`, and reports ready where the
+/// kernel's read cursor says its first drain ended, after which init settles.
+fn check_audit_fault(segment: &str, state: State) -> Result<State, String> {
+    let State {
+        init_pid,
+        audit_pid: old,
+        flood_last,
+        ..
+    } = state;
+    let armed = only_kernel_line(segment, "[HOOK] audit fault armed ")?;
+    if number(armed, "pid")? != old
+        || number(armed, "gen")? != 1
+        || field(armed, "user_rip") != Some("0x0")
+    {
+        return Err(format!(
+            "expected the audit service pid={old} gen=1 armed: {armed:?}"
+        ));
+    }
+    let fault_prefix = format!("[PROC] fault pid={old} vector=14 ");
+    let faulted_at = line_at(segment, &fault_prefix)
+        .map_err(|_| format!("the audit service did not fault: no {fault_prefix:?}"))?;
+    let after_fault = &segment[faulted_at..];
+    let restart =
+        format!("[IPC ] console pid={init_pid}: [SUP ] restart service={AUDIT_SERVICE} attempt=1");
+    if !lines(after_fault).any(|line| line.contains(&restart)) {
+        return Err(format!(
+            "init has not restarted the audit service ({restart:?})"
+        ));
+    }
+    let reaped = format!("[SVC ] reaped service={AUDIT_SERVICE} pid={old} ");
+    match crate::system_desktop::whole_line(after_fault, &reaped) {
+        Some((_, "residue=0")) => {}
+        Some((_, residue)) => return Err(format!("audit pid={old} reaped with {residue}")),
+        None => {
+            return Err(format!(
+                "the faulted audit service was not reaped: no {reaped:?}"
+            ))
+        }
+    }
+    let launch = only_kernel_line(
+        after_fault,
+        &format!("[SVC ] launch service={AUDIT_SERVICE} "),
+    )
+    .map_err(|reason| format!("audit generation 2: {reason}"))?;
+    let pid = number(launch, "pid")?;
+    if number(launch, "gen")? != 2 || pid == old {
+        return Err(format!("expected a new audit pid at gen=2: {launch:?}"));
+    }
+    let authority = only_kernel_line(
+        after_fault,
+        &format!("[SVC ] authority service={AUDIT_SERVICE} "),
+    )?;
+    if authority != crate::system_boot::expected_audit_authority(pid) {
+        return Err(format!("audit generation 2 authority {authority:?}"));
+    }
+    let ready = only_kernel_line(
+        after_fault,
+        &format!("[SVC ] ready service={AUDIT_SERVICE} "),
+    )
+    .map_err(|reason| format!("audit generation 2: {reason}"))?;
+    if number(ready, "pid")? != pid || number(ready, "gen")? != 2 {
+        return Err(format!(
+            "audit launched as pid={pid} gen=2 but ready says {ready:?}"
+        ));
+    }
+
+    let prefix = format!("[IPC ] console pid={pid}: [ADT ] ");
+    let reported: Vec<&str> = kernel_lines(after_fault, &prefix)
+        .map(|line| &line[prefix.len()..])
+        .collect();
+    if let Some(failure) = reported.iter().find(|line| line.starts_with("FAIL")) {
+        return Err(format!("audit generation 2 failed: {failure:?}"));
+    }
+    let store = reported
+        .iter()
+        .find(|line| line.starts_with("store boot="))
+        .ok_or_else(|| format!("audit generation 2 printed no store line: {reported:?}"))?;
+    if number(store, "boot")? != 1 || number(store, "records")? == 0 {
+        return Err(format!(
+            "audit generation 2 did not find this boot's store: {store:?}"
+        ));
+    }
+    let resumed = reported
+        .iter()
+        .find(|line| line.starts_with("store resumed "))
+        .ok_or_else(|| {
+            format!("audit generation 2 did not resume from its persisted cursor: {reported:?}")
+        })?;
+    let (next, printed) = (number(resumed, "next")?, number(resumed, "printed")?);
+    if printed < flood_last || next <= 1 || next > printed + 1 {
+        return Err(format!(
+            "expected the cursor past sequence 1 and at most one past printed>={flood_last}: {resumed:?}"
+        ));
+    }
+    for line in &reported {
+        let reprinted = if let Some(rest) = line.strip_prefix('#') {
+            let sequence: u64 = rest
+                .split(' ')
+                .next()
+                .and_then(|sequence| sequence.parse().ok())
+                .unwrap_or(0);
+            sequence <= printed
+        } else if line.starts_with("lost ") {
+            number(line, "first")? + number(line, "missing")? - 1 <= printed
+        } else {
+            false
+        };
+        if reprinted {
+            return Err(format!(
+                "audit generation 2 printed again what the first instance printed: \"[ADT ] {line}\""
+            ));
+        }
+    }
+    let drained = reported
+        .iter()
+        .find(|line| line.starts_with("drained "))
+        .ok_or_else(|| format!("audit generation 2 has not drained: {reported:?}"))?;
+    if number(ready, "audit-read-through")? != number(drained, "through")? {
+        return Err(format!(
+            "audit generation 2's first drain ({drained:?}) is not where the kernel says it read: {ready:?}"
+        ));
+    }
+    let announced =
+        format!("[IPC ] console pid={init_pid}: [INIT] service={AUDIT_SERVICE} ready gen=2");
+    let announced_at = after_fault
+        .find(&announced)
+        .ok_or_else(|| format!("init did not announce {announced:?}"))?;
+    if !lines(&after_fault[announced_at..]).any(|line| line.contains(SETTLED)) {
+        return Err(format!(
+            "init has not printed {SETTLED:?} since audit generation 2 became ready"
+        ));
+    }
+    Ok(State {
+        audit_pid: pid,
         ..state
     })
 }
@@ -637,6 +794,7 @@ fn check_step(
         }
         Expect::Fault => check_fault(segment, state),
         Expect::AuditFlood => check_audit_flood(segment, state),
+        Expect::AuditFault => check_audit_fault(segment, state),
         Expect::ConsoleFault => check_console_fault(segment, state),
         Expect::ConsoleInput(want) => check_console_input(segment, want, state),
     }
@@ -655,12 +813,13 @@ fn check_whole(transcript: &str) -> Result<(), String> {
     for (prefix, want) in [
         (format!("[SVC ] launch service={SHELL_SERVICE} "), 1),
         (format!("[SVC ] launch service={NETWORK_SERVICE} "), 2),
-        (format!("[SVC ] launch service={AUDIT_SERVICE} "), 1),
+        (format!("[SVC ] launch service={AUDIT_SERVICE} "), 2),
         (format!("[SVC ] launch service={CONSOLE_SERVICE} "), 2),
-        ("[SUP ] restart service=".to_owned(), 2),
-        ("[PROC] fault pid=".to_owned(), 2),
+        ("[SUP ] restart service=".to_owned(), 3),
+        ("[PROC] fault pid=".to_owned(), 3),
         ("[HOOK] network fault armed ".to_owned(), 1),
         ("[HOOK] console fault armed ".to_owned(), 1),
+        ("[HOOK] audit fault armed ".to_owned(), 1),
         (SERIAL_INPUT_SERVED.to_owned(), 2),
         ("[HOOK] audit flood ".to_owned(), 1),
         ("[NET ] linux sockets lost ".to_owned(), 1),
@@ -686,7 +845,7 @@ fn save_transcript(transcript: &[u8]) -> Result<(), XtaskError> {
 /// on a fresh lane-owned disk; the host types [`STEPS`] into the shell over a loopback COM1.
 pub(crate) fn run() -> Result<(), XtaskError> {
     println!(
-        "[STM ] test-system boots the {HOOKS_FEATURE} build: the default image plus test hooks (COM1 fault bytes for the network service, compositor, desktop shell, app and console service; desktop resource, quiet and stale-generation evidence; per-input trace lines)"
+        "[STM ] test-system boots the {HOOKS_FEATURE} build: the default image plus test hooks (COM1 fault bytes for the network service, compositor, desktop shell, app, console service and audit service; desktop resource, quiet and stale-generation evidence; per-input trace lines)"
     );
     let disk = workspace_root()
         .join("target")
@@ -716,8 +875,8 @@ pub(crate) fn run() -> Result<(), XtaskError> {
     let before = states[0];
     let after = states[states.len() - 1];
     println!(
-        "\n[STM ] PASS ({HOOKS_FEATURE} build) after {AUDIT_FLOOD_DENIALS} audit denials of the shell, the audit service pid={} printed the witness, the {AUDIT_HOLDER_BUDGET} denials the budget kept and exactly {} lost; shell pid={} resolved through the fixture and fetched from it through network pid={} gen={}, the fixture answering the request it received; the next wget's request reached the fixture's hold port, which held it unanswered; Ctrl-\\ faulted the network service, the blocked wget read failed with ECONNRESET and the shell prompted again, init restarted the service as pid={} gen={}, its launch audit matched, the shell's client capability was re-issued for it, init settled, and from the same shell nslookup resolved through the fixture again and wget's request reached the fixture and was answered again; Ctrl-X faulted the console service, init restarted it as pid={}, the shell's console client was re-issued for it, and a typed echo reached the same shell through it",
-        before.audit_pid, AUDIT_FLOOD_DENIALS - AUDIT_HOLDER_BUDGET, before.shell.pid, before.network.pid, before.network.generation, after.network.pid, after.network.generation, after.console.map_or(0, |console| console.pid)
+        "\n[STM ] PASS ({HOOKS_FEATURE} build) after {AUDIT_FLOOD_DENIALS} audit denials of the shell, the audit service pid={} printed the witness, the {AUDIT_HOLDER_BUDGET} denials the budget kept and exactly {} lost; shell pid={} resolved through the fixture and fetched from it through network pid={} gen={}, the fixture answering the request it received; the next wget's request reached the fixture's hold port, which held it unanswered; Ctrl-\\ faulted the network service, the blocked wget read failed with ECONNRESET and the shell prompted again, init restarted the service as pid={} gen={}, its launch audit matched, the shell's client capability was re-issued for it, init settled, and from the same shell nslookup resolved through the fixture again and wget's request reached the fixture and was answered again; Ctrl-Y faulted the audit service and init restarted it as pid={}, which resumed from its persisted cursor without printing the flood again; Ctrl-X faulted the console service, init restarted it as pid={}, the shell's console client was re-issued for it, and a typed echo reached the same shell through it",
+        before.audit_pid, AUDIT_FLOOD_DENIALS - AUDIT_HOLDER_BUDGET, before.shell.pid, before.network.pid, before.network.generation, after.network.pid, after.network.generation, after.audit_pid, after.console.map_or(0, |console| console.pid)
     );
     Ok(())
 }
@@ -899,6 +1058,97 @@ mod tests {
     const AUDIT: u64 = 2;
     const CONS1: u64 = 5;
     const CONS2: u64 = 10;
+    const AUDIT2: u64 = 9;
+
+    /// The audit fault after the flood (whose last sequence is 300), with the restarted
+    /// instance resuming at 301.
+    fn audit_fault() -> String {
+        format!(
+            "[HOOK] audit fault armed pid={AUDIT} gen=1 user_rip=0x0 parked-in=native at-ms=9\n\
+             [PROC] fault pid={AUDIT} vector=14 err=0x14\n\
+             [SVC ] reaped service=21760 pid={AUDIT} residue=0\n\
+             [IPC ] console pid={INIT}: [SUP ] restart service=21760 attempt=1\n\
+             {authority}\n\
+             [SVC ] launch service=21760 pid={AUDIT2} gen=2\n\
+             [IPC ] console pid={AUDIT2}: [ADT ] wall boot=2026-11-27T10:49:48Z\n\
+             [IPC ] console pid={AUDIT2}: [ADT ] store boot=1 segment=0 records=180 verified=180\n\
+             [IPC ] console pid={AUDIT2}: [ADT ] store resumed next=311 printed=310\n\
+             [IPC ] console pid={AUDIT2}: [ADT ] lost first=311 missing=2\n\
+             [IPC ] console pid={AUDIT2}: [ADT ] drained through=330 records=18 lost=2\n\
+             [SVC ] ready service=21760 pid={AUDIT2} gen=2 source=live-instance kernel-observed audit-read-through=330 audit-next=331 audit-dropped=106 service-reported first-drain-records=18\n\
+             [IPC ] console pid={INIT}: [INIT] service=21760 ready gen=2\n\
+             [IPC ] console pid={INIT}: {SETTLED}\n",
+            authority = crate::system_boot::expected_audit_authority(AUDIT2),
+        )
+    }
+
+    fn flooded() -> State {
+        State {
+            flood_last: 300,
+            ..booted()
+        }
+    }
+
+    #[test]
+    fn a_restarted_audit_service_resumes_from_its_cursor_and_prints_nothing_again() {
+        let state = check_audit_fault(&audit_fault(), flooded()).expect("audit fault");
+        assert_eq!(state.audit_pid, AUDIT2);
+        assert_eq!(
+            State {
+                audit_pid: AUDIT,
+                ..state
+            },
+            flooded()
+        );
+        for (from, to) in [
+            ("store resumed next=311", "store resumed next=1"),
+            ("printed=310", "printed=299"),
+            ("next=311 printed=310", "next=312 printed=310"),
+            ("store boot=1", "store boot=2"),
+            ("records=180 verified=180", "records=0 verified=0"),
+            ("lost first=311 missing=2", "lost first=300 missing=2"),
+            ("lost first=311 missing=2", "#290 4 noright audit"),
+            ("audit-read-through=330", "audit-read-through=329"),
+            (
+                "ready service=21760 pid=9 gen=2",
+                "ready service=21760 pid=9 gen=1",
+            ),
+            (
+                "launch service=21760 pid=9 gen=2",
+                "launch service=21760 pid=2 gen=2",
+            ),
+            ("audit-read=1 audit-store=1", "audit-read=1 audit-store=0"),
+            ("residue=0", "residue=1"),
+            ("attempt=1", "attempt=2"),
+            (
+                "[HOOK] audit fault armed pid=2",
+                "[HOOK] audit fault armed pid=3",
+            ),
+            (
+                "[INIT] service=21760 ready gen=2",
+                "[INIT] service=21760 ready gen=3",
+            ),
+        ] {
+            let text = audit_fault().replace(from, to);
+            assert_ne!(text, audit_fault(), "{from}");
+            assert!(check_audit_fault(&text, flooded()).is_err(), "{to}");
+        }
+        let resumed =
+            format!("[IPC ] console pid={AUDIT2}: [ADT ] store resumed next=311 printed=310\n");
+        assert!(
+            check_audit_fault(&audit_fault().replace(&resumed, ""), flooded())
+                .unwrap_err()
+                .contains("did not resume")
+        );
+        let failed = audit_fault().replace(
+            &resumed,
+            &format!("{resumed}[IPC ] console pid={AUDIT2}: [ADT ] FAIL store write status=0x5\n"),
+        );
+        assert!(check_audit_fault(&failed, flooded()).is_err());
+        let unsettled =
+            audit_fault().replace(&format!("[IPC ] console pid={INIT}: {SETTLED}\n"), "");
+        assert!(check_audit_fault(&unsettled, flooded()).is_err());
+    }
 
     fn console_fault() -> String {
         format!(
@@ -1071,6 +1321,7 @@ mod tests {
                     generation: 1
                 },
                 audit_pid: AUDIT,
+                flood_last: 0,
                 console: None,
             }
         );
@@ -1209,7 +1460,7 @@ mod tests {
 
     #[test]
     fn the_reader_must_be_held_and_unprompted() {
-        let held = &STEPS[3];
+        let held = &STEPS[4];
         assert_eq!(held.expect, Expect::Held);
         let state = booted();
         let typed =
@@ -1260,7 +1511,7 @@ mod tests {
 
     #[test]
     fn the_audit_service_reports_the_witness_the_kept_denials_and_the_exact_loss() {
-        assert_eq!(check_audit_flood(&flood(), booted()), Ok(booted()));
+        assert_eq!(check_audit_flood(&flood(), booted()), Ok(flooded()));
         let unfinished = flood().replace("through=302", "through=299");
         assert!(flood_error(&unfinished).contains("waiting for the audit service"));
         let elsewhere = flood().replace(
@@ -1326,9 +1577,9 @@ mod tests {
     #[test]
     fn the_log_holds_exactly_one_record_of_the_audit_services_reads() {
         let aged_out = flood().replace("reader-reads=1 aged-out=0", "reader-reads=0 aged-out=3");
-        assert_eq!(check_audit_flood(&aged_out, booted()), Ok(booted()));
+        assert_eq!(check_audit_flood(&aged_out, booted()), Ok(flooded()));
         let one_after_aging = flood().replace("aged-out=0", "aged-out=3");
-        assert_eq!(check_audit_flood(&one_after_aging, booted()), Ok(booted()));
+        assert_eq!(check_audit_flood(&one_after_aging, booted()), Ok(flooded()));
         for (from, to) in [
             ("reader-reads=1", "reader-reads=0"),
             ("reader-reads=1", "reader-reads=2"),
@@ -1355,9 +1606,10 @@ mod tests {
     #[test]
     fn the_whole_run_allows_one_fault_one_restart_and_no_failure() {
         let whole = format!(
-            "{}[IPC ] console pid={CONS1}: {SERIAL_INPUT_SERVED}\n{}{}{}{}",
+            "{}[IPC ] console pid={CONS1}: {SERIAL_INPUT_SERVED}\n{}{}{}{}{}",
             boot(),
             flood(),
+            audit_fault(),
             fault(),
             console_fault(),
             echo_again()
@@ -1372,6 +1624,8 @@ mod tests {
             "[SVC ] launch service=21504 pid=9 gen=2\n",
             "[NET ] linux sockets lost count=1 reason=instance-gone\n",
             "[SVC ] launch service=22016 pid=11 gen=3\n",
+            "[SVC ] launch service=21760 pid=11 gen=3\n",
+            "[HOOK] audit fault armed pid=9 gen=2 user_rip=0x0 parked-in=native at-ms=9\n",
             "[IPC ] console pid=10: [CONS] serial input answered a read\n",
         ] {
             assert!(check_whole(&format!("{whole}{extra}")).is_err(), "{extra}");
