@@ -121,6 +121,66 @@ fn history_is_bounded() {
 }
 
 #[test]
+fn a_new_screen_allocates_nothing_and_reads_blank() {
+    let s = Screen::new();
+    assert_eq!(s.allocated_rows(), 0);
+    assert_eq!(live(&s, 0), "");
+    assert_eq!(view(&s, ROWS - 1), "");
+    assert_eq!(s.cursor(), (0, 0));
+}
+
+#[test]
+fn history_grows_with_output_and_never_past_its_scrollback() {
+    let mut s = Box::new(Screen::with_scrollback(40));
+    feed(&mut s, b"x");
+    assert_eq!(
+        s.allocated_rows(),
+        ROWS,
+        "the first write allocates the live rows"
+    );
+    for line in 0..200 {
+        feed(&mut s, std::format!("{line}\r\n").as_bytes());
+    }
+    assert_eq!(s.history(), 40);
+    assert!(
+        s.allocated_rows() <= ROWS + 40,
+        "growth stops at the scrollback, got {}",
+        s.allocated_rows()
+    );
+    s.scroll_view_back(40);
+    // 201 lines written (the last empty), 25 live and 40 kept: the oldest kept is line 136.
+    assert_eq!(view(&s, 0), "136");
+}
+
+#[test]
+fn no_scrollback_still_scrolls() {
+    let mut s = Box::new(Screen::with_scrollback(0));
+    for line in 0..ROWS + 3 {
+        feed(&mut s, std::format!("{line}\r\n").as_bytes());
+    }
+    assert_eq!(s.history(), 0);
+    assert_eq!(live(&s, 0), "4");
+    assert_eq!(s.allocated_rows(), ROWS);
+}
+
+#[test]
+fn reset_and_erase_all_drop_history_but_keep_working() {
+    let mut s = screen();
+    for line in 0..ROWS + 10 {
+        feed(&mut s, std::format!("{line}\r\n").as_bytes());
+    }
+    assert_eq!(s.history(), 11);
+    feed(&mut s, b"\x1b[3J");
+    assert_eq!(s.history(), 0);
+    assert_eq!(live(&s, 0), "");
+    feed(&mut s, b"after\x1bc");
+    assert_eq!(s.history(), 0);
+    assert_eq!(live(&s, 0), "");
+    feed(&mut s, b"again");
+    assert_eq!(live(&s, 0), "again");
+}
+
+#[test]
 fn cursor_movement_and_erasing() {
     let mut s = screen();
     feed(&mut s, b"abcdef\x1b[3D\x1b[K");

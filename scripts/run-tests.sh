@@ -103,11 +103,12 @@ TEST_NAMES=(
   test-system-terminal
   test-system-tablet
   test-system-display
+  test-net-acceptance
 )
 
 test_role() {
   case "$1" in
-    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | test-m9-syscall-fail-closed | test-m9-block-wake | test-m9-stack-guard | test-m9-fd-core | test-m9-linux-trace | test-m9-linux-socket | test-m9-low-va | test-m9-linux-exec | test-m9-linux-proc | test-m9-linux-runtime | test-m9-rootfs | test-m9-linux-fs | test-m9-userspace | verify-m8-fixture | verify-m9-fixture | test-m10-contract | test-m10-compositor | test-m10-app | test-m10-nxe | test-m10-port | test-m10-native-memory | test-m10-clock | test-m10-storage | test-qmp-smoke | test-m10-virtio-modern | test-m10-virtio-gpu | test-m10-framebuffer | test-m10-shared-buffer | test-m10-input-smoke | test-m10-desktop | test-serial-input | test-system-boot | test-system-shell | test-system | test-system-desktop | test-system-terminal | test-system-tablet | test-system-display)
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | test-m9-syscall-fail-closed | test-m9-block-wake | test-m9-stack-guard | test-m9-fd-core | test-m9-linux-trace | test-m9-linux-socket | test-m9-low-va | test-m9-linux-exec | test-m9-linux-proc | test-m9-linux-runtime | test-m9-rootfs | test-m9-linux-fs | test-m9-userspace | verify-m8-fixture | verify-m9-fixture | test-m10-contract | test-m10-compositor | test-m10-app | test-m10-nxe | test-m10-port | test-m10-native-memory | test-m10-clock | test-m10-storage | test-qmp-smoke | test-m10-virtio-modern | test-m10-virtio-gpu | test-m10-framebuffer | test-m10-shared-buffer | test-m10-input-smoke | test-m10-desktop | test-serial-input | test-system-boot | test-system-shell | test-system | test-system-desktop | test-system-terminal | test-system-tablet | test-system-display | test-net-acceptance)
       echo Constituent
       ;;
     test-m3 | test-m4 | test-m5 | test-m6 | test-m7 | test-m8 | test-m9 | test-m10)
@@ -231,6 +232,7 @@ test_description() {
     test-serial-input) echo "#218 S4 COM1 receive and line discipline over a private loopback socket (echo and committed reads checked byte for byte)" ;;
     test-system-shell) echo "#218 S5 default image to its serial-console shell over a private loopback socket: typed commands checked by output only execution produces, then exit and Ctrl-D each relaunch the shell one generation on" ;;
     test-system) echo "#218 S7b system-test-hooks build (the default image plus COM1 fault hooks: Ctrl-\\ network, Ctrl-] compositor, Ctrl-^ desktop shell, Ctrl-_ app), plus two short boots with fw_cfg opt/clean-slate/desktop=q1 (one with a VirtIO-GPU on the ten-row default desktop, where the compositor, desktop shell, app, terminal and terminal shell rows launch, hold exactly their grants and report ready with their bindings and a presented frame, then the compositor, desktop shell and app are each faulted over COM1 and must come back in dependency order, clients exiting compositor-gone and the terminal's shell hanging up, the old port generation refused as stale and resources matching the baseline after each, with no pointer or keyboard input; one with no display, which boots base), then the shell boot: a shell wget blocked in a TCP read wakes with ECONNRESET when the network service faults, init restarts network once, the shell's client capability is re-issued for generation 2 and nslookup and wget work again from the same shell, each wget's request received and answered by the fixture" ;;
+    test-net-acceptance) echo "#355 #221 acceptance: the M7.8 converged lane on QEMU slirp (restrict=on, DHCP) with a lane-generated CA as the only trust anchor; DNS over TCP and two HTTPS fetches through loopback guestfwd, no M7 test CA in the image, no network::fixture in the net service (standalone)" ;;
     test-system-boot) echo "#218 S3b default image: init starts storage then network on a fresh data disk, twice (format, then mount); the kernel checks every launched grant set and ready report" ;;
     *) echo "" ;;
   esac
@@ -319,6 +321,7 @@ test_aliases() {
     test-system-terminal) echo "system-terminal" ;;
     test-system-tablet) echo "system-tablet" ;;
     test-system-display) echo "system-display" ;;
+    test-net-acceptance) echo "net-acceptance" ;;
     *) echo "" ;;
   esac
 }

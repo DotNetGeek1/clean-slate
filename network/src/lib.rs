@@ -25,6 +25,10 @@ pub mod buffer;
 pub mod config;
 pub mod device;
 pub mod error;
+/// The hermetic M7 lab network's vocabulary. Only test builds and the `fixture` feature (the M7
+/// test kernels and xtask) compile it, so the production network service cannot reach it
+/// (#355; `cargo xtask test-net-acceptance` checks the service's feature set).
+#[cfg(any(test, feature = "fixture"))]
 pub mod fixture;
 pub mod limits;
 pub mod protocol;

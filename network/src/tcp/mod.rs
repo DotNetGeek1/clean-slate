@@ -12,7 +12,8 @@ mod state;
 mod stats;
 mod transport;
 
-#[cfg(any(test, feature = "alloc"))]
+// Fixture peers: they speak the M7 lab network, so only `fixture` builds have them (#355).
+#[cfg(any(test, all(feature = "alloc", feature = "fixture")))]
 mod test_peer;
 
 #[cfg(any(test, feature = "host-tls-peer"))]
@@ -31,7 +32,7 @@ pub use state::TcpState;
 pub use stats::TcpStats;
 pub use transport::{ListenerId, TcpTable, TcpTransport, MAX_TCP_LISTENERS, TCP_LISTEN_BACKLOG};
 
-#[cfg(any(test, feature = "alloc"))]
+#[cfg(any(test, all(feature = "alloc", feature = "fixture")))]
 pub use test_peer::TestPeer;
 
 #[cfg(any(test, feature = "host-tls-peer"))]
