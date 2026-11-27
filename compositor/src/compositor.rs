@@ -681,12 +681,14 @@ impl<P: WindowPolicy> Compositor<P> {
                     return Err(ProtocolError::UnsupportedFeature);
                 }
                 // A handle names a window listed this turn; a stale one (the window went
-                // away after the shell sent this) is a recoverable error.
+                // away after the shell sent this) is a recoverable error. A minimised window
+                // is restored first (#357).
                 let key = self
                     .window_list
                     .key_of(window)
-                    .filter(|&key| self.visible_window(key).is_some())
+                    .filter(|&key| self.listed_window(key).is_some())
                     .ok_or(ProtocolError::InvalidObject)?;
+                self.restore(key);
                 self.activate(key);
                 return Ok(());
             }
@@ -932,7 +934,9 @@ impl<P: WindowPolicy> Compositor<P> {
                 Ok(())
             }
             Request::Hide { window } => {
-                client.objects.window_mut(window)?.shown = false;
+                let entry = client.objects.window_mut(window)?;
+                entry.shown = false;
+                entry.minimized = false;
                 *needs_composite = true;
                 Ok(())
             }
@@ -959,7 +963,7 @@ impl<P: WindowPolicy> Compositor<P> {
             if count == MAX_WINDOWS {
                 break;
             }
-            let Some(window) = self.visible_window(entry.key) else {
+            let Some(window) = self.listed_window(entry.key) else {
                 continue;
             };
             let client = &self.clients[entry.client];
@@ -971,6 +975,7 @@ impl<P: WindowPolicy> Compositor<P> {
                 key: entry.key,
                 pid: identity.pid,
                 title: window.title,
+                minimized: window.minimized,
             });
             count += 1;
         }
@@ -1553,9 +1558,15 @@ fn insert_damage(damage: &mut OutputDamage, output: Size, rect: Rect) {
     }
 }
 
-/// Composited iff role-assigned and mapped; a `Toplevel` also needs a shown window and a
-/// `Popup` a visible parent (bounded walk: parents live in the same connection).
+/// Composited iff role-assigned and mapped; a `Toplevel` also needs a shown window that is not
+/// minimised and a `Popup` a visible parent (bounded walk: parents live in the same connection).
 fn surface_visible(client: &ClientSlot, surface: SurfaceId) -> bool {
+    surface_shown(client, surface, false)
+}
+
+/// [`surface_visible`], except that a minimised toplevel (#357) counts when `minimized_too`:
+/// what the window manager keeps mapped and the window list keeps listed.
+pub(super) fn surface_shown(client: &ClientSlot, surface: SurfaceId, minimized_too: bool) -> bool {
     let mut current = surface;
     for _ in 0..=MAX_SURFACES_PER_CLIENT {
         let Ok(entry) = client.objects.surface(current) else {
@@ -1570,7 +1581,7 @@ fn surface_visible(client: &ClientSlot, surface: SurfaceId) -> bool {
                 return entry
                     .window
                     .and_then(|w| client.objects.window(w).ok())
-                    .is_some_and(|w| w.shown);
+                    .is_some_and(|w| w.shown && (minimized_too || !w.minimized));
             }
             Some(SurfaceRole::Popup) => match entry.parent {
                 Some(parent) => current = parent,

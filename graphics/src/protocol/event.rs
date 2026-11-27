@@ -128,6 +128,13 @@ pub enum Event {
     /// `WindowFocused` (0x8703, `WINDOW_LIST`): the listed window with keyboard focus; `None`
     /// when no listed window has it.
     WindowFocused { window: Option<WindowHandle> },
+    /// `WindowMinimized` (0x8704, `WINDOW_LIST`): a listed window was minimised (hidden by the
+    /// window manager, still listed) or restored (#357). A window is listed restored, so this
+    /// follows `WindowAdded`/`WindowTitle` only for a window that is minimised.
+    WindowMinimized {
+        window: WindowHandle,
+        minimized: bool,
+    },
     /// `OutputChanged` (0x8800, `OUTPUT_EVENTS`): the output now runs `output` (#314). Sent
     /// after the mode change took effect; toplevels get a `Configure` with the new bounds as
     /// well, so only surfaces sized to the output (the shell's) need this event.
@@ -162,6 +169,7 @@ impl Event {
             Self::WindowTitle { .. } => OP_WINDOW_TITLE,
             Self::WindowRemoved { .. } => OP_WINDOW_REMOVED,
             Self::WindowFocused { .. } => OP_WINDOW_FOCUSED,
+            Self::WindowMinimized { .. } => OP_WINDOW_MINIMIZED,
             Self::OutputChanged { .. } => OP_OUTPUT_CHANGED,
         }
     }
@@ -320,6 +328,10 @@ impl Event {
             Self::WindowFocused { window } => {
                 write_u32_le(&mut out, 12, window.map_or(0, WindowHandle::raw));
             }
+            Self::WindowMinimized { window, minimized } => {
+                write_u32_le(&mut out, 12, window.raw());
+                out[16] = u8::from(minimized);
+            }
         }
         Ok(out)
     }
@@ -432,6 +444,14 @@ impl Event {
             },
             OP_WINDOW_FOCUSED => Self::WindowFocused {
                 window: WindowHandle::new(read_u32_le(bytes, 12)),
+            },
+            OP_WINDOW_MINIMIZED => Self::WindowMinimized {
+                window: required_handle(bytes).map_err(|c| decode_error(c, bytes))?,
+                minimized: match bytes[16] {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(decode_error(ProtocolError::MalformedFrame, bytes)),
+                },
             },
             OP_OUTPUT_CHANGED => Self::OutputChanged {
                 output: Self::decode_output(bytes).map_err(|c| decode_error(c, bytes))?,

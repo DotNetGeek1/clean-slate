@@ -54,10 +54,10 @@ use clean_slate_service_fixtures::{
     NETWORK_SERVICE_NEXT_METADATA_BYTES, NETWORK_SERVICE_NEXT_WIRE_BYTES,
     NETWORK_SERVICE_RESULT_ERROR, NETWORK_SERVICE_RESULT_OK, NETWORK_SERVICE_TRUST_ADDRESS,
     NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_AUDIT_REFUSAL,
-    NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY,
-    NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
-    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK,
-    NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
+    NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT,
+    NET_SUBOP_PUBLISH_RESOLVER, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
+    NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
+    NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
 };
 use core::alloc::{GlobalAlloc, Layout};
 use core::future::Future;
@@ -415,6 +415,28 @@ fn network_capability(device_id: u64) -> Result<u64, u64> {
 
 fn net_request(args: [u64; 6]) -> u64 {
     raw_syscall(SYSCALL_NR_NETWORK_REQUEST, args)
+}
+
+/// Tells the kernel the resolver this service uses (`NET_SUBOP_PUBLISH_RESOLVER`, #354), so
+/// Linux programs read the same one from `/etc/resolv.conf`. A failed report leaves the file
+/// empty (or on the launch configuration's resolver); the service itself is unaffected.
+fn publish_resolver(raw_handle: u64, resolver: Option<SocketAddrV4>) {
+    let (present, addr, port) = match resolver {
+        Some(resolver) => (
+            1,
+            u64::from(u32::from_be_bytes(resolver.addr.octets())),
+            u64::from(resolver.port),
+        ),
+        None => (0, 0, 0),
+    };
+    let _ = net_request([
+        NET_SUBOP_PUBLISH_RESOLVER,
+        raw_handle,
+        present,
+        addr,
+        port,
+        0,
+    ]);
 }
 
 /// Blocks in `NET_SUBOP_WAIT_WORK` until a source in `mask` is ready or the IRQ-tick
@@ -1039,6 +1061,7 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     } else {
         (network, None)
     };
+    publish_resolver(raw_handle, network.resolver);
     unsafe {
         // #221 stage E: each caller reaches what its app's policy names, judged against the
         // resolver in use: the launch configuration's, or for a DHCP launch without one, the

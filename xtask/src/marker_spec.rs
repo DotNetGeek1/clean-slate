@@ -281,6 +281,32 @@ pub fn first_guest_failure_in_bytes(transcript: &[u8], include_tail: bool) -> Op
     first_guest_failure(&text, include_tail).map(str::to_owned)
 }
 
+/// [`first_guest_failure_in_bytes`] over a transcript that only grows, rescanning only what
+/// arrived since the last call (from the start of the line that was still incomplete then).
+///
+/// The serial reader hands over whatever one socket read returned, often a byte or two, so a
+/// lane that rescanned the whole transcript per read did quadratic work: by the later steps of
+/// `test-m10-desktop` under host load it spent most of its time rescanning and read the guest's
+/// lines seconds after they were printed (#349).
+#[derive(Debug, Default)]
+pub struct GuestFailureScan {
+    /// Where the first line not yet known to be complete starts.
+    line_start: usize,
+}
+
+impl GuestFailureScan {
+    /// The first complete failure line in `transcript[..]` not reported before. `transcript`
+    /// must be the same buffer, only grown, on every call.
+    pub fn next_in(&mut self, transcript: &[u8]) -> Option<String> {
+        let from = self.line_start.min(transcript.len());
+        let fresh = &transcript[from..];
+        if let Some(end) = fresh.iter().rposition(|&byte| byte == b'\n') {
+            self.line_start = from + end + 1;
+        }
+        first_guest_failure_in_bytes(fresh, false)
+    }
+}
+
 fn complete_lines(output: &str, include_tail: bool) -> &str {
     match output.rfind('\n') {
         _ if include_tail => output,
@@ -345,6 +371,37 @@ fn check_line_fields(line: &str, fields: &[(&str, &str)]) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_failure_scan_finds_a_line_split_across_reads_once_it_is_complete() {
+        let mut scan = GuestFailureScan::default();
+        let mut transcript = b"[BOOT] ok\n[STOR".to_vec();
+        assert_eq!(scan.next_in(&transcript), None);
+        transcript.extend_from_slice(b"] FAI");
+        assert_eq!(scan.next_in(&transcript), None);
+        transcript.extend_from_slice(b"L disk\n[IDLE ] quiet\n");
+        assert_eq!(
+            scan.next_in(&transcript).as_deref(),
+            Some("[STOR] FAIL disk")
+        );
+        // Lines already scanned are not reported again.
+        transcript.extend_from_slice(b"[IDLE ] quiet\n");
+        assert_eq!(scan.next_in(&transcript), None);
+    }
+
+    #[test]
+    fn the_failure_scan_matches_a_whole_transcript_scan() {
+        let transcript = b"[A] ok\n[B] FAIL-CLOSED x\n[C] ok\n[D] FAIL now\n[E] FAIL tail";
+        let mut scan = GuestFailureScan::default();
+        let mut found = None;
+        for end in 0..=transcript.len() {
+            if let Some(failure) = scan.next_in(&transcript[..end]) {
+                found.get_or_insert(failure);
+            }
+        }
+        assert_eq!(found, first_guest_failure_in_bytes(transcript, false));
+        assert_eq!(found.as_deref(), Some("[D] FAIL now"));
+    }
 
     #[test]
     fn unexpected_guest_failure_reports_any_fail_line_the_lane_did_not_require() {
