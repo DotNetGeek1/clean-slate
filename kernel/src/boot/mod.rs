@@ -40,39 +40,9 @@ use crate::diagnostics::qemu::qemu_exit_failure;
 use crate::diagnostics::serial::serial_init;
 use crate::diagnostics::serial::serial_write_fmt;
 use crate::diagnostics::serial::serial_write_line;
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m5-block-self-test",
-    feature = "m10-framebuffer-self-test",
-    feature = "m7-net-device-self-test",
-    feature = "m10-virtio-modern-self-test",
-    feature = "m10-virtio-gpu-self-test",
-    feature = "m7-tls-self-test",
-    feature = "m7-tls-fail-closed-self-test",
-    feature = "m7-dns-self-test"
-)))]
+#[cfg(clean_slate_boot_tail)]
 use crate::interrupt::timer::initialize_timer;
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m5-block-self-test",
-    feature = "m10-framebuffer-self-test",
-    feature = "m7-net-device-self-test",
-    feature = "m10-virtio-modern-self-test",
-    feature = "m10-virtio-gpu-self-test",
-    feature = "m7-tls-self-test",
-    feature = "m7-tls-fail-closed-self-test",
-    feature = "m7-dns-self-test"
-)))]
+#[cfg(clean_slate_boot_tail)]
 use crate::interrupt::timer::report_timer_contract;
 use crate::limits::MAX_GUARDED_STACKS;
 use crate::mm::address_space::set_kernel_root_frame;
@@ -84,32 +54,7 @@ use crate::mm::layout::{
     assert_conventional_linux_window_clear, init_kernel_low_carve_outs_from_reserved,
     log_kernel_low_carve_outs, register_kernel_low_carve_out,
 };
-#[cfg(all(
-    not(feature = "m1-self-test"),
-    not(feature = "m2-double-fault-self-test"),
-    not(feature = "m2-timer-self-test"),
-    not(feature = "m3-address-space-self-test"),
-    not(feature = "m3-resources-self-test"),
-    not(feature = "m4-crash-service-self-test"),
-    not(feature = "m4-recovery-self-test"),
-    not(feature = "m3-entry-self-test"),
-    not(feature = "m8-linux-dispatch-self-test"),
-    not(feature = "m8-linux-hello-self-test"),
-    not(feature = "m5-block-self-test"),
-    not(feature = "m10-framebuffer-self-test"),
-    not(feature = "m7-net-device-self-test"),
-    not(feature = "m10-virtio-modern-self-test"),
-    not(feature = "m10-virtio-gpu-self-test"),
-    not(feature = "m7-tls-self-test"),
-    not(feature = "m7-tls-fail-closed-self-test"),
-    not(feature = "m7-dns-self-test"),
-    not(feature = "m8-linux-image-self-test"),
-    not(feature = "m9-low-va-self-test"),
-    not(feature = "m9-linux-exec-self-test"),
-    not(feature = "m9-linux-runtime-self-test"),
-    not(feature = "m9-rootfs-self-test"),
-    not(feature = "m9-linux-fs-self-test")
-))]
+#[cfg(clean_slate_boot_tail)]
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::inspect_current_mapping;
 use crate::mm::region::NormalizedMemoryMap;
@@ -120,45 +65,13 @@ use crate::mm::PAGE_SIZE;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m5-block-self-test",
-    feature = "m10-framebuffer-self-test",
-    feature = "m7-net-device-self-test",
-    feature = "m10-virtio-modern-self-test",
-    feature = "m10-virtio-gpu-self-test",
-    feature = "m7-tls-self-test",
-    feature = "m7-tls-fail-closed-self-test",
-    feature = "m7-dns-self-test",
-    feature = "m9-stack-guard-self-test"
-)))]
-#[cfg(not(clean_slate_system_init))]
+#[cfg(all(
+    clean_slate_boot_tail,
+    not(feature = "m9-stack-guard-self-test"),
+    not(clean_slate_system_init)
+))]
 use crate::sched::dispatch::initialize_scheduler;
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m5-block-self-test",
-    feature = "m10-framebuffer-self-test",
-    feature = "m7-net-device-self-test",
-    feature = "m10-virtio-modern-self-test",
-    feature = "m10-virtio-gpu-self-test",
-    feature = "m7-tls-self-test",
-    feature = "m7-tls-fail-closed-self-test",
-    feature = "m7-dns-self-test"
-)))]
+#[cfg(clean_slate_boot_tail)]
 use crate::sched::dispatch::start_scheduler;
 use crate::sched::task_stacks_mut;
 use crate::sched::SCHEDULER_THREAD_SLOTS;
@@ -166,7 +79,7 @@ use crate::sched::SCHEDULER_THREAD_SLOTS;
 use crate::selftest::m10_clock::start_m10_clock_self_test;
 #[cfg(feature = "m10-framebuffer-self-test")]
 use crate::selftest::m10_framebuffer::run_m10_framebuffer_self_test;
-#[cfg(feature = "m10-input-self-test")]
+#[cfg(clean_slate_boot_selftest = "m10-input")]
 use crate::selftest::m10_input::start_m10_input_self_test;
 #[cfg(clean_slate_userspace_selftest = "m10-native-memory")]
 use crate::selftest::m10_native_memory::start_m10_native_memory_self_test;
@@ -237,29 +150,21 @@ use crate::selftest::m7_tls::run_m7_tls_fail_closed_self_test;
     not(feature = "m7-tls-fail-closed-self-test")
 ))]
 use crate::selftest::m7_tls::run_m7_tls_self_test;
-#[cfg(all(
-    feature = "m8-linux-dispatch-self-test",
-    not(feature = "m9-fd-core-self-test")
-))]
+#[cfg(clean_slate_boot_selftest = "m8-linux-dispatch")]
 use crate::selftest::m8_linux_dispatch::start_m8_linux_dispatch_self_test;
-#[cfg(feature = "m8-linux-hello-self-test")]
+#[cfg(clean_slate_boot_selftest = "m8-linux-hello")]
 use crate::selftest::m8_linux_hello::start_m8_linux_hello_self_test;
 #[cfg(clean_slate_userspace_selftest = "m8-linux-image")]
 use crate::selftest::m8_linux_image::start_m8_linux_image_self_test;
-#[cfg(feature = "m9-block-wake-self-test")]
+#[cfg(clean_slate_boot_selftest = "m9-block-wake")]
 use crate::selftest::m9_block_wake::start_m9_block_wake_self_test;
-#[cfg(feature = "m9-fd-core-self-test")]
+#[cfg(clean_slate_boot_selftest = "m9-fd-core")]
 use crate::selftest::m9_fd_core::start_m9_fd_core_self_test;
-#[cfg(feature = "m9-linux-trace-self-test")]
+#[cfg(clean_slate_boot_selftest = "m9-linux-trace")]
 use crate::selftest::m9_linux_trace::start_m9_linux_trace_self_test;
-#[cfg(feature = "m9-low-va-self-test")]
+#[cfg(clean_slate_boot_selftest = "m9-low-va")]
 use crate::selftest::m9_low_va::start_m9_low_va_self_test;
-#[cfg(all(
-    feature = "m9-syscall-fail-closed-self-test",
-    not(feature = "m9-low-va-self-test"),
-    not(feature = "m9-fd-core-self-test"),
-    not(feature = "m9-block-wake-self-test")
-))]
+#[cfg(clean_slate_boot_selftest = "m9-syscall-fail-closed")]
 use crate::selftest::m9_syscall_fail_closed::start_m9_syscall_fail_closed_self_test;
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::initialize_syscall_abi;
@@ -579,34 +484,31 @@ fn run_inner() -> Result<(), &'static str> {
 
     #[cfg(feature = "m2-timer-self-test")]
     {
-        initialize_timer();
+        crate::interrupt::timer::initialize_timer();
         serial_write_line("[TIME] timer initialized");
-        report_timer_contract();
+        crate::interrupt::timer::report_timer_contract();
         start_timer_self_test_task()
     }
 
-    #[cfg(feature = "m9-userspace-self-test")]
+    #[cfg(clean_slate_boot_selftest = "m9-userspace")]
     {
         use crate::selftest::m9_userspace::start_m9_userspace_self_test;
         start_m9_userspace_self_test(allocator)
     }
 
-    #[cfg(all(
-        not(feature = "m9-userspace-self-test"),
-        feature = "m9-linux-socket-self-test"
-    ))]
+    #[cfg(clean_slate_boot_selftest = "m9-linux-socket")]
     {
         use crate::selftest::m9_linux_socket::start_m9_linux_socket_self_test;
         start_m9_linux_socket_self_test(allocator)
     }
 
-    #[cfg(feature = "m9-linux-proc-self-test")]
+    #[cfg(clean_slate_boot_selftest = "m9-linux-proc")]
     {
         use crate::selftest::m9_linux_proc::start_m9_linux_proc_self_test;
         start_m9_linux_proc_self_test(allocator)
     }
 
-    #[cfg(all(clean_slate_linux_rootfs, not(feature = "m9-rootfs-self-test")))]
+    #[cfg(all(clean_slate_linux_rootfs, not(clean_slate_boot_selftest = "m9-rootfs")))]
     {
         crate::process::linux_rootfs::ensure_rootfs_integrity_logged()
             .map_err(|_| "m9 rootfs: embedded image failed integrity checks")?;
@@ -616,152 +518,76 @@ fn run_inner() -> Result<(), &'static str> {
             .map_err(|_| "m9 linux fs: namespace init failed")?;
     }
 
-    #[cfg(feature = "m9-linux-runtime-self-test")]
+    #[cfg(clean_slate_boot_selftest = "m9-linux-runtime")]
     {
         use crate::selftest::m9_linux_runtime::start_m9_linux_runtime_self_test;
         start_m9_linux_runtime_self_test(allocator)
     }
 
-    #[cfg(feature = "m9-linux-fs-self-test")]
+    #[cfg(clean_slate_boot_selftest = "m9-linux-fs")]
     {
         use crate::selftest::m9_linux_fs::start_m9_linux_fs_self_test;
         start_m9_linux_fs_self_test(allocator)
     }
 
-    #[cfg(all(
-        not(feature = "m9-linux-runtime-self-test"),
-        not(feature = "m9-linux-socket-self-test"),
-        not(feature = "m9-linux-fs-self-test"),
-        feature = "m9-rootfs-self-test"
-    ))]
+    #[cfg(clean_slate_boot_selftest = "m9-rootfs")]
     {
         use crate::selftest::m9_rootfs::start_m9_rootfs_self_test;
         start_m9_rootfs_self_test(allocator)
     }
 
-    #[cfg(all(
-        not(feature = "m9-linux-runtime-self-test"),
-        not(feature = "m9-linux-socket-self-test"),
-        not(feature = "m9-linux-proc-self-test"),
-        not(feature = "m9-linux-fs-self-test"),
-        not(feature = "m9-rootfs-self-test"),
-        feature = "m9-linux-exec-self-test"
-    ))]
+    #[cfg(clean_slate_boot_selftest = "m9-linux-exec")]
     {
         use crate::selftest::m9_linux_exec::start_m9_linux_exec_self_test;
         start_m9_linux_exec_self_test(allocator)
     }
 
-    #[cfg(all(
-        not(feature = "m9-linux-runtime-self-test"),
-        not(feature = "m9-linux-proc-self-test"),
-        not(feature = "m9-rootfs-self-test"),
-        not(feature = "m9-linux-fs-self-test"),
-        not(feature = "m9-linux-exec-self-test"),
-        feature = "m9-low-va-self-test"
-    ))]
+    #[cfg(clean_slate_boot_selftest = "m9-low-va")]
     {
         start_m9_low_va_self_test(allocator)
     }
 
-    #[cfg(all(
-        not(feature = "m9-low-va-self-test"),
-        not(feature = "m9-linux-exec-self-test"),
-        not(feature = "m9-linux-runtime-self-test"),
-        not(feature = "m9-rootfs-self-test"),
-        not(feature = "m9-linux-fs-self-test"),
-        feature = "m8-linux-hello-self-test"
-    ))]
+    #[cfg(clean_slate_boot_selftest = "m8-linux-hello")]
     {
         start_m8_linux_hello_self_test(allocator)
     }
 
-    #[cfg(all(
-        feature = "m9-block-wake-self-test",
-        not(feature = "m9-low-va-self-test"),
-        not(feature = "m9-fd-core-self-test"),
-        not(feature = "m8-linux-hello-self-test"),
-        not(feature = "m8-linux-dispatch-self-test"),
-        not(feature = "m9-syscall-fail-closed-self-test")
-    ))]
+    #[cfg(clean_slate_boot_selftest = "m9-block-wake")]
     {
         start_m9_block_wake_self_test(allocator)
     }
 
-    #[cfg(all(
-        feature = "m9-linux-trace-self-test",
-        not(feature = "m9-low-va-self-test"),
-        not(feature = "m9-linux-exec-self-test"),
-        not(feature = "m9-rootfs-self-test"),
-        not(feature = "m9-linux-fs-self-test"),
-        not(feature = "m9-block-wake-self-test"),
-        not(feature = "m9-fd-core-self-test"),
-        not(feature = "m8-linux-hello-self-test"),
-        not(feature = "m9-syscall-fail-closed-self-test")
-    ))]
+    #[cfg(clean_slate_boot_selftest = "m9-linux-trace")]
     {
         start_m9_linux_trace_self_test(allocator)
     }
 
-    #[cfg(all(
-        feature = "m9-fd-core-self-test",
-        not(feature = "m9-low-va-self-test"),
-        not(feature = "m9-linux-exec-self-test"),
-        not(feature = "m9-linux-runtime-self-test"),
-        not(feature = "m9-rootfs-self-test"),
-        not(feature = "m9-linux-fs-self-test"),
-        not(feature = "m9-block-wake-self-test"),
-        not(feature = "m9-linux-trace-self-test"),
-        not(feature = "m8-linux-hello-self-test"),
-        not(feature = "m9-syscall-fail-closed-self-test")
-    ))]
+    #[cfg(clean_slate_boot_selftest = "m9-fd-core")]
     {
         start_m9_fd_core_self_test(allocator)
     }
 
-    #[cfg(all(
-        not(feature = "m9-low-va-self-test"),
-        not(feature = "m9-fd-core-self-test"),
-        not(feature = "m9-linux-exec-self-test"),
-        not(feature = "m9-linux-runtime-self-test"),
-        not(feature = "m9-rootfs-self-test"),
-        not(feature = "m9-linux-fs-self-test"),
-        not(feature = "m9-block-wake-self-test"),
-        feature = "m9-syscall-fail-closed-self-test",
-        not(feature = "m8-linux-hello-self-test"),
-        not(feature = "m8-linux-dispatch-self-test")
-    ))]
+    #[cfg(clean_slate_boot_selftest = "m9-syscall-fail-closed")]
     {
         start_m9_syscall_fail_closed_self_test(allocator)
     }
 
-    #[cfg(all(
-        not(feature = "m9-low-va-self-test"),
-        not(feature = "m9-linux-exec-self-test"),
-        not(feature = "m9-linux-runtime-self-test"),
-        not(feature = "m9-rootfs-self-test"),
-        not(feature = "m9-linux-fs-self-test"),
-        feature = "m8-linux-dispatch-self-test",
-        not(feature = "m8-linux-hello-self-test"),
-        not(feature = "m9-syscall-fail-closed-self-test"),
-        not(feature = "m9-block-wake-self-test"),
-        not(feature = "m9-fd-core-self-test")
-    ))]
+    #[cfg(clean_slate_boot_selftest = "m8-linux-dispatch")]
     {
         start_m8_linux_dispatch_self_test(allocator)
     }
 
-    #[cfg(feature = "m10-nxe-self-test")]
+    #[cfg(clean_slate_boot_selftest = "m10-nxe")]
     {
         crate::selftest::m10_nxe::start_m10_nxe_self_test(allocator)
     }
 
-    #[cfg(feature = "m10-shared-buffer-self-test")]
+    #[cfg(clean_slate_boot_selftest = "m10-shared-buffer")]
     {
         crate::selftest::m10_shared_buffer::start_m10_shared_buffer_self_test(allocator)
     }
 
-    #[cfg(feature = "m10-input-self-test")]
+    #[cfg(clean_slate_boot_selftest = "m10-input")]
     {
         start_m10_input_self_test(allocator)
     }
@@ -888,9 +714,9 @@ fn run_inner() -> Result<(), &'static str> {
 
     #[cfg(feature = "m4-recovery-self-test")]
     {
-        initialize_timer();
+        crate::interrupt::timer::initialize_timer();
         serial_write_line("[TIME] timer initialized");
-        report_timer_contract();
+        crate::interrupt::timer::report_timer_contract();
         start_recovery_self_test(allocator)
     }
 
@@ -954,7 +780,7 @@ fn run_inner() -> Result<(), &'static str> {
         initialize_scheduler()?;
         #[cfg(feature = "m9-stack-guard-self-test")]
         crate::selftest::m9_stack_guard::configure_stack_guard_probe_thread()?;
-        #[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
+        #[cfg(feature = "m8-linux-hello")]
         {
             // Load failure must never be kernel-fatal. The launch path already
             // emits the specific `[LNX ] load failed: …` line; do not re-log.
@@ -996,6 +822,6 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     // The m9-userspace starter above diverges; this tail only satisfies the return type.
-    #[cfg(feature = "m9-userspace-self-test")]
+    #[cfg(clean_slate_boot_selftest = "m9-userspace")]
     Ok(())
 }

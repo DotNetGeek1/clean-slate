@@ -56,34 +56,40 @@ const VIRTIO_GPU_WITHOUT_BOOT_TAIL_FEATURES: &[&str] = &["m10-virtio-gpu-self-te
 /// other build leaves COM1 output-only, so input on the line is never echoed.
 const SERIAL_CONSOLE_FEATURES: &[&str] = &["serial-input-self-test"];
 
-/// Self-tests whose boot-path dispatch arm runs instead of the userspace dispatch block, which
-/// `m3-entry-self-test` (a dependency of most userspace self-tests) otherwise selects. Without
-/// any of these, `m3-entry-self-test` builds select an arm of that block.
-const USERSPACE_DISPATCH_OVERRIDE_FEATURES: &[&str] = &[
-    "m10-nxe-self-test",
-    "m10-shared-buffer-self-test",
-    "m8-linux-dispatch-self-test",
-    "m8-linux-hello-self-test",
-    "m9-syscall-fail-closed-self-test",
-    "m9-block-wake-self-test",
-    "m9-low-va-self-test",
-    "m9-linux-exec-self-test",
-    "m9-linux-runtime-self-test",
-    "m9-linux-socket-self-test",
-    "m9-linux-proc-self-test",
-    "m9-linux-trace-self-test",
-    "m9-rootfs-self-test",
-    "m9-linux-fs-self-test",
-    "m9-userspace-self-test",
-    "m9-fd-core-self-test",
-    "m10-input-self-test",
+/// The boot-path dispatch arms in `run_inner` that run instead of the userspace dispatch block,
+/// which `m3-entry-self-test` (a dependency of most userspace self-tests) otherwise selects.
+/// They are listed in priority order: in a build with features of several arms, the first arm
+/// with one of its features sets `clean_slate_boot_selftest="<arm>"`, and that arm alone is
+/// compiled. A build with any of these features selects no arm of the userspace dispatch block.
+/// A new boot-path arm is a row here and its own `cfg`.
+const BOOT_DISPATCH_ARMS: &[(&str, &[&str])] = &[
+    ("m9-userspace", &["m9-userspace-self-test"]),
+    ("m9-linux-socket", &["m9-linux-socket-self-test"]),
+    ("m9-linux-proc", &["m9-linux-proc-self-test"]),
+    ("m9-linux-runtime", &["m9-linux-runtime-self-test"]),
+    ("m9-linux-fs", &["m9-linux-fs-self-test"]),
+    ("m9-rootfs", &["m9-rootfs-self-test"]),
+    ("m9-linux-exec", &["m9-linux-exec-self-test"]),
+    ("m9-low-va", &["m9-low-va-self-test"]),
+    ("m8-linux-hello", &["m8-linux-hello-self-test"]),
+    ("m9-block-wake", &["m9-block-wake-self-test"]),
+    ("m9-linux-trace", &["m9-linux-trace-self-test"]),
+    ("m9-fd-core", &["m9-fd-core-self-test"]),
+    (
+        "m9-syscall-fail-closed",
+        &["m9-syscall-fail-closed-self-test"],
+    ),
+    ("m8-linux-dispatch", &["m8-linux-dispatch-self-test"]),
+    ("m10-nxe", &["m10-nxe-self-test"]),
+    ("m10-shared-buffer", &["m10-shared-buffer-self-test"]),
+    ("m10-input", &["m10-input-self-test"]),
 ];
 
 /// The arms of the userspace dispatch block, in priority order. Lanes enable several of these
 /// features through Cargo dependencies, so the most specific arm must come first;
-/// `m3-entry-self-test` is the fallback. [`USERSPACE_DISPATCH_OVERRIDE_FEATURES`] (including
-/// `m9-linux-fs-self-test` and `m9-userspace-self-test`) are tested before this list. In an
-/// `m3-entry-self-test` build without one of those, the first arm with one of its features sets
+/// `m3-entry-self-test` is the fallback. [`BOOT_DISPATCH_ARMS`] (including `m9-linux-fs` and
+/// `m9-userspace`) are tested before this list. In an `m3-entry-self-test` build with no
+/// boot-path arm, the first arm with one of its features sets
 /// `clean_slate_userspace_selftest="<arm>"`, and that arm alone is compiled. A new arm in the
 /// block is a row here and its own `cfg`.
 const USERSPACE_DISPATCH_ARMS: &[(&str, &[&str])] = &[
@@ -213,24 +219,31 @@ fn emit_boot_tail_cfgs(system_init: bool) {
     }
 }
 
-fn emit_userspace_dispatch_cfgs() -> Option<&'static str> {
-    let arms: Vec<String> = USERSPACE_DISPATCH_ARMS
-        .iter()
-        .map(|(arm, _)| format!("\"{arm}\""))
-        .collect();
+/// Declares a `cfg(<name>, values(...))` over the arm names of `arms`, and returns the first arm
+/// with an enabled feature.
+fn declare_dispatch_arms(name: &str, arms: &[(&'static str, &[&str])]) -> Option<&'static str> {
+    let values: Vec<String> = arms.iter().map(|(arm, _)| format!("\"{arm}\"")).collect();
     println!(
-        "cargo::rustc-check-cfg=cfg(clean_slate_userspace_selftest, values({}))",
-        arms.join(", ")
+        "cargo::rustc-check-cfg=cfg({name}, values({}))",
+        values.join(", ")
     );
-    if !any_feature_enabled(&["m3-entry-self-test"])
-        || any_feature_enabled(USERSPACE_DISPATCH_OVERRIDE_FEATURES)
-    {
+    arms.iter()
+        .find(|(_, features)| any_feature_enabled(features))
+        .map(|(arm, _)| *arm)
+}
+
+/// Sets `clean_slate_boot_selftest` by [`BOOT_DISPATCH_ARMS`] and, in a build without one,
+/// `clean_slate_userspace_selftest` by [`USERSPACE_DISPATCH_ARMS`]. Returns the userspace arm.
+fn emit_userspace_dispatch_cfgs() -> Option<&'static str> {
+    let boot_arm = declare_dispatch_arms("clean_slate_boot_selftest", BOOT_DISPATCH_ARMS);
+    let selected = declare_dispatch_arms("clean_slate_userspace_selftest", USERSPACE_DISPATCH_ARMS);
+    if let Some(arm) = boot_arm {
+        println!("cargo::rustc-cfg=clean_slate_boot_selftest=\"{arm}\"");
         return None;
     }
-    let selected = USERSPACE_DISPATCH_ARMS
-        .iter()
-        .find(|(_, features)| any_feature_enabled(features))
-        .map(|(arm, _)| *arm);
+    if !any_feature_enabled(&["m3-entry-self-test"]) {
+        return None;
+    }
     if let Some(arm) = selected {
         if arm.starts_with("m3-") && any_feature_enabled(M3_ARM_OVERRIDE_FEATURES) {
             return None;
