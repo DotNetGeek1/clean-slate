@@ -1,0 +1,84 @@
+# Temporary #315 soak: 30 runs of `cargo xtask test-m10-desktop` under stress-ng CPU load,
+# the same load as the #240 soak that found the fault (stress-ng --cpu 6 on a 4-vCPU host).
+# Not for merge; the branch's PR exists only to run this.
+name: Soak test-m10-desktop (#315)
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/soak-m10-desktop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    name: soak shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    env:
+      RUNS_PER_SHARD: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rust-src
+          targets: x86_64-unknown-uefi
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install QEMU, OVMF and stress-ng
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf stress-ng
+          qemu-system-x86_64 --version
+          nproc
+
+      # One unloaded warm-up run builds everything, so the loaded runs time the lane, not cargo.
+      - name: Warm-up build and run (no load, not counted)
+        run: cargo xtask test-m10-desktop
+
+      - name: Loaded runs
+        run: |
+          set -u
+          mkdir -p soak
+          stress-ng --cpu 6 --timeout 0 --quiet &
+          STRESS=$!
+          trap 'kill $STRESS 2>/dev/null || true' EXIT
+          sleep 5
+          pass=0; fail=0
+          for i in $(seq 1 "$RUNS_PER_SHARD"); do
+            run="s${{ matrix.shard }}r$i"
+            start=$(date +%s)
+            if cargo xtask test-m10-desktop > "soak/$run.log" 2>&1; then
+              result=PASS; pass=$((pass + 1))
+            else
+              result=FAIL; fail=$((fail + 1))
+            fi
+            secs=$(( $(date +%s) - start ))
+            mkdir -p "soak/$run"
+            for m in m10-desktop-virtio-gpu m10-desktop-framebuffer; do
+              [ -f "target/xtask-artifacts/$m/serial.log" ] && cp "target/xtask-artifacts/$m/serial.log" "soak/$run/$m-serial.log"
+              # The app and shell exit reasons after the compositor fault, per machine.
+              grep -h "exit reason=" "target/xtask-artifacts/$m/serial.log" 2>/dev/null | sed "s/^/$run $m: /" >> soak/exit-reasons.txt || true
+            done
+            echo "$run $result ${secs}s $(grep -m1 -E 'did not|FAIL|error' "soak/$run.log" || true)" | tee -a soak/summary.txt
+          done
+          echo "shard ${{ matrix.shard }}: pass=$pass fail=$fail" | tee -a soak/summary.txt
+          echo "### shard ${{ matrix.shard }}: $pass/$RUNS_PER_SHARD passed" >> "$GITHUB_STEP_SUMMARY"
+          sed 's/^/    /' soak/summary.txt >> "$GITHUB_STEP_SUMMARY"
+          [ "$fail" -eq 0 ]
+
+      - name: Upload soak logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-shard-${{ matrix.shard }}
+          path: soak
+          if-no-files-found: ignore
