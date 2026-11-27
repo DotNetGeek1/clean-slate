@@ -25,6 +25,7 @@ use clean_slate_capability::{
     AuditEvent, AuditKind, AuditOutcome, ResourceClass, Rights, AUDIT_EVENT_SIZE_BYTES,
 };
 use clean_slate_native_abi::directory::is_entry_of;
+use clean_slate_native_abi::object::OBJECT_SERVICE_ROLE_ID;
 use clean_slate_native_abi::status::STATUS_ENOENT;
 use clean_slate_runtime::storage::{Directory, Entry, Object};
 use clean_slate_runtime::{Error, Syscalls};
@@ -194,20 +195,30 @@ impl StoredRecord {
     }
 }
 
-/// Whether the reader keeps `event`. Its own allowed uses of the log and of its store are not
-/// kept: persisting a batch is itself a use of the store, so keeping those would make every
-/// drain write the uses of the one before it, and the log would never go quiet. Everything
-/// else is kept, the reader's own denials included.
+/// Whether the reader keeps `event`. Persisting a batch is itself a use of the store, and the
+/// storage service serving it uses its service role and its block device, so keeping those
+/// allowed uses would make every drain write the uses of the one before it, and the log would
+/// never go quiet. Not kept, then: the reader's own allowed uses of the log and of its store,
+/// and any holder's allowed uses of the object-service role or of a block device, which are
+/// the storage service serving requests (every client's request is kept as the client's use
+/// of its own object capability). Everything else is kept, every denial included.
 pub fn worth_keeping(event: &[u8; AUDIT_EVENT_SIZE_BYTES], reader: u64, store: u64) -> bool {
     let outcome = offset_of!(AuditEvent, outcome) + offset_of!(AuditOutcome, tag);
-    let own_allowed_use = word(event, offset_of!(AuditEvent, actor)) == reader
-        && event[offset_of!(AuditEvent, kind)] == AuditKind::Authorize as u8
+    let allowed_use = event[offset_of!(AuditEvent, kind)] == AuditKind::Authorize as u8
         && event[outcome] == AuditOutcome::TAG_ALLOWED;
-    if !own_allowed_use {
+    if !allowed_use {
         return true;
     }
     let resource = word(event, offset_of!(AuditEvent, resource_id));
     let class = event[offset_of!(AuditEvent, class)];
+    let serves_storage = class == ResourceClass::BlockDevice as u8
+        || (class == ResourceClass::PersistentObject as u8 && resource == OBJECT_SERVICE_ROLE_ID);
+    if serves_storage {
+        return false;
+    }
+    if word(event, offset_of!(AuditEvent, actor)) != reader {
+        return true;
+    }
     let requested = offset_of!(AuditEvent, requested);
     let mut rights = [0u8; 4];
     rights.copy_from_slice(&event[requested..requested + 4]);

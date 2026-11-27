@@ -379,7 +379,7 @@ fn a_cut_segment_a_foreign_header_and_a_broken_link_are_found() {
 }
 
 #[test]
-fn the_readers_own_allowed_uses_of_the_log_and_its_store_are_not_kept() {
+fn the_readers_own_allowed_uses_and_the_storage_services_serving_uses_are_not_kept() {
     let use_of = |actor: u64, resource: ResourceRef, rights: Rights, result| {
         bytes_of(&clean_slate_capability::event_for(
             1,
@@ -427,6 +427,29 @@ fn the_readers_own_allowed_uses_of_the_log_and_its_store_are_not_kept() {
         Ok(())
     )));
     assert!(keep(bytes_of(&AuditEvent::lost(1, 3))));
+    // The storage service serving the store: its allowed uses of its role and its block
+    // device are not kept, whoever holds them; their denials are.
+    let role = ResourceRef::object(OBJECT_SERVICE_ROLE_ID);
+    let block = ResourceRef {
+        class: ResourceClass::BlockDevice,
+        id: 1,
+        instance_generation: 0,
+    };
+    const STORAGE: u64 = READER + 7;
+    assert!(!keep(use_of(STORAGE, role, Rights::INSPECT, Ok(()))));
+    assert!(!keep(use_of(STORAGE, block, Rights::READ, Ok(()))));
+    assert!(keep(use_of(
+        STORAGE,
+        role,
+        Rights::INSPECT,
+        Err(CapabilityError::MissingRight)
+    )));
+    assert!(keep(use_of(
+        STORAGE,
+        block,
+        Rights::WRITE,
+        Err(CapabilityError::UnauthorizedHolder)
+    )));
 }
 
 #[test]
