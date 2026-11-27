@@ -16,21 +16,24 @@ use crate::tokens::{ChromeMetrics, Rgba, ShadowToken};
 
 /// Window control buttons, right to left in the title bar.
 ///
-/// Only controls that act are drawn and hit-tested. Minimise and maximise were removed in #115
-/// while they did nothing; they come back with a minimised-window list in the rail.
+/// Only controls that act are drawn and hit-tested. Minimise hides the window until the rail
+/// restores it (#357); maximise stays out until it does something.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChromeControl {
+    /// Minimise: hide the window; the rail lists it and a click there restores it.
+    Minimize,
     /// Close.
     Close,
 }
 
 impl ChromeControl {
     /// Left-to-right order in the title bar.
-    pub const ALL: [Self; 1] = [Self::Close];
+    pub const ALL: [Self; 2] = [Self::Minimize, Self::Close];
 
     const fn slot_from_right(self) -> u32 {
         match self {
             Self::Close => 0,
+            Self::Minimize => 1,
         }
     }
 
@@ -232,6 +235,18 @@ fn paint_control_glyph(canvas: &mut Canvas<'_>, g: Rect, control: ChromeControl,
     let x1 = offset(g.x, g.width - 1);
     let y1 = offset(g.y, g.height - 1);
     match control {
+        ChromeControl::Minimize => {
+            fill(
+                canvas,
+                Rect {
+                    x: g.x,
+                    y: offset(g.y, g.height / 2),
+                    width: g.width,
+                    height: 1,
+                },
+                color,
+            );
+        }
         ChromeControl::Close => {
             canvas.line((g.x, g.y), (x1, y1), c);
             canvas.line((g.x, y1), (x1, g.y), c);

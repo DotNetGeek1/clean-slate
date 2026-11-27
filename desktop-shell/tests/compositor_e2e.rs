@@ -707,6 +707,114 @@ fn the_rail_starts_idle_apps_and_switches_between_running_ones() {
     });
 }
 
+/// #357: the minimise control hides the app's window, the rail marks the app, and a click on
+/// its rail slot restores the window where it was, focused, still taking input.
+#[test]
+fn a_minimised_window_waits_on_the_rail_and_a_click_there_restores_it() {
+    big_stack(|| {
+        let tier = QualityTier::Q1;
+        let mut world = World::new(tier);
+        let mut tracker = CompDiag::new();
+        let mut shell = world.launch_shell(tier);
+        let item = shell
+            .session
+            .shell()
+            .expect("shell")
+            .rail_layout()
+            .item(0)
+            .expect("item");
+        world.launcher(
+            &mut shell,
+            LauncherEvent::Entry(app_entry("playground", AppState::Running, 7)),
+        );
+        let mut app = world.launch_app(&mut shell, 7, tier);
+        world.settle(Some(&mut shell), &mut [&mut app]);
+        observe(&world, &mut tracker);
+        let key = World::app_key(&app);
+        let at = world.origin(&app);
+        let content = world.content(&app);
+        let background = expected_background(tier);
+        let inside = center(content);
+        assert_ne!(
+            world.pixel(inside.x, inside.y),
+            background_px(&background, inside.x, inside.y)
+        );
+
+        let frame = world.chrome().frame_rect(content);
+        let minimize = center(world.chrome().control_rect(frame, ChromeControl::Minimize));
+        world.click_at(&mut shell, &mut [&mut app], minimize);
+        assert!(!app.proc_.exited, "minimise is not close");
+        assert!(world.comp.is_minimized(key));
+        assert_eq!(world.comp.wm().focus, None, "it was the only window");
+        assert!(!app.session.app().view().window_active);
+        for p in [
+            inside,
+            Point {
+                x: frame.x + 4,
+                y: frame.y + 4,
+            },
+        ] {
+            assert_eq!(
+                world.pixel(p.x, p.y),
+                background_px(&background, p.x, p.y),
+                "off screen at {p:?}"
+            );
+        }
+        let rail = shell.session.shell().unwrap().apps();
+        assert!(rail.get(0).unwrap().minimized, "marked on the rail");
+        assert_eq!(rail.selected, None);
+        assert_eq!(
+            observe(&world, &mut tracker),
+            [
+                format!("[WIN ] minimized x={} y={}", at.x, at.y),
+                String::from("[INPT] focus none"),
+            ]
+        );
+        assert_eq!(
+            CompDiag::rows(&world.comp).windows,
+            1,
+            "still a window: minimising is not closing"
+        );
+
+        world.click_at(&mut shell, &mut [&mut app], center(item));
+        let action = shell.session.take_action().expect("action");
+        assert_eq!(
+            diag::action_line(action).as_str(),
+            "[SHELL] rail restore=playground window=1"
+        );
+        world.settle(Some(&mut shell), &mut [&mut app]);
+        assert!(!world.comp.is_minimized(key));
+        assert_eq!(world.origin(&app), at, "back where it was");
+        assert_eq!(world.comp.wm().focus, Some(key));
+        assert!(app.session.app().view().window_active);
+        assert_ne!(
+            world.pixel(inside.x, inside.y),
+            background_px(&background, inside.x, inside.y)
+        );
+        let rail = shell.session.shell().unwrap().apps();
+        assert!(!rail.get(0).unwrap().minimized);
+        assert_eq!(rail.selected, Some(0));
+        assert_eq!(
+            observe(&world, &mut tracker),
+            [
+                format!("[WIN ] restored x={} y={}", at.x, at.y),
+                format!("[INPT] focus window x={} y={}", at.x, at.y),
+            ]
+        );
+
+        // The restored window still takes input.
+        let layout = *app.session.app().layout();
+        let increment = Point {
+            x: content.x + center(layout.increment).x,
+            y: content.y + center(layout.increment).y,
+        };
+        world.click_at(&mut shell, &mut [&mut app], increment);
+        assert_eq!(app.session.app().clicks(), 1);
+        assert_eq!(shell.session.stats().protocol_errors, 0);
+        assert_eq!(app.session.stats().protocol_errors, 0);
+    });
+}
+
 #[test]
 fn app_window_opens_focused_right_of_the_rail_with_server_side_chrome() {
     big_stack(|| {

@@ -275,6 +275,14 @@
 //! | 12 | 4 | `window` `WindowHandle` u32 (`WindowFocused`: 0 = none) |
 //! | 16..64 | — | static padding |
 //!
+//! ## `WindowMinimized` (`0x8704`, `WINDOW_LIST`, object must be 0)
+//!
+//! | Off | W | Field |
+//! |---|---|---|
+//! | 12 | 4 | `window` `WindowHandle` u32, nonzero |
+//! | 16 | 1 | `minimized` u8: 1 minimised, 0 restored; anything else is `MalformedFrame` |
+//! | 17..64 | — | static padding |
+//!
 //! ## `OutputChanged` (`0x8800`, `OUTPUT_EVENTS`, object must be 0)
 //!
 //! | Off | W | Field |

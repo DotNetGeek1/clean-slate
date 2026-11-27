@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::guest_reboot::GuestRebootDetector;
-use crate::marker_spec::first_guest_failure_in_bytes;
+use crate::marker_spec::GuestFailureScan;
 use crate::qmp::image::Screenshot;
 use crate::qmp::{InputAction, QmpClient, QmpEndpoint, QmpError, QmpTimeouts};
 use crate::serial_input_lane::{accept_serial, find, spawn_serial_reader, tail, SerialEvent};
@@ -37,6 +37,10 @@ pub(crate) struct Step {
 pub(crate) type Check<'a, S> = dyn FnMut(usize, &str, Option<&S>) -> Result<S, String> + 'a;
 
 /// One boot of the hooks build with the desktop entry on a modern-only VirtIO-GPU.
+/// Output one [`Session::receive`] takes in before it checks it, so a guest that prints
+/// without pause still gets its failure lines checked.
+const MAX_RECEIVE_BYTES: usize = 64 * 1024;
+
 pub(crate) struct Session {
     child: ReapOnDrop,
     /// OVMF vars copy [`prepare_vm`] built for this boot. Declared after
@@ -52,6 +56,7 @@ pub(crate) struct Session {
     /// Where the output the current wait checks begins.
     mark: usize,
     reboot: GuestRebootDetector,
+    failures: GuestFailureScan,
     forbidden: &'static [&'static str],
     deadline: Instant,
     /// Under the artifact root.
@@ -108,6 +113,7 @@ impl Session {
             transcript: Vec::new(),
             mark: 0,
             reboot: GuestRebootDetector::default(),
+            failures: GuestFailureScan::default(),
             forbidden,
             deadline,
             transcript_path,
@@ -194,42 +200,68 @@ impl Session {
 
     /// Takes in serial output for at most `wait`; fails on a reboot, a guest failure line, a
     /// forbidden line, or QEMU closing the port.
+    ///
+    /// Everything the reader has queued is taken in one go, and the checks scan only what is
+    /// new. The reader forwards each socket read, often a byte or two, and a check of the whole
+    /// transcript per read made the lane fall seconds behind the guest under host load (#349).
     fn receive(&mut self, wait: Duration, waiting: &str) -> Result<(), XtaskError> {
-        match self.rx.recv_timeout(wait) {
-            Ok(SerialEvent::Bytes(bytes)) => {
-                print!("{}", String::from_utf8_lossy(&bytes));
-                let _ = std::io::stdout().flush();
-                self.transcript.extend_from_slice(&bytes);
+        let scanned = self.transcript.len();
+        let mut event = self.rx.recv_timeout(wait);
+        loop {
+            match event {
+                Ok(SerialEvent::Bytes(bytes)) => self.transcript.extend_from_slice(&bytes),
+                Ok(SerialEvent::Closed) => {
+                    self.flush_output(scanned);
+                    let qemu = qemu_state(&mut self.child)?;
+                    return self.fail(format!("QEMU closed the serial port; QEMU {qemu}"));
+                }
+                Ok(SerialEvent::Failed(error)) => {
+                    self.flush_output(scanned);
+                    let qemu = qemu_state(&mut self.child)?;
+                    return self.fail(format!(
+                        "reading the serial port failed ({error}); QEMU {qemu}"
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.flush_output(scanned);
+                    return self.fail("serial reader stopped".to_owned());
+                }
             }
-            Ok(SerialEvent::Closed) => {
-                let qemu = qemu_state(&mut self.child)?;
-                return self.fail(format!("QEMU closed the serial port; QEMU {qemu}"));
+            if self.transcript.len() - scanned >= MAX_RECEIVE_BYTES {
+                break;
             }
-            Ok(SerialEvent::Failed(error)) => {
-                let qemu = qemu_state(&mut self.child)?;
-                return self.fail(format!(
-                    "reading the serial port failed ({error}); QEMU {qemu}"
-                ));
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return self.fail("serial reader stopped".to_owned())
-            }
+            event = match self.rx.try_recv() {
+                Ok(next) => Ok(next),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::RecvTimeoutError::Disconnected),
+            };
         }
+        if self.transcript.len() == scanned {
+            return Ok(());
+        }
+        self.flush_output(scanned);
         if let Some(reboot) = self.reboot.observe(&self.transcript) {
             return self.fail(reboot);
         }
-        if let Some(failure) = first_guest_failure_in_bytes(&self.transcript, false) {
+        if let Some(failure) = self.failures.next_in(&self.transcript) {
             return self.fail(format!("{failure:?} printed in {waiting:?}"));
         }
         for forbidden in self.forbidden {
-            if let Some(at) = find(&self.transcript, forbidden.as_bytes()) {
-                let line = String::from_utf8_lossy(&self.transcript[at..]);
+            let from = scanned.saturating_sub(forbidden.len().saturating_sub(1));
+            if let Some(at) = find(&self.transcript[from..], forbidden.as_bytes()) {
+                let line = String::from_utf8_lossy(&self.transcript[from + at..]);
                 let line = line.lines().next().unwrap_or_default().to_owned();
                 return self.fail(format!("{line:?} printed in {waiting:?}"));
             }
         }
         Ok(())
+    }
+
+    /// Echoes the output from `from` on.
+    fn flush_output(&self, from: usize) {
+        print!("{}", String::from_utf8_lossy(&self.transcript[from..]));
+        let _ = std::io::stdout().flush();
     }
 
     /// Waits until `check` accepts the output since the mark, for at most `timeout`. On a
@@ -265,7 +297,10 @@ impl Session {
                 return self.fail(format!("lane deadline passed in {waiting:?}: {reason}"));
             }
             if now.duration_since(started) >= timeout {
-                return Ok(Err(reason));
+                // What the reader already queued decides the step, not the moment it was
+                // read: a line printed just before the timeout passes it.
+                self.receive(Duration::ZERO, waiting)?;
+                return Ok(check(&self.segment()));
             }
             if let Some(status) = self.child.try_wait()? {
                 return self.fail(format!(
@@ -362,6 +397,7 @@ mod tests {
 
     use super::Session;
     use crate::guest_reboot::GuestRebootDetector;
+    use crate::marker_spec::GuestFailureScan;
     use crate::ovmf_vars::RuntimeVarsCopy;
     use crate::{PreparedVm, ReapOnDrop};
 
@@ -412,6 +448,7 @@ mod tests {
             transcript: Vec::new(),
             mark: 0,
             reboot: GuestRebootDetector::default(),
+            failures: GuestFailureScan::default(),
             forbidden: &[],
             deadline: Instant::now() + Duration::from_secs(1),
             transcript_path: "system/session-guard-test.log",

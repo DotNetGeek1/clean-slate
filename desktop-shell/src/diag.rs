@@ -32,15 +32,21 @@ pub fn ready_line(session: &ShellSession) -> Option<ConsoleLine> {
     )))
 }
 
-/// What a rail click did: `[SHELL] rail start=<name>` (asked init to start it) or
-/// `[SHELL] rail switch=<name> window=<handle>` (focused its window).
+/// What a rail click did: `[SHELL] rail start=<name>` (asked init to start it),
+/// `[SHELL] rail switch=<name> window=<handle>` (focused its window) or
+/// `[SHELL] rail restore=<name> window=<handle>` (restored and focused its minimised window).
 pub fn action_line(action: Action) -> ConsoleLine {
     match action {
         Action::Start(name) => {
             ConsoleLine::format(format_args!("[SHELL] rail start={}", name.as_str()))
         }
-        Action::Activate { window, name } => ConsoleLine::format(format_args!(
-            "[SHELL] rail switch={} window={}",
+        Action::Activate {
+            window,
+            name,
+            restore,
+        } => ConsoleLine::format(format_args!(
+            "[SHELL] rail {}={} window={}",
+            if restore { "restore" } else { "switch" },
             name.as_str(),
             window.raw()
         )),
@@ -103,13 +109,24 @@ mod tests {
             action_line(Action::Start(name)).as_str(),
             "[SHELL] rail start=terminal"
         );
+        let window = clean_slate_graphics::window::WindowHandle(3);
         assert_eq!(
             action_line(Action::Activate {
-                window: clean_slate_graphics::window::WindowHandle(3),
+                window,
                 name,
+                restore: false,
             })
             .as_str(),
             "[SHELL] rail switch=terminal window=3"
+        );
+        assert_eq!(
+            action_line(Action::Activate {
+                window,
+                name,
+                restore: true,
+            })
+            .as_str(),
+            "[SHELL] rail restore=terminal window=3"
         );
         assert_eq!(
             launch_result_line(StartResult::AlreadyRunning).as_str(),
