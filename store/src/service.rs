@@ -61,6 +61,13 @@ fn over_budget<D: BlockDevice>(
 /// `WRITE_AT` and `TRUNCATE` only stage: many requests build an object, and one commit makes
 /// it durable. A write that would take the store's live bytes past `budget` is refused with
 /// `OBJECT_STATUS_NO_SPACE` and stages nothing.
+///
+/// A block error during a commit, such as the reset-required a kernel virtio-blk reset
+/// reports (#199), fails that request with `OBJECT_STATUS_STORE_ERROR` and leaves the
+/// committed generation where it was: only a commit whose flushes all completed counts.
+/// The store keeps serving. What the failed request staged stays staged: its outcome is
+/// unknown, not durable, and the next commit that completes makes it durable along with
+/// everything else staged (a rollback would silently drop other clients' staged writes).
 pub fn serve<D: BlockDevice>(
     store: &mut ObjectStore<D>,
     request: &ObjectServiceRequest,
@@ -142,6 +149,77 @@ mod tests {
     use clean_slate_block::{BlockDeviceId, BlockGeometry};
 
     const BUDGET: u64 = 4096;
+
+    /// #199: a device reset in the middle of a commit fails the request in flight, the
+    /// durable image still mounts the last completed commit, and the store keeps serving.
+    #[test]
+    fn a_device_reset_fails_the_request_in_flight_and_the_store_recovers() {
+        use clean_slate_block::fault::{
+            FaultAction, FaultInjectingBlockDevice, FaultPlan, FaultTrigger,
+        };
+        use clean_slate_block::{BlockIoError, BlockTransportError};
+
+        let geometry = BlockGeometry::new(BlockDeviceId::new(21), 512, 128, 8, false).unwrap();
+        let device = FaultInjectingBlockDevice::new(FakeBlockDevice::new(geometry).unwrap());
+        let faults = device.controller();
+        let mut store = ObjectStore::format(device).unwrap();
+        let write = |store: &mut ObjectStore<FaultInjectingBlockDevice>, id, bytes: &[u8]| {
+            serve(
+                store,
+                &request(OBJECT_OP_WRITE, id, 0, 0, bytes),
+                bytes,
+                BUDGET,
+            )
+            .0
+        };
+        assert_eq!(write(&mut store, 9, b"before"), OBJECT_STATUS_OK);
+        let committed = store.committed_generation();
+
+        let reset =
+            FaultAction::IoError(BlockIoError::Transport(BlockTransportError::ResetRequired));
+        // The commit's first flush (after the data and table writes) is the request the
+        // device dropped; the kernel resets the device and fails it.
+        faults.arm(FaultPlan {
+            trigger: FaultTrigger::AfterFlush(faults.flush_count() + 1),
+            action: reset,
+        });
+        assert_eq!(write(&mut store, 9, b"lost"), OBJECT_STATUS_STORE_ERROR);
+        assert_eq!(store.committed_generation(), committed);
+        let durable =
+            ObjectStore::mount(store.into_inner().rebooted_from_durable().unwrap()).unwrap();
+        assert_eq!(durable.read_object_by_id(9).unwrap(), b"before");
+
+        // Again on a fresh disk, this time on the superblock's flush (the commit's second):
+        // the store goes on serving and the next commit completes.
+        let device = FaultInjectingBlockDevice::new(FakeBlockDevice::new(geometry).unwrap());
+        let faults = device.controller();
+        let mut store = ObjectStore::format(device).unwrap();
+        assert_eq!(write(&mut store, 9, b"before"), OBJECT_STATUS_OK);
+        faults.arm(FaultPlan {
+            trigger: FaultTrigger::AfterFlush(faults.flush_count() + 2),
+            action: reset,
+        });
+        assert_eq!(write(&mut store, 9, b"unknown"), OBJECT_STATUS_STORE_ERROR);
+        assert_eq!(store.committed_generation(), committed);
+        assert_eq!(write(&mut store, 10, b"after"), OBJECT_STATUS_OK);
+        assert_eq!(store.committed_generation(), committed + 1);
+
+        let mut rebooted =
+            ObjectStore::mount(store.into_inner().rebooted_from_durable().unwrap()).unwrap();
+        assert_eq!(rebooted.committed_generation(), committed + 1);
+        assert_eq!(rebooted.read_object_by_id(10).unwrap(), b"after");
+        // The failed write was never reported durable; it rode along with the next commit.
+        assert_eq!(rebooted.read_object_by_id(9).unwrap(), b"unknown");
+        assert_eq!(
+            serve(
+                &mut rebooted,
+                &request(OBJECT_OP_READ, 10, 0, 0, &[]),
+                &[],
+                BUDGET
+            ),
+            (OBJECT_STATUS_OK, Some(b"after".to_vec()))
+        );
+    }
 
     fn store() -> ObjectStore<FakeBlockDevice> {
         let geometry = BlockGeometry::new(BlockDeviceId::new(21), 512, 128, 8, false).unwrap();
