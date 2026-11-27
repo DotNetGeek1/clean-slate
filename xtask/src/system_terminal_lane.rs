@@ -11,6 +11,9 @@
 //!    back through the console session, which still logs it on serial under the shell's pid,
 //!    and the terminal's rows must have changed on screen.
 //! 4. **Serial shell**: COM1 still reaches the serial shell, whose input the session never sees.
+//! 5. **Rail** (#237): the shell listed both launchable rows from init's launcher port. A click
+//!    on the rail's Playground slot focuses the playground's window, and one on the Terminal
+//!    slot brings the terminal back, each closed loop on the shell's `[SHELL] rail switch=` line.
 
 use std::time::Duration;
 
@@ -18,7 +21,9 @@ use clean_slate_graphics::{Point, Rect};
 use clean_slate_ui::QualityTier;
 
 use crate::m10_desktop_lane::motion_chunks;
-use crate::m10_desktop_visual::{center, cursor, region_changed, sized_window_origin, OUTPUT};
+use crate::m10_desktop_visual::{
+    center, cursor, rail_item, region_changed, sized_window_origin, OUTPUT,
+};
 use crate::qmp::image::Screenshot;
 use crate::qmp::{InputAction, MouseButton, QCode};
 use crate::system_boot::{
@@ -35,7 +40,12 @@ const LANE_TIMEOUT: Duration = Duration::from_secs(600);
 const STEP_TIMEOUT: Duration = Duration::from_secs(60);
 const ARTIFACTS: &str = "system-terminal";
 const SERIAL_LOG: &str = "system-terminal/serial.log";
-const FORBIDDEN: [&str; 3] = [GIVE_UP_LINES[0], GIVE_UP_LINES[1], "[TERM] exit"];
+const FORBIDDEN: [&str; 4] = [
+    GIVE_UP_LINES[0],
+    GIVE_UP_LINES[1],
+    "[TERM] exit",
+    "[SHELL] launcher unavailable",
+];
 
 const TERMINAL: u32 = 0x5303;
 const TERMINAL_SHELL: u32 = 0x5401;
@@ -72,6 +82,11 @@ const TYPED: [QCode; 11] = [
     QCode::RET,
 ];
 const ANSWER: &str = "hello";
+
+/// The shell's listing of init's launchable rows: the playground and the terminal.
+const LISTED: &str = "[SHELL] launcher listed=2";
+/// Rail slots in the order init lists its rows (manifest order).
+const RAIL: [(usize, &str); 2] = [(0, "playground"), (1, "terminal")];
 
 /// What the boot showed about the two terminal rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +132,9 @@ fn check_boot(segment: &str) -> Result<Terminal, String> {
             return Err(format!("no {want:?}"));
         }
     }
+    if !segment.contains(LISTED) {
+        return Err(format!("no {LISTED:?}"));
+    }
     for service in [TERMINAL, TERMINAL_SHELL] {
         let prefix = format!("[SVC ] authority service={service} ");
         let (_, rest) = whole_line(segment, &prefix).ok_or_else(|| format!("no {prefix:?}"))?;
@@ -158,6 +176,16 @@ fn answered(segment: &str, shell_pid: u64) -> Result<(), String> {
         Err(format!(
             "no [CON ] {ANSWER:?} line from the terminal's shell (pid={shell_pid}) or a process it forked"
         ))
+    }
+}
+
+/// The shell's `[SHELL] rail switch=<name> window=<n>` line, with a nonzero handle.
+fn switched(segment: &str, name: &str) -> Result<(), String> {
+    let prefix = format!("[SHELL] rail switch={name} ");
+    let (_, rest) = whole_line(segment, &prefix).ok_or_else(|| format!("no {prefix:?}"))?;
+    match number(&format!(" {rest}"), "window") {
+        Ok(handle) if handle != 0 => Ok(()),
+        _ => Err(format!("rail switch to {name} names no window: {rest:?}")),
     }
 }
 
@@ -238,7 +266,7 @@ impl Lane {
         ))
     }
 
-    fn button(&mut self, down: bool) -> Result<(), XtaskError> {
+    fn button(&mut self, down: bool, hit: &str) -> Result<(), XtaskError> {
         let edge = if down { "down" } else { "up" };
         self.session.mark();
         self.session.input(
@@ -254,9 +282,10 @@ impl Lane {
                 .map(|(_, rest)| format!(" {rest}"))
                 .ok_or_else(|| format!("no {prefix:?}"))
         })?;
-        if field(&rest, "hit") != Some("content") {
+        if field(&rest, "hit") != Some(hit) {
             return self.session.fail(format!(
-                "the click on the terminal landed elsewhere: {rest:?}"
+                "the click landed on {:?}, expected hit={hit}: {rest:?}",
+                field(&rest, "hit")
             ));
         }
         Ok(())
@@ -324,8 +353,8 @@ fn run_on(disk: &std::path::Path, fixture_port: u16) -> Result<(), XtaskError> {
         y: center(content).y,
     };
     lane.move_to(target)?;
-    lane.button(true)?;
-    lane.button(false)?;
+    lane.button(true, "content")?;
+    lane.button(false, "content")?;
     lane.pace(Duration::from_millis(500))?;
     let before = lane.screendump("before-typing")?;
 
@@ -363,6 +392,25 @@ fn run_on(disk: &std::path::Path, fixture_port: u16) -> Result<(), XtaskError> {
                 Err(format!("the serial shell has not printed {SHELL_ANSWER:?}"))
             }
         })?;
+
+    println!("\n[STT ] step: rail");
+    for (slot, name) in RAIL {
+        let Some(item) = rail_item(QualityTier::Q1, slot) else {
+            return lane.session.fail(format!("the rail has no slot {slot}"));
+        };
+        lane.move_to(center(item))?;
+        lane.session.mark();
+        let mark = lane.session.offset();
+        lane.button(true, "surface")?;
+        lane.button(false, "surface")?;
+        lane.session.mark_at(mark);
+        lane.session
+            .wait("rail switch", STEP_TIMEOUT, &mut |segment| {
+                switched(segment, name)
+            })?;
+        println!("\n[STT ] rail slot {slot} focused the {name} window");
+    }
+
     let transcript = lane.session.transcript();
     if let Some(line) = lines(&transcript).find(|line| line.contains("[SUP ] restart service=")) {
         return lane.session.fail(format!("a row restarted: {line:?}"));
@@ -403,6 +451,7 @@ mod tests {
          [SVC ] launch service=21251 pid=10 gen=1\n\
          [IPC ] console pid=10: [TERM] attached as the console session front end\n\
          [IPC ] console pid=10: [TERM] ready text=on\n\
+         [IPC ] console pid=7: [SHELL] launcher listed=2\n\
          [IPC ] console pid=1: [INIT] boot settled running=10 down=0; waiting, no deadline\n"
             .to_owned()
     }
@@ -427,6 +476,31 @@ mod tests {
         assert!(check_boot(&text).unwrap_err().contains("[TERM] ready"));
         let text = boot().replace("ready text=on", "ready text=off");
         assert!(check_boot(&text).unwrap_err().contains("text=on"));
+        let text = boot().replace("listed=2", "listed=1");
+        assert!(check_boot(&text).unwrap_err().contains(LISTED));
+    }
+
+    #[test]
+    fn a_rail_switch_must_name_the_app_and_a_window() {
+        let line = "[IPC ] console pid=7: [SHELL] rail switch=playground window=1\n";
+        assert!(switched(line, "playground").is_ok());
+        assert!(switched(line, "terminal").is_err());
+        let zero = "[IPC ] console pid=7: [SHELL] rail switch=terminal window=0\n";
+        assert!(switched(zero, "terminal").is_err());
+        assert!(
+            switched("[SHELL] rail switch=terminal window=2", "terminal").is_err(),
+            "no newline yet"
+        );
+    }
+
+    #[test]
+    fn the_rail_slots_are_inside_the_rail() {
+        use clean_slate_ui::layout::RectExt;
+        let rail = crate::m10_desktop_visual::rail(QualityTier::Q1);
+        for (slot, _) in RAIL {
+            let item = rail_item(QualityTier::Q1, slot).unwrap();
+            assert!(rail.contains(center(item)), "slot {slot}");
+        }
     }
 
     #[test]
