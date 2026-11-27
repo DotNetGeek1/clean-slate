@@ -1,9 +1,11 @@
 //! ABI struct field/pad tiling (§8.3, §9).
 
 use super::display::{
-    DISPLAY_MODE_INFO_BYTES, PRESENT_REQUEST_BYTES, PRESENT_STATUS_BYTES, SCANOUT_MAPPING_BYTES,
+    DISPLAY_MODE_ENTRY_BYTES, DISPLAY_MODE_INFO_BYTES, DISPLAY_MODE_LIST_BYTES,
+    PRESENT_REQUEST_BYTES, PRESENT_STATUS_BYTES, SCANOUT_MAPPING_BYTES,
 };
 use super::input::INPUT_DEVICE_INFO_BYTES;
+use crate::mode::MAX_OFFERED_MODES;
 
 type Range = (usize, usize);
 
@@ -81,4 +83,16 @@ fn input_device_info_layout_tiles() {
         &[(0, 4), (4, 8), (8, 10), (10, 12)],
         &[(12, 16)],
     );
+}
+
+#[test]
+fn display_mode_list_layout_tiles() {
+    let mut fields = vec![(0, 4), (4, 5)];
+    let mut pads = vec![(5, 8)];
+    for i in 0..MAX_OFFERED_MODES {
+        let base = 8 + DISPLAY_MODE_ENTRY_BYTES * i;
+        fields.extend([(base, base + 2), (base + 2, base + 4), (base + 4, base + 5)]);
+        pads.push((base + 5, base + DISPLAY_MODE_ENTRY_BYTES));
+    }
+    assert_tiles(DISPLAY_MODE_LIST_BYTES, &fields, &pads);
 }

@@ -8,6 +8,19 @@ pub(crate) mod boot_options;
 pub(crate) mod gop;
 pub(crate) mod uefi;
 
+/// The display size the boot option asks for (#314). Only the default image reads fw_cfg; the
+/// self-test kernels keep the reference mode their lanes are pinned to.
+pub(crate) fn configured_display_size() -> Option<(u32, u32)> {
+    #[cfg(any(test, clean_slate_system_init))]
+    {
+        boot_options::configured_display_size()
+    }
+    #[cfg(not(any(test, clean_slate_system_init)))]
+    {
+        None
+    }
+}
+
 use crate::arch::x86_64::context_switch::call_on_fresh_stack;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::cpu::enable_and_verify_nxe;

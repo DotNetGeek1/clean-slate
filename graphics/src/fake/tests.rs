@@ -547,3 +547,73 @@ fn property_double_buffered_producer_matches_scanout_model() {
         }
     }
 }
+
+fn packed(width: u32, height: u32) -> DisplayMode {
+    DisplayMode {
+        width_px: width,
+        height_px: height,
+        stride_bytes: width * 4,
+        format: PixelFormat::Xrgb8888,
+        scale: Scale120::ONE,
+        refresh_mhz: 0,
+    }
+}
+
+#[test]
+fn set_mode_switches_offered_modes_within_the_buffers_and_bumps_the_epoch() {
+    use crate::mode::ModeFlags;
+
+    let mut display = Fake::new(mode()).unwrap();
+    display.offer(packed(4, 4)).unwrap();
+    assert_eq!(
+        display.offer(packed(16, 4)).err(),
+        Some(DisplayError::ModeUnavailable),
+        "a frame larger than the buffers"
+    );
+    let modes = display.modes();
+    assert_eq!(modes.len(), 2);
+    assert!(modes.find(W, H).unwrap().is(ModeFlags::CURRENT));
+    assert!(modes.find(4, 4).unwrap().is(ModeFlags::SETTABLE));
+
+    let epoch = display.output().backend_epoch();
+    assert_eq!(
+        display.set_mode(W, H),
+        Ok(()),
+        "the current size is a no-op"
+    );
+    assert_eq!(display.output().backend_epoch(), epoch);
+    assert_eq!(display.set_mode(5, 4), Err(DisplayError::UnsupportedMode));
+
+    fill(&mut display, 0, 0x11);
+    let output = display.output();
+    display.present(&request(output, 0, &[full()])).unwrap();
+    assert_eq!(display.set_mode(4, 4), Err(DisplayError::BufferBusy));
+    display.complete(1);
+
+    assert_eq!(display.set_mode(4, 4), Ok(()));
+    assert_eq!(display.mode(), packed(4, 4));
+    assert_eq!(display.output().backend_epoch(), epoch + 1);
+    assert!(display.modes().find(4, 4).unwrap().is(ModeFlags::CURRENT));
+    assert!(display.modes().find(W, H).unwrap().is(ModeFlags::SETTABLE));
+    assert_eq!(
+        display.present(&request(output, 0, &[rect(0, 0, 4, 4)])),
+        Err(DisplayError::StaleEpoch)
+    );
+    assert_eq!(
+        display.present(&request(display.output(), 0, &[rect(0, 0, 8, 4)])),
+        Err(DisplayError::InvalidDamage),
+        "damage is checked against the new mode"
+    );
+    let seq = display
+        .present(&request(display.output(), 0, &[rect(0, 0, 4, 4)]))
+        .unwrap();
+    assert_eq!(display.complete(2), Some(seq));
+    assert_eq!(display.set_mode(W, H), Ok(()));
+    assert_eq!(display.output().backend_epoch(), epoch + 2);
+
+    display
+        .present(&request(display.output(), 0, &[full()]))
+        .unwrap();
+    display.fail_in_flight(3);
+    assert_eq!(display.set_mode(4, 4), Err(DisplayError::ResetRequired));
+}

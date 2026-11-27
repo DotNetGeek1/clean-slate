@@ -1,7 +1,7 @@
 use std::vec;
 use std::vec::Vec;
 
-use clean_slate_graphics::display::{DisplayError, PresentRequest, PresentState};
+use clean_slate_graphics::display::{DisplayError, PresentRequest, PresentState, ScanoutMapping};
 use clean_slate_graphics::{
     BufferRect, MAX_PRESENT_DAMAGE_RECTS, REFERENCE_FRAME_BYTES, REFERENCE_MODE,
 };
@@ -182,7 +182,8 @@ fn bring_up_sends_display_info_and_create_with_the_reference_geometry() {
 #[test]
 fn the_device_rejects_a_scanout_on_a_resource_without_backing() {
     let mut frames = ArenaFrames::new(BUFFER_PAGES + 8);
-    let first = ScanoutBuffer::allocate(&mut frames).expect("buffer");
+    let first = ScanoutBuffer::allocate(&mut frames, REFERENCE_FRAME_BYTES as u64, REFERENCE_MODE)
+        .expect("buffer");
     let mut gpu = backend();
     gpu.bind(0, &first).expect("bind");
     gpu.submit_batch(&[
@@ -212,9 +213,9 @@ fn the_device_rejects_a_scanout_on_a_resource_without_backing() {
 }
 
 #[test]
-fn a_display_that_is_not_the_reference_mode_fails_bring_up() {
+fn a_disabled_scanout_fails_bring_up() {
     let mut gpu = backend();
-    gpu.transport.display_size = (1024, 768);
+    gpu.transport.display_enabled = false;
     gpu.begin_bring_up().expect("bring-up");
     assert_eq!(gpu.poll(), Some(Err(BackendError::Failed)));
     assert_eq!(
@@ -336,7 +337,8 @@ fn switching_buffers_keeps_undamaged_scanout_pixels() {
 #[test]
 fn an_error_response_fails_the_batch_once_and_needs_a_reset() {
     let mut frames = ArenaFrames::new(BUFFER_PAGES + 8);
-    let first = ScanoutBuffer::allocate(&mut frames).expect("buffer");
+    let first = ScanoutBuffer::allocate(&mut frames, REFERENCE_FRAME_BYTES as u64, REFERENCE_MODE)
+        .expect("buffer");
     let mut gpu = brought_up();
     let mut state = DisplayState::new(REFERENCE_MODE).expect("state");
     state.bind(&mut gpu, 0, &first).expect("bind");
@@ -378,7 +380,8 @@ fn an_error_response_fails_the_batch_once_and_needs_a_reset() {
 #[test]
 fn a_timeout_reports_timeout_and_strands_the_batch() {
     let mut frames = ArenaFrames::new(BUFFER_PAGES + 8);
-    let first = ScanoutBuffer::allocate(&mut frames).expect("buffer");
+    let first = ScanoutBuffer::allocate(&mut frames, REFERENCE_FRAME_BYTES as u64, REFERENCE_MODE)
+        .expect("buffer");
     let mut gpu = brought_up();
     gpu.bind(0, &first).expect("bind");
     gpu.transport.stall = true;
@@ -461,7 +464,6 @@ fn bind_validates_the_backing_extents() {
     let rejected = [
         vec![],
         vec![extent(0x10_0000, pages - 1)],
-        vec![extent(0x10_0000, pages + 1)],
         vec![extent(0x10_0010, pages)],
         vec![extent(0x10_0000, 0), extent(0x20_0000, pages)],
         vec![extent(0x1000, 1); 17],
@@ -490,7 +492,8 @@ fn bind_validates_the_backing_extents() {
 #[test]
 fn present_commands_fit_beside_a_bring_up_batch() {
     let mut frames = ArenaFrames::new(BUFFER_PAGES + 8);
-    let first = ScanoutBuffer::allocate(&mut frames).expect("buffer");
+    let first = ScanoutBuffer::allocate(&mut frames, REFERENCE_FRAME_BYTES as u64, REFERENCE_MODE)
+        .expect("buffer");
     let mut gpu = backend();
     gpu.bind(0, &first).expect("bind");
     gpu.transport.stall = true;
@@ -504,7 +507,12 @@ fn present_commands_fit_beside_a_bring_up_batch() {
         2 + 2 + MAX_PRESENT_DAMAGE_RECTS + 1
     );
     assert!(matches!(
-        super::encode(Command::AttachBacking(1), &gpu.backings, &mut [0; 512]),
+        super::encode(
+            Command::AttachBacking(1),
+            &gpu.backings,
+            &REFERENCE_MODE,
+            &mut [0; 512]
+        ),
         Err(BackendError::SourceRejected)
     ));
 }
@@ -600,7 +608,7 @@ fn service_expires_a_present_the_device_never_answers() {
 #[test]
 fn a_failed_bring_up_faults_the_idle_output_and_a_second_failure_poisons_it() {
     let mut gpu = backend();
-    gpu.transport.display_size = (800, 600);
+    gpu.transport.display_enabled = false;
     gpu.begin_bring_up().expect("bring-up");
     let mut display =
         ActiveDisplay::new(Backend::VirtioGpu(Box::leak(Box::new(gpu)))).expect("display");
@@ -642,4 +650,264 @@ fn transfer_log_records_each_damage_rect_by_buffer() {
         [wire::CMD_RESOURCE_DETACH_BACKING, wire::CMD_RESOURCE_UNREF]
     );
     assert_eq!(gpu.poll(), Some(Ok(())));
+}
+
+// ---- #314 display modes ------------------------------------------------------------------------
+
+fn display_with_host(host: (u32, u32), configured: Option<(u32, u32)>) -> ActiveDisplay {
+    let mut gpu = backend();
+    gpu.transport.display_size = host;
+    gpu.set_configured_size(configured);
+    gpu.begin_bring_up().expect("bring-up");
+    assert_eq!(gpu.poll(), Some(Ok(())));
+    ActiveDisplay::new(Backend::VirtioGpu(Box::leak(Box::new(gpu)))).expect("display")
+}
+
+fn sizes(modes: &clean_slate_graphics::ModeList) -> Vec<(u32, u32)> {
+    modes
+        .as_slice()
+        .iter()
+        .map(|entry| (entry.width_px, entry.height_px))
+        .collect()
+}
+
+fn map_both(display: &mut ActiveDisplay, frames: &mut ArenaFrames) -> [ScanoutMapping; 2] {
+    [0u8, 1].map(|index| {
+        display
+            .map_scanout(PRESENTER, index, frames, |_, _| {
+                Ok(0x4000_0000 + u64::from(index) * 0x100_0000)
+            })
+            .expect("map")
+    })
+}
+
+/// Fills `index`'s buffer with a pattern laid out at `stride`: byte = (x + 3y) & 0xff.
+fn paint_buffer(display: &ActiveDisplay, index: usize, stride: usize) {
+    let buffer = display.buffers[index].as_ref().expect("buffer");
+    let mut offset = 0usize;
+    for extent in buffer.phys_extents() {
+        let len = extent.pages as usize * 4096;
+        // SAFETY: host-test extents are arena memory owned by the buffer.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(extent.phys as *mut u8, len) };
+        for (at, byte) in bytes.iter_mut().enumerate() {
+            let at = offset + at;
+            *byte = ((at % stride / 4) + 3 * (at / stride)) as u8;
+        }
+        offset += len;
+    }
+}
+
+#[test]
+fn modes_offer_the_host_size_and_the_standard_sizes_up_to_it() {
+    use clean_slate_graphics::ModeFlags;
+
+    let mut display = display_with_host((1024, 768), None);
+    let modes = display.modes();
+    assert_eq!(
+        sizes(&modes),
+        [(1280, 800), (640, 480), (800, 600), (1024, 768)]
+    );
+    assert_eq!(
+        modes.current().map(|entry| entry.width_px),
+        Some(1280),
+        "the boot resource is the reference mode"
+    );
+    assert_eq!(modes.preferred().map(|entry| entry.width_px), Some(1024));
+    assert!(modes
+        .as_slice()
+        .iter()
+        .all(|entry| entry.is(ModeFlags::SETTABLE)));
+    assert_eq!(modes.choose().map(|entry| entry.width_px), Some(1024));
+
+    let mut configured = display_with_host((1280, 800), Some((1920, 1080)));
+    let modes = configured.modes();
+    assert_eq!(modes.preferred().map(|entry| entry.width_px), Some(1920));
+    assert!(modes.find(1280, 720).is_some());
+    assert!(modes.find(1920, 1080).unwrap().is(ModeFlags::SETTABLE));
+    assert!(!modes.find(1280, 800).unwrap().is(ModeFlags::PREFERRED));
+
+    let mut capped = display_with_host((1280, 800), Some((1920, 1200)));
+    let modes = capped.modes();
+    assert!(modes.find(1920, 1200).is_none(), "past the frame cap");
+    assert_eq!(modes.preferred().map(|entry| entry.width_px), Some(1280));
+}
+
+#[test]
+fn set_mode_recreates_the_resource_and_the_next_present_links_it_at_the_new_size() {
+    let mut frames = ArenaFrames::new(2 * BUFFER_PAGES + 16);
+    let mut display = display_with_host((1280, 800), None);
+    let mappings = map_both(&mut display, &mut frames);
+    assert_eq!(mappings[0].byte_len, REFERENCE_FRAME_BYTES as u64);
+    let full = rect(0, 0, 1280, 800);
+    let first = request(display.state(), 0, &[full]);
+    assert_eq!(display.present_scanout(PRESENTER, &first, NOW_NS), Ok(1));
+    display.service(NOW_NS, false);
+    let epoch = display.state().output().backend_epoch();
+
+    assert_eq!(
+        display.set_mode(PRESENTER, 1920, 1080),
+        Err(DisplayError::UnsupportedMode),
+        "not offered"
+    );
+    assert_eq!(
+        display.set_mode(HolderId(99), 1024, 768),
+        Err(DisplayError::NotPresenter)
+    );
+    let seen = gpu_of(&mut display).transport.seen.len();
+    assert_eq!(display.set_mode(PRESENTER, 1280, 800), Ok(()), "current");
+    assert_eq!(gpu_of(&mut display).transport.seen.len(), seen);
+    assert_eq!(display.state().output().backend_epoch(), epoch);
+
+    assert_eq!(display.set_mode(PRESENTER, 1024, 768), Ok(()));
+    let device = &gpu_of(&mut display).transport;
+    assert_eq!(
+        device.kinds()[seen..],
+        [
+            wire::CMD_RESOURCE_DETACH_BACKING,
+            wire::CMD_RESOURCE_UNREF,
+            wire::CMD_RESOURCE_CREATE_2D
+        ]
+    );
+    assert_eq!(
+        device.seen.last().unwrap().words,
+        [1, wire::FORMAT_B8G8R8X8_UNORM, 1024, 768]
+    );
+    assert_eq!(
+        display.present_scanout(PRESENTER, &first, NOW_NS),
+        Err(DisplayError::BufferBusy),
+        "presents wait for the change"
+    );
+    assert_eq!(
+        display.set_mode(PRESENTER, 800, 600),
+        Err(DisplayError::BufferBusy)
+    );
+    assert_eq!(
+        display.modes().current().map(|entry| entry.width_px),
+        Some(1280),
+        "the old mode is current until the device answers"
+    );
+
+    display.service(NOW_NS + 1, false);
+    let info = display.state().mode_info();
+    assert_eq!(info.output.backend_epoch(), epoch + 1);
+    assert_eq!(
+        (
+            info.mode.width_px,
+            info.mode.height_px,
+            info.mode.stride_bytes
+        ),
+        (1024, 768, 4096)
+    );
+    assert_eq!(
+        display.modes().current().map(|entry| entry.width_px),
+        Some(1024)
+    );
+    assert_eq!(
+        gpu_of(&mut display).transport.resource_size(),
+        Some((1024, 768))
+    );
+    assert_eq!(
+        display.present_scanout(PRESENTER, &first, NOW_NS),
+        Err(DisplayError::StaleEpoch)
+    );
+    assert_eq!(
+        display.present_scanout(PRESENTER, &request(display.state(), 0, &[full]), NOW_NS),
+        Err(DisplayError::InvalidDamage),
+        "damage is checked against the new mode"
+    );
+
+    paint_buffer(&display, 1, 4096);
+    let seen = gpu_of(&mut display).transport.seen.len();
+    let whole = request(display.state(), 1, &[rect(0, 0, 1024, 768)]);
+    assert_eq!(display.present_scanout(PRESENTER, &whole, NOW_NS), Ok(2));
+    display.service(NOW_NS + 2, false);
+    assert_eq!(display.state().status().completed_seq, 2);
+    let device = &gpu_of(&mut display).transport;
+    assert_eq!(
+        device.kinds()[seen..],
+        [
+            wire::CMD_RESOURCE_ATTACH_BACKING,
+            wire::CMD_SET_SCANOUT,
+            wire::CMD_TRANSFER_TO_HOST_2D,
+            wire::CMD_RESOURCE_FLUSH
+        ]
+    );
+    assert!(device.linked);
+    assert_eq!(device.scanout_size, (1024, 768));
+    for (x, y) in [(0usize, 0usize), (1023, 0), (5, 9), (1023, 767)] {
+        assert_eq!(
+            device.scanout[y * 4096 + x * 4],
+            (x + 3 * y) as u8,
+            "pixel ({x}, {y})"
+        );
+    }
+
+    assert_eq!(display.set_mode(PRESENTER, 1280, 800), Ok(()));
+    display.service(NOW_NS + 3, false);
+    assert_eq!(display.state().output().backend_epoch(), epoch + 2);
+    assert_eq!(display.state().mode(), REFERENCE_MODE);
+}
+
+#[test]
+fn a_mode_the_mapped_buffers_cannot_hold_is_listed_but_not_settable() {
+    use clean_slate_graphics::ModeFlags;
+
+    let mut frames = ArenaFrames::new(2 * BUFFER_PAGES + 16);
+    let mut display = display_with_host((1280, 800), None);
+    map_both(&mut display, &mut frames);
+    gpu_of(&mut display).set_configured_size(Some((1920, 1080)));
+    let modes = display.modes();
+    let big = modes.find(1920, 1080).expect("listed");
+    assert!(big.is(ModeFlags::PREFERRED) && !big.is(ModeFlags::SETTABLE));
+    assert_eq!(modes.choose().map(|entry| entry.width_px), Some(1280));
+    assert_eq!(
+        display.set_mode(PRESENTER, 1920, 1080),
+        Err(DisplayError::UnsupportedMode)
+    );
+}
+
+#[test]
+fn buffers_are_sized_for_the_largest_settable_mode() {
+    let pages = (1920u64 * 4 * 1080).div_ceil(4096);
+    let mut frames = ArenaFrames::new(2 * pages + 16);
+    let mut display = display_with_host((1920, 1080), None);
+    let mappings = map_both(&mut display, &mut frames);
+    assert_eq!(mappings[0].byte_len, pages * 4096);
+    assert_eq!(mappings[0].stride_bytes, 5120, "still the boot mode");
+    assert_eq!(display.set_mode(PRESENTER, 1920, 1080), Ok(()));
+    display.service(NOW_NS, false);
+    assert_eq!(display.state().mode().stride_bytes, 7680);
+    paint_buffer(&display, 0, 7680);
+    let whole = request(display.state(), 0, &[rect(0, 0, 1920, 1080)]);
+    assert_eq!(display.present_scanout(PRESENTER, &whole, NOW_NS), Ok(1));
+    display.service(NOW_NS + 1, false);
+    let device = &gpu_of(&mut display).transport;
+    assert_eq!(device.scanout_size, (1920, 1080));
+    assert_eq!(
+        device.scanout[1079 * 7680 + 1919 * 4],
+        (1919 + 3 * 1079) as u8
+    );
+}
+
+#[test]
+fn a_failed_mode_change_resets_into_the_requested_mode() {
+    let mut frames = ArenaFrames::new(2 * BUFFER_PAGES + 16);
+    let mut display = display_with_host((1280, 800), None);
+    map_both(&mut display, &mut frames);
+    let epoch = display.state().output().backend_epoch();
+    gpu_of(&mut display).transport.fail_kind = Some(wire::CMD_RESOURCE_CREATE_2D);
+    assert_eq!(display.set_mode(PRESENTER, 800, 600), Ok(()));
+    display.service(NOW_NS, false);
+    assert_eq!(display.state().status().state, PresentState::ResetRequired);
+    gpu_of(&mut display).transport.fail_kind = None;
+    display.service(NOW_NS, true);
+    display.service(NOW_NS, false);
+    let info = display.state().mode_info();
+    assert_eq!(display.state().status().state, PresentState::Idle);
+    assert_eq!(info.output.backend_epoch(), epoch + 1);
+    assert_eq!((info.mode.width_px, info.mode.height_px), (800, 600));
+    assert_eq!(
+        gpu_of(&mut display).transport.resource_size(),
+        Some((800, 600))
+    );
 }

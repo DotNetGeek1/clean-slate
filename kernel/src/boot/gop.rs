@@ -1,13 +1,19 @@
 //! GOP framebuffer capture before `ExitBootServices` (#111).
 //!
 //! Capture runs on every boot and never fails it: any rejection means "no display backend"
-//! (`ModeUnavailable`/`ENODEV` to callers of syscall 18). Only the reference mode is accepted
-//! (`clean_slate_graphics::REFERENCE_MODE`: 1280×800, 32-bit, B,G,R,X or R,G,B,X).
+//! (`ModeUnavailable`/`ENODEV` to callers of syscall 18). A usable mode is 32-bit B,G,R,X or
+//! R,G,B,X inside `clean_slate_graphics::mode_size_in_bounds` (#314). The boot sets the
+//! configured size (`opt/clean-slate/display`) if the firmware offers it, else the reference mode
+//! (1280×800, which every lane is pinned to), else the largest usable mode. GOP cannot change mode
+//! after `ExitBootServices`, so that mode is the output's only settable one; the other usable modes
+//! are kept for `QUERY_MODES`.
 //!
 //! The firmware layer talks to the raw protocol: the safe `uefi` accessors panic on pixel
 //! formats above 3 and on a failed pool free, and a panic here would kill every lane.
 
-use clean_slate_graphics::{MAX_STRIDE_BYTES, REFERENCE_MODE};
+use clean_slate_graphics::{
+    mode_size_in_bounds, ModeFlags, ModeList, MAX_STRIDE_BYTES, REFERENCE_MODE,
+};
 
 use crate::mm::layout::PHYSMAP_SPAN;
 use crate::mm::region::{MemoryRegion, MemoryRegionKind};
@@ -87,7 +93,7 @@ pub(crate) enum GopRejection {
     MultipleGopDevices,
     OpenFailed,
     TooManyModes,
-    ReferenceModeAbsent,
+    NoUsableMode,
     UnsupportedFormat,
     SetModeFailed,
     ModeMismatchAfterSet,
@@ -109,7 +115,7 @@ impl GopRejection {
             Self::MultipleGopDevices => "multiple-gop-devices",
             Self::OpenFailed => "open-failed",
             Self::TooManyModes => "too-many-modes",
-            Self::ReferenceModeAbsent => "reference-mode-absent",
+            Self::NoUsableMode => "no-usable-mode",
             Self::UnsupportedFormat => "unsupported-format",
             Self::SetModeFailed => "set-mode-failed",
             Self::ModeMismatchAfterSet => "mode-mismatch-after-set",
@@ -149,6 +155,9 @@ pub(crate) struct BootFramebuffer {
     pub(crate) stride_bytes: u32,
     pub(crate) order: GopPixelOrder,
     pub(crate) mode_index: u32,
+    /// Every usable firmware size: this one `CURRENT` and `SETTABLE`, the configured one
+    /// `PREFERRED`.
+    pub(crate) offered: ModeList,
 }
 
 impl BootFramebuffer {
@@ -161,39 +170,104 @@ impl BootFramebuffer {
     }
 }
 
-/// Picks the reference mode, preferring B,G,R,X (no conversion at present time).
-pub(crate) fn select_reference_mode(modes: &[GopModeCandidate]) -> Result<u32, GopRejection> {
-    if modes.len() > MAX_GOP_MODES {
-        return Err(GopRejection::TooManyModes);
-    }
-    let mut saw_reference_size = false;
+/// A size the backend can scan out: in bounds, a pixel order it copies, a stride it accepts.
+fn usable(mode: &GopModeCandidate) -> bool {
+    mode_size_in_bounds(mode.width, mode.height)
+        && mode.stride_px >= mode.width
+        && u64::from(mode.stride_px) * 4 <= u64::from(MAX_STRIDE_BYTES)
+        && mode.format.order().is_some()
+}
+
+/// The firmware mode for `width`×`height`, preferring B,G,R,X (no conversion at present time),
+/// then the first listed.
+fn best_of_size(modes: &[GopModeCandidate], width: u32, height: u32) -> Option<u32> {
     let mut rgbx = None;
-    for mode in modes {
-        if mode.width != REFERENCE_MODE.width_px || mode.height != REFERENCE_MODE.height_px {
-            continue;
-        }
-        saw_reference_size = true;
-        if mode.stride_px < mode.width {
-            continue;
-        }
+    for mode in modes
+        .iter()
+        .filter(|mode| usable(mode) && mode.width == width && mode.height == height)
+    {
         match mode.format.order() {
-            Some(GopPixelOrder::Bgrx) => return Ok(mode.index),
+            Some(GopPixelOrder::Bgrx) => return Some(mode.index),
             Some(GopPixelOrder::Rgbx) if rgbx.is_none() => rgbx = Some(mode.index),
             _ => {}
         }
     }
-    match (rgbx, saw_reference_size) {
-        (Some(index), _) => Ok(index),
-        (None, true) => Err(GopRejection::UnsupportedFormat),
-        (None, false) => Err(GopRejection::ReferenceModeAbsent),
-    }
+    rgbx
 }
 
-/// Validates the post-`SetMode` state in `u64` so no input can wrap.
+/// The boot's mode (#314): the configured size, else the reference size, else the largest
+/// usable size (then the wider). Each size takes its B,G,R,X entry over an R,G,B,X one.
+pub(crate) fn select_mode(
+    modes: &[GopModeCandidate],
+    configured: Option<(u32, u32)>,
+) -> Result<u32, GopRejection> {
+    if modes.len() > MAX_GOP_MODES {
+        return Err(GopRejection::TooManyModes);
+    }
+    let reference = (REFERENCE_MODE.width_px, REFERENCE_MODE.height_px);
+    for (width, height) in configured.into_iter().chain([reference]) {
+        if let Some(index) = best_of_size(modes, width, height) {
+            return Ok(index);
+        }
+    }
+    let largest = modes.iter().filter(|mode| usable(mode)).fold(
+        None,
+        |best: Option<&GopModeCandidate>, mode| match best {
+            Some(best)
+                if (u64::from(best.width) * u64::from(best.height), best.width)
+                    >= (u64::from(mode.width) * u64::from(mode.height), mode.width) =>
+            {
+                Some(best)
+            }
+            _ => Some(mode),
+        },
+    );
+    if let Some(index) = largest.and_then(|mode| best_of_size(modes, mode.width, mode.height)) {
+        return Ok(index);
+    }
+    let any_size_in_bounds = modes
+        .iter()
+        .any(|mode| mode_size_in_bounds(mode.width, mode.height));
+    Err(if any_size_in_bounds {
+        GopRejection::UnsupportedFormat
+    } else {
+        GopRejection::NoUsableMode
+    })
+}
+
+/// The usable firmware sizes for `QUERY_MODES`, the selected `width`×`height` current and
+/// settable, the configured size preferred. Sizes past [`clean_slate_graphics::MAX_OFFERED_MODES`]
+/// are dropped, never the selected one.
+pub(crate) fn offered_modes(
+    modes: &[GopModeCandidate],
+    selected: (u32, u32),
+    configured: Option<(u32, u32)>,
+) -> ModeList {
+    let mut list = ModeList::new();
+    let _ = list.offer(
+        selected.0,
+        selected.1,
+        ModeFlags::CURRENT.union(ModeFlags::SETTABLE),
+    );
+    if let Some((width, height)) = configured {
+        if best_of_size(modes, width, height).is_some() {
+            let _ = list.offer(width, height, ModeFlags::PREFERRED);
+        }
+    }
+    for mode in modes.iter().filter(|mode| usable(mode)) {
+        let _ = list.offer(mode.width, mode.height, ModeFlags(0));
+    }
+    list
+}
+
+/// Validates the post-`SetMode` state in `u64` so no input can wrap: the firmware must report the
+/// `expected` size it was asked for. `offered` gets that size as its current mode.
 pub(crate) fn validate_framebuffer(
     raw: RawFramebufferInfo,
+    expected: (u32, u32),
+    offered: ModeList,
 ) -> Result<BootFramebuffer, GopRejection> {
-    if raw.width != REFERENCE_MODE.width_px || raw.height != REFERENCE_MODE.height_px {
+    if (raw.width, raw.height) != expected || !mode_size_in_bounds(raw.width, raw.height) {
         return Err(GopRejection::ModeMismatchAfterSet);
     }
     let order = raw.format.order().ok_or(GopRejection::UnsupportedFormat)?;
@@ -229,6 +303,7 @@ pub(crate) fn validate_framebuffer(
         stride_bytes: stride_bytes as u32,
         order,
         mode_index: raw.mode_index,
+        offered,
     })
 }
 
@@ -267,7 +342,7 @@ mod firmware {
     use uefi_raw::protocol::console::{GraphicsOutputModeInformation, GraphicsOutputProtocol};
 
     use super::{
-        select_reference_mode, validate_framebuffer, BootFramebuffer, GopModeCandidate,
+        offered_modes, select_mode, validate_framebuffer, BootFramebuffer, GopModeCandidate,
         GopRawFormat, GopRejection, RawFramebufferInfo, MAX_GOP_MODES,
     };
     use crate::diagnostics::serial::serial_write_fmt;
@@ -373,7 +448,14 @@ mod firmware {
         }
         serial_write_fmt(format_args!("[GOP ] modes={count}\n"));
 
-        let selected = select_reference_mode(&modes[..count])?;
+        let configured = crate::boot::configured_display_size();
+        let selected = select_mode(&modes[..count], configured)?;
+        let size = modes[..count]
+            .iter()
+            .find(|mode| mode.index == selected)
+            .map(|mode| (mode.width, mode.height))
+            .ok_or(GopRejection::NoUsableMode)?;
+        let offered = offered_modes(&modes[..count], size, configured);
         let status = unsafe { ((*gop).set_mode)(gop, selected) };
         if !status.is_success() {
             return Err(GopRejection::SetModeFailed);
@@ -385,15 +467,19 @@ mod firmware {
             return Err(GopRejection::ModeMismatchAfterSet);
         }
         let info = unsafe { ptr::read_unaligned(mode.info) };
-        let framebuffer = validate_framebuffer(RawFramebufferInfo {
-            mode_index: mode.mode,
-            width: info.horizontal_resolution,
-            height: info.vertical_resolution,
-            stride_px: info.pixels_per_scan_line,
-            format: GopRawFormat::from_raw(info.pixel_format.0),
-            base: mode.frame_buffer_base,
-            size: mode.frame_buffer_size as u64,
-        })?;
+        let framebuffer = validate_framebuffer(
+            RawFramebufferInfo {
+                mode_index: mode.mode,
+                width: info.horizontal_resolution,
+                height: info.vertical_resolution,
+                stride_px: info.pixels_per_scan_line,
+                format: GopRawFormat::from_raw(info.pixel_format.0),
+                base: mode.frame_buffer_base,
+                size: mode.frame_buffer_size as u64,
+            },
+            size,
+            offered,
+        )?;
         serial_write_fmt(format_args!(
             "[GOP ] set-mode {}x{} fmt={} stride={}\n",
             framebuffer.width,
@@ -413,6 +499,8 @@ mod firmware {
 mod tests {
     use super::*;
     use std::vec::Vec;
+
+    const REFERENCE: (u32, u32) = (1280, 800);
 
     fn mode(index: u32, width: u32, height: u32, format: GopRawFormat) -> GopModeCandidate {
         GopModeCandidate {
@@ -437,14 +525,17 @@ mod tests {
     }
 
     #[test]
-    fn select_reference_mode_matrix() {
+    fn select_mode_matrix() {
+        assert_eq!(select_mode(&[], None), Err(GopRejection::NoUsableMode));
         assert_eq!(
-            select_reference_mode(&[]),
-            Err(GopRejection::ReferenceModeAbsent)
+            select_mode(&[mode(0, 320, 200, GopRawFormat::Bgrx)], None),
+            Err(GopRejection::NoUsableMode),
+            "below the minimum size"
         );
         assert_eq!(
-            select_reference_mode(&[mode(0, 800, 600, GopRawFormat::Bgrx)]),
-            Err(GopRejection::ReferenceModeAbsent)
+            select_mode(&[mode(0, 2560, 1600, GopRawFormat::Bgrx)], None),
+            Err(GopRejection::NoUsableMode),
+            "past the frame cap"
         );
         for format in [
             GopRawFormat::Bitmask,
@@ -452,48 +543,108 @@ mod tests {
             GopRawFormat::Unknown(7),
         ] {
             assert_eq!(
-                select_reference_mode(&[mode(3, 1280, 800, format)]),
+                select_mode(&[mode(3, 1280, 800, format)], None),
                 Err(GopRejection::UnsupportedFormat),
                 "{format:?}"
             );
         }
         assert_eq!(
-            select_reference_mode(&[
-                mode(1, 1280, 800, GopRawFormat::Rgbx),
-                mode(2, 1280, 800, GopRawFormat::Bgrx),
-            ]),
+            select_mode(
+                &[
+                    mode(1, 1280, 800, GopRawFormat::Rgbx),
+                    mode(2, 1280, 800, GopRawFormat::Bgrx),
+                ],
+                None
+            ),
             Ok(2),
             "Bgrx wins over an earlier Rgbx"
         );
         assert_eq!(
-            select_reference_mode(&[
-                mode(4, 1280, 800, GopRawFormat::Rgbx),
-                mode(5, 1280, 800, GopRawFormat::Rgbx),
-            ]),
+            select_mode(
+                &[
+                    mode(4, 1280, 800, GopRawFormat::Rgbx),
+                    mode(5, 1280, 800, GopRawFormat::Rgbx),
+                ],
+                None
+            ),
             Ok(4),
             "first of duplicates"
-        );
-        assert_eq!(
-            select_reference_mode(&[
-                mode(8, 1280, 800, GopRawFormat::Bgrx),
-                mode(9, 1280, 800, GopRawFormat::Bgrx),
-            ]),
-            Ok(8)
         );
         let mut narrow = mode(6, 1280, 800, GopRawFormat::Bgrx);
         narrow.stride_px = 1279;
         assert_eq!(
-            select_reference_mode(&[narrow]),
+            select_mode(&[narrow], None),
             Err(GopRejection::UnsupportedFormat)
         );
+
+        let ovmf = [
+            mode(0, 640, 480, GopRawFormat::Bgrx),
+            mode(1, 800, 600, GopRawFormat::Bgrx),
+            mode(2, 1024, 768, GopRawFormat::Bgrx),
+            mode(3, 1280, 800, GopRawFormat::Bgrx),
+            mode(4, 1920, 1080, GopRawFormat::Bgrx),
+            mode(5, 1920, 1200, GopRawFormat::Bgrx),
+            mode(6, 2560, 1600, GopRawFormat::Bgrx),
+        ];
+        assert_eq!(select_mode(&ovmf, None), Ok(3), "reference by default");
+        assert_eq!(select_mode(&ovmf, Some((1024, 768))), Ok(2), "configured");
+        assert_eq!(
+            select_mode(&ovmf, Some((1920, 1200))),
+            Ok(3),
+            "a configured size past the cap falls back to the reference"
+        );
+        assert_eq!(
+            select_mode(&ovmf, Some((1366, 768))),
+            Ok(3),
+            "an absent configured size falls back to the reference"
+        );
+        assert_eq!(
+            select_mode(&ovmf[..3], None),
+            Ok(2),
+            "no reference: the largest usable size"
+        );
+        assert_eq!(
+            select_mode(&[ovmf[4], ovmf[5], ovmf[6], ovmf[1]], None),
+            Ok(4),
+            "the largest within the cap"
+        );
+
         let too_many: Vec<_> = (0..=MAX_GOP_MODES as u32)
             .map(|index| mode(index, 1280, 800, GopRawFormat::Bgrx))
             .collect();
         assert_eq!(
-            select_reference_mode(&too_many),
+            select_mode(&too_many, None),
             Err(GopRejection::TooManyModes)
         );
-        assert_eq!(select_reference_mode(&too_many[..MAX_GOP_MODES]), Ok(0));
+        assert_eq!(select_mode(&too_many[..MAX_GOP_MODES], None), Ok(0));
+    }
+
+    #[test]
+    fn offered_modes_list_usable_sizes_with_only_the_selected_one_settable() {
+        let modes = [
+            mode(0, 640, 480, GopRawFormat::Bgrx),
+            mode(1, 1024, 768, GopRawFormat::Rgbx),
+            mode(2, 1024, 768, GopRawFormat::Bgrx),
+            mode(3, 1280, 800, GopRawFormat::Bgrx),
+            mode(4, 1920, 1200, GopRawFormat::Bgrx),
+            mode(5, 800, 600, GopRawFormat::BltOnly),
+        ];
+        let list = offered_modes(&modes, (1024, 768), Some((1024, 768)));
+        assert_eq!(list.len(), 3, "one entry per usable size: {list:?}");
+        let current = list.current().expect("current");
+        assert_eq!((current.width_px, current.height_px), (1024, 768));
+        assert!(current.is(ModeFlags::SETTABLE) && current.is(ModeFlags::PREFERRED));
+        for size in [(640, 480), (1280, 800)] {
+            let entry = list.find(size.0, size.1).expect("listed");
+            assert_eq!(entry.flags, ModeFlags(0), "{size:?}");
+        }
+        assert!(list.find(1920, 1200).is_none() && list.find(800, 600).is_none());
+        let unconfigured = offered_modes(&modes, (1280, 800), Some((1366, 768)));
+        assert_eq!(
+            unconfigured.preferred(),
+            None,
+            "an absent size is not preferred"
+        );
     }
 
     #[test]
@@ -511,7 +662,7 @@ mod tests {
 
     #[test]
     fn validate_framebuffer_accepts_reference() {
-        let fb = validate_framebuffer(reference_raw()).unwrap();
+        let fb = validate_framebuffer(reference_raw(), REFERENCE, ModeList::new()).unwrap();
         assert_eq!(fb.phys_base, 0x8000_0000);
         assert_eq!(fb.byte_len, 4_096_000);
         assert_eq!(fb.map_len, 4_096_000);
@@ -528,7 +679,7 @@ mod tests {
             format: GopRawFormat::Rgbx,
             ..reference_raw()
         };
-        let fb = validate_framebuffer(raw).unwrap();
+        let fb = validate_framebuffer(raw, REFERENCE, ModeList::new()).unwrap();
         assert_eq!(fb.stride_bytes, 1281 * 4);
         assert_eq!(fb.byte_len, 1281 * 4 * 800);
         assert_eq!(fb.map_len, (1281 * 4 * 800_u64).next_multiple_of(PAGE_SIZE));
@@ -630,18 +781,31 @@ mod tests {
             ),
         ];
         for (raw, expected) in cases {
-            assert_eq!(validate_framebuffer(raw), Err(expected), "{raw:?}");
+            assert_eq!(
+                validate_framebuffer(raw, REFERENCE, ModeList::new()),
+                Err(expected),
+                "{raw:?}"
+            );
         }
         let at_span_end = RawFramebufferInfo {
             base: PHYSMAP_SPAN - 1000 * PAGE_SIZE,
             ..base
         };
-        assert!(validate_framebuffer(at_span_end).is_ok());
+        assert!(validate_framebuffer(at_span_end, REFERENCE, ModeList::new()).is_ok());
+        let other = RawFramebufferInfo {
+            width: 1024,
+            height: 768,
+            stride_px: 1024,
+            ..base
+        };
+        let fb = validate_framebuffer(other, (1024, 768), ModeList::new()).unwrap();
+        assert_eq!((fb.width, fb.height, fb.stride_bytes), (1024, 768, 4096));
+        assert_eq!(fb.byte_len, 4096 * 768);
     }
 
     #[test]
     fn aperture_conflicts_only_with_usable_ram() {
-        let fb = validate_framebuffer(reference_raw()).unwrap();
+        let fb = validate_framebuffer(reference_raw(), REFERENCE, ModeList::new()).unwrap();
         let region = |start: u64, end: u64, kind| MemoryRegion { start, end, kind };
         let usable = MemoryRegionKind::Usable;
         let reserved = MemoryRegionKind::Reserved;

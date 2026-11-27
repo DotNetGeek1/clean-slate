@@ -58,7 +58,10 @@ pub use limits::{
     MAX_WINDOWS_PER_CLIENT, RAW_INPUT_COALESCE_HIGH_WATER, RAW_INPUT_QUEUE_DEPTH,
     SCANOUT_BUFFER_COUNT, SERVER_REQUEST_QUEUE_DEPTH,
 };
-pub use mode::{DisplayMode, OutputInfo, REFERENCE_FRAME_BYTES, REFERENCE_MODE};
+pub use mode::{
+    mode_size_in_bounds, DisplayMode, ModeEntry, ModeFlags, ModeList, OutputInfo,
+    MAX_MODE_FRAME_BYTES, MAX_OFFERED_MODES, REFERENCE_FRAME_BYTES, REFERENCE_MODE,
+};
 pub use pixel::{div255, over, BufferLayout, ColorSpace, PixelFormat};
 pub use protocol::{
     negotiate, DecodeError, DisconnectReason, Event, Features, FrameHeader, ProtocolError,

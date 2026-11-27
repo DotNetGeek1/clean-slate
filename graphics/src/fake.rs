@@ -4,7 +4,7 @@ use crate::abi::display::{DisplayError, PresentRequest, PresentState, PresentSta
 use crate::geometry::BufferRect;
 use crate::ids::OutputId;
 use crate::limits::{MAX_PRESENT_DAMAGE_RECTS, SCANOUT_BUFFER_COUNT};
-use crate::mode::DisplayMode;
+use crate::mode::{DisplayMode, ModeFlags, ModeList, MAX_OFFERED_MODES};
 use crate::pixel::{BufferLayout, PixelFormat};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +20,9 @@ struct InFlight {
 /// at completion time (R8), and no write access to a buffer while it is in flight.
 pub struct FakeDisplay<const BYTES: usize> {
     mode: DisplayMode,
+    /// Other settable modes (#314): `set_mode` switches among these and `mode`. Each frame fits
+    /// in `BYTES`; the buffers are never reallocated.
+    offered: [Option<DisplayMode>; MAX_OFFERED_MODES],
     output: OutputId,
     buffers: [[u8; BYTES]; SCANOUT_BUFFER_COUNT],
     scanout: [u8; BYTES],
@@ -47,6 +50,7 @@ impl<const BYTES: usize> FakeDisplay<BYTES> {
         }
         Ok(Self {
             mode,
+            offered: [None; MAX_OFFERED_MODES],
             output: OutputId::new(0, 1).map_err(|_| DisplayError::ModeUnavailable)?,
             buffers: [[0; BYTES]; SCANOUT_BUFFER_COUNT],
             scanout: [0; BYTES],
@@ -62,6 +66,83 @@ impl<const BYTES: usize> FakeDisplay<BYTES> {
 
     pub fn output(&self) -> OutputId {
         self.output
+    }
+
+    /// Also offers `mode` for `set_mode`. `ModeUnavailable` unless it is a valid `Xrgb8888`
+    /// layout whose frame fits in `BYTES`; `UnsupportedMode` when the list is full.
+    pub fn offer(&mut self, mode: DisplayMode) -> Result<(), DisplayError> {
+        let layout = BufferLayout::new(
+            mode.width_px,
+            mode.height_px,
+            mode.stride_bytes,
+            mode.format,
+        )
+        .map_err(|_| DisplayError::ModeUnavailable)?;
+        if mode.format != PixelFormat::Xrgb8888 || layout.byte_len() > BYTES {
+            return Err(DisplayError::ModeUnavailable);
+        }
+        if self.find(mode.width_px, mode.height_px).is_some() {
+            return Ok(());
+        }
+        let slot = self
+            .offered
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .ok_or(DisplayError::UnsupportedMode)?;
+        *slot = Some(mode);
+        Ok(())
+    }
+
+    fn find(&self, width: u32, height: u32) -> Option<DisplayMode> {
+        core::iter::once(self.mode)
+            .chain(self.offered.iter().flatten().copied())
+            .find(|mode| mode.width_px == width && mode.height_px == height)
+    }
+
+    /// `QUERY_MODES`: the current mode and every offered one, all settable.
+    pub fn modes(&self) -> ModeList {
+        let mut list = ModeList::new();
+        let settable = ModeFlags::SETTABLE;
+        let _ = list.offer(
+            self.mode.width_px,
+            self.mode.height_px,
+            settable.union(ModeFlags::CURRENT),
+        );
+        for mode in self.offered.iter().flatten() {
+            let _ = list.offer(mode.width_px, mode.height_px, settable);
+        }
+        list
+    }
+
+    /// `SET_MODE` (#314), completing at once: `Poisoned` / `ResetRequired`, then
+    /// `UnsupportedMode` for a size not offered, then `BufferBusy` while a present is in flight.
+    /// The current size is a no-op; any other bumps the epoch, leaving the buffers' bytes as they
+    /// were (the caller repaints the whole output).
+    pub fn set_mode(&mut self, width: u32, height: u32) -> Result<(), DisplayError> {
+        if self.poisoned {
+            return Err(DisplayError::Poisoned);
+        }
+        if self.reset_required {
+            return Err(DisplayError::ResetRequired);
+        }
+        let mode = self
+            .find(width, height)
+            .ok_or(DisplayError::UnsupportedMode)?;
+        if self.in_flight.is_some() {
+            return Err(DisplayError::BufferBusy);
+        }
+        if mode == self.mode {
+            return Ok(());
+        }
+        let output = OutputId::new(0, self.output.backend_epoch() + 1)
+            .map_err(|_| DisplayError::UnsupportedMode)?;
+        let previous = self.mode;
+        self.mode = mode;
+        if let Some(slot) = self.offered.iter_mut().find(|slot| **slot == Some(mode)) {
+            *slot = Some(previous);
+        }
+        self.output = output;
+        Ok(())
     }
 
     #[cfg(test)]

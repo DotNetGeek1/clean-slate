@@ -19,7 +19,6 @@ use crate::device::virtio::modern::{
 use crate::device::virtio::virtqueue::{Completion, Token};
 use crate::sched::wait::Deadline;
 
-const STRIDE: usize = REFERENCE_MODE.stride_bytes as usize;
 /// `VIRTIO_GPU_RESP_ERR_UNSPEC`.
 const RESP_ERR_UNSPEC: u32 = 0x1200;
 
@@ -53,7 +52,12 @@ pub(crate) struct FakeGpu {
     pub(crate) stall: bool,
     pub(crate) fail_reset: bool,
     pub(crate) display_size: (u32, u32),
-    resource: Option<Vec<u8>>,
+    /// Scanout 0 is enabled in the display info.
+    pub(crate) display_enabled: bool,
+    /// The host resource and its width and height; its stride is `width * 4`, like QEMU's.
+    resource: Option<(u32, u32, Vec<u8>)>,
+    /// The size of what scanout 0 shows: the resource's, from the last `SET_SCANOUT`.
+    pub(crate) scanout_size: (u32, u32),
     backing: Vec<(u64, u32)>,
     /// Scanout 0 shows the resource (`SET_SCANOUT` succeeded and the resource still exists).
     pub(crate) linked: bool,
@@ -76,7 +80,9 @@ impl FakeGpu {
             stall: false,
             fail_reset: false,
             display_size: (REFERENCE_MODE.width_px, REFERENCE_MODE.height_px),
+            display_enabled: true,
             resource: None,
+            scanout_size: (REFERENCE_MODE.width_px, REFERENCE_MODE.height_px),
             backing: Vec::new(),
             linked: false,
             scanout: vec![0; REFERENCE_FRAME_BYTES],
@@ -162,20 +168,32 @@ impl FakeGpu {
                 let first = wire::HEADER_BYTES;
                 wire::put_u32(response, first + 8, self.display_size.0);
                 wire::put_u32(response, first + 12, self.display_size.1);
-                wire::put_u32(response, first + 16, 1);
+                wire::put_u32(response, first + 16, u32::from(self.display_enabled));
                 return wire::RESP_OK_DISPLAY_INFO;
             }
             wire::CMD_RESOURCE_CREATE_2D => {
                 if self.resource.is_some() {
                     return RESP_ERR_UNSPEC;
                 }
-                self.resource = Some(vec![0; REFERENCE_FRAME_BYTES]);
+                let (width, height) = (words[2], words[3]);
+                self.resource = Some((width, height, vec![0; (width * 4 * height) as usize]));
             }
             wire::CMD_SET_SCANOUT | wire::CMD_RESOURCE_UNREF if self.resource.is_none() => {
                 return RESP_ERR_UNSPEC;
             }
             wire::CMD_SET_SCANOUT if self.backing.is_empty() => return RESP_ERR_UNSPEC,
-            wire::CMD_SET_SCANOUT => self.linked = true,
+            wire::CMD_SET_SCANOUT => {
+                let (_, _, width, height) = rect(0);
+                let (res_width, res_height, _) = self.resource.as_ref().expect("resource");
+                if (width as u32, height as u32) != (*res_width, *res_height) {
+                    return RESP_ERR_UNSPEC;
+                }
+                if self.scanout_size != (*res_width, *res_height) {
+                    self.scanout_size = (*res_width, *res_height);
+                    self.scanout = vec![0; width * 4 * height];
+                }
+                self.linked = true;
+            }
             wire::CMD_RESOURCE_UNREF => {
                 self.resource = None;
                 self.linked = false;
@@ -198,22 +216,26 @@ impl FakeGpu {
             wire::CMD_TRANSFER_TO_HOST_2D => {
                 let (x, y, width, height) = rect(0);
                 let offset = u64::from(words[4]) | (u64::from(words[5]) << 32);
-                if self.backing.is_empty() || offset as usize != y * STRIDE + x * 4 {
+                let Some(stride) = self.resource_stride() else {
+                    return RESP_ERR_UNSPEC;
+                };
+                if self.backing.is_empty() || offset as usize != y * stride + x * 4 {
                     return RESP_ERR_UNSPEC;
                 }
                 for row in 0..height {
-                    let start = offset as usize + row * STRIDE;
+                    let start = offset as usize + row * stride;
                     let bytes = self.read_backing(start, width * 4);
-                    let resource = self.resource.as_mut().expect("resource");
+                    let (_, _, resource) = self.resource.as_mut().expect("resource");
                     resource[start..start + width * 4].copy_from_slice(&bytes);
                 }
             }
             wire::CMD_RESOURCE_FLUSH if !self.linked => {}
             wire::CMD_RESOURCE_FLUSH => {
                 let (x, y, width, height) = rect(0);
-                let resource = self.resource.as_ref().expect("resource");
+                let stride = self.resource_stride().expect("resource");
+                let (_, _, resource) = self.resource.as_ref().expect("resource");
                 for row in y..y + height {
-                    let start = row * STRIDE + x * 4;
+                    let start = row * stride + x * 4;
                     self.scanout[start..start + width * 4]
                         .copy_from_slice(&resource[start..start + width * 4]);
                 }
@@ -221,6 +243,19 @@ impl FakeGpu {
             _ => {}
         }
         wire::RESP_OK_NODATA
+    }
+
+    fn resource_stride(&self) -> Option<usize> {
+        self.resource
+            .as_ref()
+            .map(|(width, _, _)| *width as usize * 4)
+    }
+
+    /// The host resource's size, if one exists.
+    pub(crate) fn resource_size(&self) -> Option<(u32, u32)> {
+        self.resource
+            .as_ref()
+            .map(|(width, height, _)| (*width, *height))
     }
 
     fn read_backing(&self, mut offset: usize, len: usize) -> Vec<u8> {

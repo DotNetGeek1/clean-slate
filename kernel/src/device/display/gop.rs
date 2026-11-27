@@ -3,7 +3,7 @@
 //! A memory copy cannot time out, so this backend never enters `ResetRequired` or `Poisoned`
 //! under validated damage; those states belong to the shared engine and asynchronous backends.
 
-use clean_slate_graphics::{BufferLayout, BufferRect, DisplayMode, REFERENCE_MODE};
+use clean_slate_graphics::{BufferLayout, BufferRect, DisplayMode, ModeFlags, ModeList};
 use clean_slate_raster::bgrx_to_rgbx;
 
 use super::aperture::{ApertureError, ApertureWriter};
@@ -17,20 +17,41 @@ const CONVERT_CHUNK_PX: usize = 64;
 pub(crate) struct GopBackend {
     aperture: ApertureWriter,
     order: GopPixelOrder,
+    /// The aperture's visible size as a packed client mode.
+    mode: DisplayMode,
+    /// The firmware modes captured before `ExitBootServices` (#314), for `QUERY_MODES`.
+    offered: ModeList,
 }
 
 impl GopBackend {
-    /// The aperture must be exactly the reference mode's visible size.
+    /// The aperture's visible size must be a mode inside the mode bounds. `offered` is the
+    /// captured list; only the aperture's own mode is settable, whatever it says.
     pub(crate) fn new(
         aperture: ApertureWriter,
         order: GopPixelOrder,
+        offered: ModeList,
     ) -> Result<Self, BackendError> {
-        if aperture.width() != REFERENCE_MODE.width_px
-            || aperture.height() != REFERENCE_MODE.height_px
-        {
-            return Err(BackendError::SourceRejected);
+        let mode = DisplayMode::packed(aperture.width(), aperture.height())
+            .ok_or(BackendError::SourceRejected)?;
+        let mut list = ModeList::new();
+        let _ = list.offer(
+            mode.width_px,
+            mode.height_px,
+            ModeFlags::CURRENT.union(ModeFlags::SETTABLE),
+        );
+        for entry in offered.as_slice() {
+            let flags = entry
+                .flags
+                .without(ModeFlags::CURRENT)
+                .without(ModeFlags::SETTABLE);
+            let _ = list.offer(entry.width_px, entry.height_px, flags);
         }
-        Ok(Self { aperture, order })
+        Ok(Self {
+            aperture,
+            order,
+            mode,
+            offered: list,
+        })
     }
 
     #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
@@ -59,23 +80,27 @@ impl GopBackend {
     }
 }
 
-fn reference_layout() -> Option<BufferLayout> {
+fn mode_layout(mode: &DisplayMode) -> Option<BufferLayout> {
     BufferLayout::new(
-        REFERENCE_MODE.width_px,
-        REFERENCE_MODE.height_px,
-        REFERENCE_MODE.stride_bytes,
-        REFERENCE_MODE.format,
+        mode.width_px,
+        mode.height_px,
+        mode.stride_bytes,
+        mode.format,
     )
     .ok()
 }
 
 impl ScanoutBackend for GopBackend {
     fn mode(&self) -> DisplayMode {
-        REFERENCE_MODE
+        self.mode
+    }
+
+    fn modes(&self) -> ModeList {
+        self.offered
     }
 
     fn bind(&mut self, _index: u8, source: &dyn FrameSource) -> Result<(), BackendError> {
-        if Some(source.layout()) != reference_layout() {
+        if Some(source.layout()) != mode_layout(&self.mode) {
             return Err(BackendError::SourceRejected);
         }
         Ok(())
@@ -118,7 +143,8 @@ impl ScanoutBackend for GopBackend {
 mod tests {
     use clean_slate_graphics::display::{DisplayError, PresentRequest, PresentState};
     use clean_slate_graphics::{
-        BufferLayout, BufferRect, MAX_PRESENT_DAMAGE_RECTS, REFERENCE_MODE,
+        BufferLayout, BufferRect, DisplayMode, ModeFlags, ModeList, MAX_PRESENT_DAMAGE_RECTS,
+        REFERENCE_MODE,
     };
 
     use super::GopBackend;
@@ -192,7 +218,7 @@ mod tests {
                 )
             }
             .expect("aperture");
-            GopBackend::new(aperture, order).expect("gop backend")
+            GopBackend::new(aperture, order, ModeList::new()).expect("gop backend")
         }
     }
 
@@ -336,15 +362,37 @@ mod tests {
     }
 
     #[test]
-    fn construction_and_bind_accept_only_the_reference_geometry() {
+    fn construction_takes_the_aperture_size_and_bind_only_its_layout() {
+        let mut tiny = vec![0u8; 320 * 4 * 200];
+        let aperture =
+            unsafe { ApertureWriter::new(tiny.as_mut_ptr(), tiny.len(), 320 * 4, 320, 200) }
+                .expect("aperture");
+        assert!(matches!(
+            GopBackend::new(aperture, GopPixelOrder::Bgrx, ModeList::new()),
+            Err(BackendError::SourceRejected)
+        ));
         let mut small = vec![0u8; 640 * 4 * 480];
         let aperture =
             unsafe { ApertureWriter::new(small.as_mut_ptr(), small.len(), 640 * 4, 640, 480) }
                 .expect("aperture");
-        assert!(matches!(
-            GopBackend::new(aperture, GopPixelOrder::Bgrx),
-            Err(BackendError::SourceRejected)
-        ));
+        let mut captured = ModeList::new();
+        captured
+            .offer(1280, 800, ModeFlags::SETTABLE.union(ModeFlags::PREFERRED))
+            .expect("offer");
+        captured
+            .offer(640, 480, ModeFlags::SETTABLE.union(ModeFlags::CURRENT))
+            .expect("offer");
+        let small_backend =
+            GopBackend::new(aperture, GopPixelOrder::Bgrx, captured).expect("640x480 backend");
+        assert_eq!(small_backend.mode(), DisplayMode::packed(640, 480).unwrap());
+        let modes = small_backend.modes();
+        assert_eq!(modes.current().map(|entry| entry.width_px), Some(640));
+        let reference = modes.find(1280, 800).expect("captured mode listed");
+        assert!(reference.is(ModeFlags::PREFERRED));
+        assert!(
+            !reference.is(ModeFlags::SETTABLE),
+            "GOP cannot set a mode after ExitBootServices"
+        );
 
         let mut scanout = Scanout::new(5120);
         let mut backend = scanout.backend(GopPixelOrder::Bgrx);
@@ -402,6 +450,26 @@ mod tests {
             damage_count: damage.len() as u8,
             rects,
         }
+    }
+
+    #[test]
+    fn gop_sets_only_its_boot_mode() {
+        let mut scanout = Scanout::new(5120);
+        let backend = scanout.backend(GopPixelOrder::Bgrx);
+        let mut display = ActiveDisplay::new(Backend::Gop(backend)).expect("display");
+        let epoch = display.state().output().backend_epoch();
+        assert_eq!(
+            display.set_mode(clean_slate_capability::HolderId(7), 1280, 800),
+            Ok(())
+        );
+        assert_eq!(display.state().output().backend_epoch(), epoch);
+        assert_eq!(
+            display.set_mode(clean_slate_capability::HolderId(7), 1024, 768),
+            Err(DisplayError::UnsupportedMode)
+        );
+        let modes = display.modes();
+        assert_eq!(modes.len(), 1);
+        assert_eq!(modes.current().map(|entry| entry.width_px), Some(1280));
     }
 
     #[test]

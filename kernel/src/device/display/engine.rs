@@ -39,6 +39,8 @@ pub(crate) struct DisplayState {
     reset_required: bool,
     poisoned: bool,
     in_flight: Option<InFlight>,
+    /// An asynchronous `SET_MODE` the backend has not finished (#314). Presents and binds wait.
+    pending_mode: Option<DisplayMode>,
     last_error: Option<DisplayError>,
     submitted_seq: u64,
     completed_seq: u64,
@@ -60,6 +62,7 @@ impl DisplayState {
             reset_required: false,
             poisoned: false,
             in_flight: None,
+            pending_mode: None,
             last_error: None,
             submitted_seq: 0,
             completed_seq: 0,
@@ -69,6 +72,15 @@ impl DisplayState {
 
     pub(crate) fn output(&self) -> OutputId {
         self.output
+    }
+
+    pub(crate) fn mode(&self) -> DisplayMode {
+        self.mode
+    }
+
+    /// A `SET_MODE` is waiting for its backend.
+    pub(crate) fn mode_change_pending(&self) -> bool {
+        self.pending_mode.is_some()
     }
 
     pub(crate) fn mode_info(&self) -> DisplayModeInfo {
@@ -125,7 +137,7 @@ impl DisplayState {
         source: &dyn FrameSource,
     ) -> Result<(), DisplayError> {
         self.check_accepting()?;
-        if self.in_flight_index() == Some(index) {
+        if self.in_flight_index() == Some(index) || self.pending_mode.is_some() {
             return Err(DisplayError::BufferBusy);
         }
         let slot = self
@@ -158,7 +170,7 @@ impl DisplayState {
         {
             return Err(DisplayError::InvalidBuffer);
         }
-        if self.in_flight_index().is_some() {
+        if self.in_flight_index().is_some() || self.pending_mode.is_some() {
             return Err(DisplayError::BufferBusy);
         }
         self.submitted_seq += 1;
@@ -177,6 +189,57 @@ impl DisplayState {
             Err(error) => self.record_failure(seq, error, now_ns),
         }
         Ok(seq)
+    }
+
+    /// `SET_MODE` after the caller's checks (#314): `Poisoned` / `ResetRequired`, then `BufferBusy`
+    /// while a present or another mode change is in flight. The current mode is a no-op. A
+    /// synchronous backend switches now; an asynchronous one finishes in
+    /// [`Self::finish_mode_change`]. Either way the switch bumps the epoch, so every earlier
+    /// `PresentRequest` is stale. A backend that cannot even submit the change leaves the output
+    /// needing a reset, reported through `PresentStatus` like a failed present.
+    pub(crate) fn set_mode(
+        &mut self,
+        backend: &mut dyn ScanoutBackend,
+        mode: DisplayMode,
+    ) -> Result<(), DisplayError> {
+        self.check_accepting()?;
+        if self.in_flight.is_some() || self.pending_mode.is_some() {
+            return Err(DisplayError::BufferBusy);
+        }
+        if mode == self.mode {
+            return Ok(());
+        }
+        if mode.format != PixelFormat::Xrgb8888 || mode_layout(&mode).is_err() {
+            return Err(DisplayError::UnsupportedMode);
+        }
+        match backend.set_mode(mode) {
+            Ok(Submitted::Completed) => self.adopt(mode),
+            #[cfg(any(test, clean_slate_virtio_gpu))]
+            Ok(Submitted::Pending) => self.pending_mode = Some(mode),
+            Err(error) => self.fault(error),
+        }
+        Ok(())
+    }
+
+    /// The backend finished the pending `SET_MODE`: the new mode and a new epoch, or a reset.
+    pub(crate) fn finish_mode_change(&mut self, result: Result<(), BackendError>) {
+        let Some(mode) = self.pending_mode.take() else {
+            return;
+        };
+        match result {
+            Ok(()) => self.adopt(mode),
+            Err(error) => self.fault(error),
+        }
+    }
+
+    fn adopt(&mut self, mode: DisplayMode) {
+        match OutputId::new(self.output.index(), self.output.backend_epoch() + 1) {
+            Ok(output) => {
+                self.output = output;
+                self.mode = mode;
+            }
+            Err(_) => self.poisoned = true,
+        }
     }
 
     /// Deadline for arming the kernel timeout registry while a present is in flight.
@@ -211,18 +274,22 @@ impl DisplayState {
     /// Ends `ResetRequired`: success bumps the output epoch; failure, or success at the maximum
     /// epoch, poisons until reboot.
     pub(crate) fn finish_reset(&mut self, success: bool) {
+        self.finish_reset_into(success, self.mode);
+    }
+
+    /// [`Self::finish_reset`] where the backend came back in `mode`: a reset after a failed
+    /// `SET_MODE` brings the device up in the mode it was asked for.
+    pub(crate) fn finish_reset_into(&mut self, success: bool, mode: DisplayMode) {
         if !self.reset_required || self.poisoned {
             return;
         }
         self.reset_required = false;
-        if !success {
+        self.pending_mode = None;
+        if !success || mode_layout(&mode).is_err() {
             self.poisoned = true;
             return;
         }
-        match OutputId::new(self.output.index(), self.output.backend_epoch() + 1) {
-            Ok(output) => self.output = output,
-            Err(_) => self.poisoned = true,
-        }
+        self.adopt(mode);
     }
 
     /// A backend failure with no present in flight (VirtIO-GPU bring-up): the output needs a reset;
@@ -231,6 +298,7 @@ impl DisplayState {
         if self.poisoned || self.in_flight.is_some() {
             return;
         }
+        self.pending_mode = None;
         self.last_error = Some(failure_error(error));
         self.reset_required = true;
     }

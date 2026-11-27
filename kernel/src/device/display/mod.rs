@@ -1,8 +1,10 @@
 //! Kernel display: scanout backends behind one present engine (#111 GOP; #114 VirtIO-GPU next).
 //!
 //! Backends carry no UI policy (no cursor, layout or background). Clients never see the aperture,
-//! its stride, or physical addresses: they get the frozen reference mode and the presenter's two
-//! kernel-owned scanout buffers through syscall 18.
+//! its stride, or physical addresses: they get a packed `Xrgb8888` mode, the modes on offer
+//! (#314), and the presenter's two kernel-owned scanout buffers through syscall 18. The buffers
+//! are sized once for the largest settable mode, so a mode change re-lays them out in place and
+//! the presenter's mappings never move.
 
 pub(crate) mod aperture;
 pub(crate) mod engine;
@@ -21,7 +23,7 @@ pub(crate) mod virtio_gpu;
 use clean_slate_capability::HolderId;
 use clean_slate_graphics::display::PresentState;
 use clean_slate_graphics::display::{DisplayError, PresentRequest, ScanoutMapping};
-use clean_slate_graphics::{BufferRect, DisplayMode, REFERENCE_FRAME_BYTES, SCANOUT_BUFFER_COUNT};
+use clean_slate_graphics::{BufferRect, DisplayMode, ModeFlags, ModeList, SCANOUT_BUFFER_COUNT};
 use clean_slate_native_abi::SharedBufferId;
 
 use crate::arch::x86_64::cpu::without_interrupts;
@@ -56,6 +58,27 @@ pub(crate) enum BackendError {
 pub(crate) trait ScanoutBackend {
     fn mode(&self) -> DisplayMode;
 
+    /// The sizes on offer (#314). `CURRENT` names [`Self::mode`]; the engine re-marks it with its
+    /// own current mode while a change is in flight.
+    fn modes(&self) -> ModeList {
+        let mode = self.mode();
+        let mut list = ModeList::new();
+        let _ = list.offer(
+            mode.width_px,
+            mode.height_px,
+            ModeFlags::CURRENT.union(ModeFlags::SETTABLE),
+        );
+        list
+    }
+
+    /// Starts scanning out `mode`, one of [`Self::modes`]' settable sizes and not the current
+    /// one. `Pending` completes through [`Self::poll`]; [`Self::mode`] reports `mode` from here on,
+    /// so a reset after a failed change comes back in it. Never called with a present in flight.
+    fn set_mode(&mut self, mode: DisplayMode) -> Result<Submitted, BackendError> {
+        let _ = mode;
+        Err(BackendError::SourceRejected)
+    }
+
     fn bind(&mut self, index: u8, source: &dyn FrameSource) -> Result<(), BackendError>;
 
     /// Copies exactly `damage` (already validated against the mode) from `source` to scanout.
@@ -79,6 +102,8 @@ pub(crate) trait ScanoutBackend {
     fn reset(&mut self) -> Result<Submitted, BackendError>;
 }
 
+// One `Backend` exists per boot, in a static; the GOP variant carries its captured mode list.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Backend {
     Gop(GopBackend),
     /// The boot's one GPU lives in its own static (`virtio_gpu::install`).
@@ -162,21 +187,27 @@ impl ActiveDisplay {
         self.presenter
             .check(holder, true)
             .map_err(DisplayError::status)?;
-        let slot = self
-            .buffers
-            .get_mut(usize::from(index))
-            .ok_or(DisplayError::InvalidBuffer.status())?;
-        if slot.is_none() {
-            let buffer = ScanoutBuffer::allocate(frames).map_err(ShareError::status)?;
+        if usize::from(index) >= SCANOUT_BUFFER_COUNT {
+            return Err(DisplayError::InvalidBuffer.status());
+        }
+        if self.buffers[usize::from(index)].is_none() {
+            let capacity = self.buffer_capacity();
+            let buffer = ScanoutBuffer::allocate(frames, capacity, self.state.mode())
+                .map_err(ShareError::status)?;
             if let Err(error) = self.state.bind(self.backend.scanout(), index, &buffer) {
                 buffer.release(frames);
                 return Err(error.status());
             }
-            *slot = Some(buffer);
+            self.buffers[usize::from(index)] = Some(buffer);
         }
+        let slot = &self.buffers[usize::from(index)];
         let id = slot
             .as_ref()
             .map(ScanoutBuffer::id)
+            .expect("buffer bound above");
+        let byte_len = slot
+            .as_ref()
+            .map(ScanoutBuffer::capacity)
             .expect("buffer bound above");
         let user_va = map(id, frames).map_err(ShareError::status)?;
         self.presenter.bind_mapping(holder, index);
@@ -185,9 +216,91 @@ impl ActiveDisplay {
             output: self.state.output(),
             buffer_index: index,
             user_va,
-            byte_len: REFERENCE_FRAME_BYTES as u64,
+            byte_len,
             stride_bytes: mode.stride_bytes,
         })
+    }
+
+    /// Bytes each scanout buffer holds: that of the buffers already allocated, else the largest
+    /// frame among the current and the settable modes, in whole pages.
+    fn buffer_capacity(&mut self) -> u64 {
+        if let Some(capacity) = self.allocated_capacity() {
+            return capacity;
+        }
+        let frame = self
+            .backend
+            .scanout()
+            .modes()
+            .settable_frame_bytes()
+            .max(self.state.mode().frame_bytes());
+        frame.next_multiple_of(crate::mm::PAGE_SIZE)
+    }
+
+    fn allocated_capacity(&self) -> Option<u64> {
+        self.buffers
+            .iter()
+            .flatten()
+            .map(ScanoutBuffer::capacity)
+            .min()
+    }
+
+    /// `QUERY_MODES` (#314): the backend's list with `CURRENT` on the engine's mode (the old one
+    /// while a change is in flight), and `SETTABLE` only on sizes the scanout buffers can hold.
+    pub(crate) fn modes(&mut self) -> ModeList {
+        let offered = self.backend.scanout().modes();
+        let current = self.state.mode();
+        let capacity = self.allocated_capacity();
+        let mut list = ModeList::new();
+        for entry in offered.as_slice() {
+            let fits = entry
+                .mode()
+                .is_some_and(|mode| capacity.is_none_or(|capacity| mode.frame_bytes() <= capacity));
+            let mut flags = entry.flags.without(ModeFlags::CURRENT);
+            if !fits {
+                flags = flags.without(ModeFlags::SETTABLE);
+            }
+            let _ = list.offer(entry.width_px, entry.height_px, flags);
+        }
+        let _ = list.offer(
+            current.width_px,
+            current.height_px,
+            ModeFlags::CURRENT.union(ModeFlags::SETTABLE),
+        );
+        list
+    }
+
+    /// `SET_MODE` after authorisation (#314), in order: backend state → presenter (or none bound
+    /// yet) → a settable offered size (`UnsupportedMode`) → the engine's in-flight gate. Signals the
+    /// wake bit when the mode changed synchronously.
+    pub(crate) fn set_mode(
+        &mut self,
+        holder: HolderId,
+        width: u32,
+        height: u32,
+    ) -> Result<(), DisplayError> {
+        self.state.check_accepting()?;
+        self.presenter.check(holder, true)?;
+        let mode = self
+            .modes()
+            .find(width, height)
+            .filter(|entry| entry.is(ModeFlags::SETTABLE))
+            .and_then(|entry| entry.mode())
+            .ok_or(DisplayError::UnsupportedMode)?;
+        let before = self.state.status();
+        let result = self.state.set_mode(self.backend.scanout(), mode);
+        self.relayout_buffers();
+        if self.state.status() != before {
+            self.presenter.signal();
+        }
+        result
+    }
+
+    /// Re-lays the scanout buffers out for the engine's mode; every settable mode fits them.
+    fn relayout_buffers(&mut self) {
+        let mode = self.state.mode();
+        for buffer in self.buffers.iter_mut().flatten() {
+            buffer.relayout(mode);
+        }
     }
 
     /// `PRESENT` after authorisation and decode, in the frozen order: backend state → presenter →
@@ -270,7 +383,11 @@ impl ActiveDisplay {
         match self.backend.scanout().poll() {
             Some(result) if self.resetting => {
                 self.resetting = false;
-                self.state.finish_reset(result.is_ok());
+                let mode = self.backend.scanout().mode();
+                self.state.finish_reset_into(result.is_ok(), mode);
+            }
+            Some(result) if self.state.mode_change_pending() => {
+                self.state.finish_mode_change(result);
             }
             Some(result) if self.state.in_flight_deadline().is_some() => {
                 self.state.complete(result, now_ns);
@@ -285,12 +402,16 @@ impl ActiveDisplay {
         if may_reset && !self.resetting && self.state.status().state == PresentState::ResetRequired
         {
             match self.backend.scanout().reset() {
-                Ok(Submitted::Completed) => self.state.finish_reset(true),
+                Ok(Submitted::Completed) => {
+                    let mode = self.backend.scanout().mode();
+                    self.state.finish_reset_into(true, mode);
+                }
                 #[cfg(any(test, clean_slate_virtio_gpu))]
                 Ok(Submitted::Pending) => self.resetting = true,
                 Err(_) => self.state.finish_reset(false),
             }
         }
+        self.relayout_buffers();
         if self.state.status() != before {
             self.presenter.signal();
         }
@@ -406,8 +527,8 @@ pub(crate) fn install_gop_display(
         )
     }
     .map_err(|_| DisplayError::ModeUnavailable)?;
-    let backend =
-        GopBackend::new(writer, framebuffer.order).map_err(|_| DisplayError::ModeUnavailable)?;
+    let backend = GopBackend::new(writer, framebuffer.order, framebuffer.offered)
+        .map_err(|_| DisplayError::ModeUnavailable)?;
     publish(ActiveDisplay::new(Backend::Gop(backend))?, "gop")
 }
 
@@ -419,7 +540,9 @@ pub(crate) fn install_virtio_gpu_display() -> Result<(), virtio_gpu::GpuInitErro
     if with_active_display(|display| display.is_some()) {
         return Err(virtio_gpu::GpuInitError::DisplayPresent);
     }
-    let backend = virtio_gpu::install(virtio_gpu::begin_mmio(on_backend_interrupt)?)?;
+    let mut backend = virtio_gpu::begin_mmio(on_backend_interrupt)?;
+    backend.set_configured_size(crate::boot::configured_display_size());
+    let backend = virtio_gpu::install(backend)?;
     publish(
         ActiveDisplay::new(Backend::VirtioGpu(backend))
             .map_err(|_| virtio_gpu::GpuInitError::Mode)?,

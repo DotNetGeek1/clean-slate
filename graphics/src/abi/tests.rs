@@ -1,18 +1,18 @@
 use super::display::{
-    DisplayError, DisplayModeInfo, DisplayWireError, PresentRequest, PresentState, PresentStatus,
-    ScanoutMapping, DISPLAY_MODE_INFO_BYTES, PRESENT_REQUEST_BYTES, PRESENT_STATUS_BYTES,
-    SCANOUT_MAPPING_BYTES,
+    DisplayError, DisplayModeInfo, DisplayModeList, DisplayWireError, PresentRequest, PresentState,
+    PresentStatus, ScanoutMapping, DISPLAY_MODE_INFO_BYTES, DISPLAY_MODE_LIST_BYTES,
+    PRESENT_REQUEST_BYTES, PRESENT_STATUS_BYTES, SCANOUT_MAPPING_BYTES,
 };
 use super::input::{InputDeviceInfo, InputWireError, INPUT_DEVICE_INFO_BYTES};
 use super::status::{
     STATUS_EACCES, STATUS_EAGAIN, STATUS_EBADF, STATUS_EINVAL, STATUS_EIO, STATUS_ENODEV,
-    STATUS_ENOSPC, STATUS_ENOSYS, STATUS_ENOTRECOVERABLE, STATUS_ERANGE, STATUS_ESTALE,
-    STATUS_ETIMEDOUT, STATUS_RANGE_START,
+    STATUS_ENOSPC, STATUS_ENOSYS, STATUS_ENOTRECOVERABLE, STATUS_EOPNOTSUPP, STATUS_ERANGE,
+    STATUS_ESTALE, STATUS_ETIMEDOUT, STATUS_RANGE_START,
 };
 use crate::geometry::BufferRect;
 use crate::ids::{InputDeviceId, OutputId};
 use crate::limits::{MAX_PRESENT_DAMAGE_RECTS, SCANOUT_BUFFER_COUNT};
-use crate::mode::REFERENCE_MODE;
+use crate::mode::{ModeFlags, ModeList, MAX_OFFERED_MODES, REFERENCE_MODE};
 const NETWORK_STATUS_PENDING: u64 = u64::MAX - 15;
 
 #[test]
@@ -22,6 +22,7 @@ fn abi_size_assertions() {
     const _: () = assert!(DISPLAY_MODE_INFO_BYTES == 32);
     const _: () = assert!(SCANOUT_MAPPING_BYTES == 32);
     const _: () = assert!(PRESENT_STATUS_BYTES == 40);
+    const _: () = assert!(DISPLAY_MODE_LIST_BYTES == 136);
     const _: () = assert!(INPUT_DEVICE_INFO_BYTES == 16);
     const _: () = assert!(MAX_PRESENT_DAMAGE_RECTS <= u8::MAX as usize);
     const _: () = assert!(SCANOUT_BUFFER_COUNT < 0xFF);
@@ -42,6 +43,7 @@ fn status_range_and_distinctness() {
         STATUS_ERANGE,
         STATUS_ETIMEDOUT,
         STATUS_ENOTRECOVERABLE,
+        STATUS_EOPNOTSUPP,
     ];
     for s in all {
         assert!(s >= STATUS_RANGE_START);
@@ -140,7 +142,7 @@ fn display_abi_round_trips() {
 
 #[test]
 fn display_error_round_trips() {
-    for code in 1..=9u16 {
+    for code in 1..=10u16 {
         let err = DisplayError::from_code(code).unwrap();
         assert_eq!(err.code(), code);
         assert_eq!(DisplayError::from_code(err.code()), Some(err));
@@ -334,10 +336,10 @@ fn present_status_decode_matrix() {
         Err(DisplayWireError::Malformed)
     );
 
-    let mut err10 = ok;
-    err10[6] = 10;
+    let mut err11 = ok;
+    err11[6] = 11;
     assert_eq!(
-        PresentStatus::decode(&err10),
+        PresentStatus::decode(&err11),
         Err(DisplayWireError::Malformed)
     );
 
@@ -386,5 +388,96 @@ fn input_device_info_decode_matrix() {
     assert_eq!(
         InputDeviceInfo::decode(&pad),
         Err(InputWireError::Malformed)
+    );
+}
+
+fn sample_mode_list() -> DisplayModeList {
+    let mut modes = ModeList::new();
+    let settable = ModeFlags::SETTABLE;
+    modes
+        .offer(1280, 800, settable.union(ModeFlags::CURRENT))
+        .unwrap();
+    modes
+        .offer(1920, 1080, settable.union(ModeFlags::PREFERRED))
+        .unwrap();
+    modes.offer(800, 600, settable).unwrap();
+    modes.offer(1024, 768, ModeFlags(0)).unwrap();
+    DisplayModeList {
+        output: current_output(),
+        modes,
+    }
+}
+
+#[test]
+fn display_mode_list_round_trips() {
+    let list = sample_mode_list();
+    let bytes = list.encode();
+    assert_eq!(bytes[4], 4);
+    assert_eq!(&bytes[8..13], &[0x00, 0x05, 0x20, 0x03, 0b101]);
+    assert_eq!(DisplayModeList::decode(&bytes), Ok(list));
+
+    let mut full = ModeList::new();
+    full.offer(640, 480, ModeFlags::SETTABLE.union(ModeFlags::CURRENT))
+        .unwrap();
+    for i in 1..MAX_OFFERED_MODES as u32 {
+        full.offer(640 + i * 8, 480, ModeFlags(0)).unwrap();
+    }
+    let full = DisplayModeList {
+        output: current_output(),
+        modes: full,
+    };
+    assert_eq!(DisplayModeList::decode(&full.encode()), Ok(full));
+}
+
+#[test]
+fn display_mode_list_decode_matrix() {
+    let good = sample_mode_list().encode();
+    let malformed = Err(DisplayWireError::Malformed);
+    assert_eq!(DisplayModeList::decode(&good[..135]), malformed);
+    let mutate = |f: &dyn Fn(&mut [u8; DISPLAY_MODE_LIST_BYTES])| {
+        let mut bytes = good;
+        f(&mut bytes);
+        DisplayModeList::decode(&bytes)
+    };
+    assert_eq!(mutate(&|b| b[0..4].fill(0)), malformed, "output id 0");
+    assert_eq!(mutate(&|b| b[5] = 1), malformed, "header pad");
+    assert_eq!(mutate(&|b| b[4] = 17), malformed, "count above the list");
+    assert_eq!(
+        mutate(&|b| b[4] = 3),
+        malformed,
+        "a used entry past the count"
+    );
+    assert_eq!(mutate(&|b| b[8 + 5] = 1), malformed, "entry pad");
+    assert_eq!(mutate(&|b| b[8 + 4] = 0b1101), malformed, "unknown flag");
+    assert_eq!(
+        mutate(&|b| b[8 + 4] = 0b001),
+        malformed,
+        "current not settable"
+    );
+    assert_eq!(mutate(&|b| b[8 + 4] = 0b100), malformed, "no current entry");
+    assert_eq!(
+        mutate(&|b| b[16 + 4] = 0b111),
+        malformed,
+        "two current entries"
+    );
+    assert_eq!(
+        mutate(&|b| b[24 + 4] = 0b110),
+        malformed,
+        "two preferred entries"
+    );
+    assert_eq!(
+        mutate(&|b| b[16..20].copy_from_slice(&[0x00, 0x05, 0x20, 0x03])),
+        malformed,
+        "a size twice"
+    );
+    assert_eq!(
+        mutate(&|b| b[16..20].copy_from_slice(&[0x80, 0x07, 0xB0, 0x04])),
+        malformed,
+        "1920x1200 is past the frame cap"
+    );
+    assert_eq!(
+        mutate(&|b| b[24..26].copy_from_slice(&[0x7F, 0x02])),
+        malformed,
+        "639 wide is under the minimum"
     );
 }
