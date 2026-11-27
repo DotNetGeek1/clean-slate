@@ -11,7 +11,7 @@
 //! | 0 | `self_pid` | init's pid |
 //! | 8 | `console_capability` | IPC send handle for init's console lines |
 //! | 16 | `lifecycle_capability` | `LIFECYCLE_CONTROL` (4), `LIFECYCLE_POLL` (5), `LIFECYCLE_WAIT` (21) |
-//! | 24 | `desktop_mode` | [`DESKTOP_MODE_OFF`], [`DESKTOP_MODE_FRAMEBUFFER`] (`q0`) or [`DESKTOP_MODE_VIRTIO_GPU`] (`q1`), with [`DESKTOP_MODE_TERMINAL`] for `q0-terminal` or `q1-terminal` |
+//! | 24 | `desktop_mode` | [`DESKTOP_MODE_OFF`], [`DESKTOP_MODE_FRAMEBUFFER`] (`q0`) or [`DESKTOP_MODE_VIRTIO_GPU`] (`q1`), with [`DESKTOP_MODE_TERMINAL`] unless the value is `q0-bare` or `q1-bare` |
 //! | 32 | `launcher_capability` | `LAUNCH_SERVE` on `ResourceRef::launcher_port()` (#237) |
 
 /// Where the kernel maps init's bootstrap page (the same slot as the storage service's).
@@ -19,12 +19,12 @@ pub const INIT_BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0010_0000;
 
 /// `desktop_mode` when the desktop is off: no fw_cfg entry, or a value the kernel rejected.
 pub const DESKTOP_MODE_OFF: u64 = 0;
-/// `desktop_mode` when `opt/clean-slate/desktop` is `q0` (GOP framebuffer).
+/// The `desktop_mode` tier for `q0` (GOP framebuffer).
 pub const DESKTOP_MODE_FRAMEBUFFER: u64 = 1;
-/// `desktop_mode` when `opt/clean-slate/desktop` is `q1` (VirtIO-GPU).
+/// The `desktop_mode` tier for `q1` (VirtIO-GPU).
 pub const DESKTOP_MODE_VIRTIO_GPU: u64 = 2;
-/// Set on a desktop word when `opt/clean-slate/desktop` is `q0-terminal` or `q1-terminal`: the
-/// desktop also declares the terminal window and its shell (#311). Never set on
+/// Set on a desktop word unless `opt/clean-slate/desktop` is `q0-bare` or `q1-bare`: the
+/// default desktop also declares the terminal window and its shell (#311). Never set on
 /// [`DESKTOP_MODE_OFF`].
 pub const DESKTOP_MODE_TERMINAL: u64 = 1 << 8;
 

@@ -13,6 +13,7 @@ pub mod desktop;
 pub mod launcher;
 pub mod lifecycle;
 pub mod memory;
+pub mod object;
 pub mod shared_buffer;
 
 #[macro_use]

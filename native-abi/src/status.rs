@@ -16,10 +16,13 @@ pub const STATUS_ENOSPC: u64 = SYSCALL_ENOSPC;
 pub const STATUS_ENOSYS: u64 = SYSCALL_ENOSYS;
 pub const STATUS_ESTALE: u64 = SYSCALL_ESTALE;
 
+pub const STATUS_ENOENT: u64 = u64::MAX - 1;
+pub const STATUS_EIO: u64 = u64::MAX - 4;
 pub const STATUS_EBADF: u64 = u64::MAX - 8;
 pub const STATUS_EAGAIN: u64 = u64::MAX - 10;
 pub const STATUS_ENOMEM: u64 = u64::MAX - 11;
 pub const STATUS_EEXIST: u64 = u64::MAX - 16;
+pub const STATUS_EFBIG: u64 = u64::MAX - 26;
 pub const STATUS_ENODATA: u64 = u64::MAX - 60;
 pub const STATUS_EPIPE: u64 = u64::MAX - 31;
 pub const STATUS_ETIMEDOUT: u64 = u64::MAX - 109;
@@ -45,7 +48,10 @@ mod tests {
     #[test]
     fn new_status_sentinels_match_errno_formula() {
         let cases = [
-            (STATUS_EACCES, 13_u64),
+            (STATUS_ENOENT, 2_u64),
+            (STATUS_EIO, 5),
+            (STATUS_EFBIG, 27),
+            (STATUS_EACCES, 13),
             (STATUS_EINVAL, 22),
             (STATUS_ENOSYS, 38),
             (STATUS_EBADF, 9),
@@ -69,6 +75,9 @@ mod tests {
     #[test]
     fn status_sentinels_pairwise_distinct_and_in_range() {
         let statuses = [
+            STATUS_ENOENT,
+            STATUS_EIO,
+            STATUS_EFBIG,
             STATUS_EACCES,
             STATUS_EINVAL,
             STATUS_ENOSPC,

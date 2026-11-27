@@ -21,10 +21,7 @@ use clean_slate_service_fixtures::{
     BlockTransportOp, BlockTransportRequest, BlockTransportResponse, BlockTransportStatus,
     ObjectServiceRequest, StorageServiceBootstrap, BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES,
     BLOCK_TRANSPORT_REQUEST_BYTES, BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION,
-    OBJECT_EPOCH_UNBOUND, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_DELETE, OBJECT_OP_READ,
-    OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE, OBJECT_OP_WRITE_AT,
-    OBJECT_SERVICE_REQUEST_BYTES, OBJECT_STATUS_NOT_FOUND, OBJECT_STATUS_NO_SPACE,
-    OBJECT_STATUS_OK, OBJECT_STATUS_STALE, OBJECT_STATUS_STORE_ERROR, OBJECT_STATUS_TOO_LARGE,
+    OBJECT_MAX_PAYLOAD_BYTES, OBJECT_SERVICE_REQUEST_BYTES, OBJECT_STATUS_TOO_LARGE,
     OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT, STORAGE_BLOCK_DEVICE_ID,
     STORAGE_SERVICE_BOOTSTRAP_ADDRESS as BOOTSTRAP_ADDRESS, STORAGE_SERVICE_LIVE_BYTES_BUDGET,
     STORAGE_SERVICE_MODE_CRASH_ARM_EARLY, STORAGE_SERVICE_MODE_CRASH_ARM_LATE,
@@ -35,6 +32,7 @@ use clean_slate_service_fixtures::{
     STORAGE_SERVICE_RESULT_OK, STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
 };
 use clean_slate_store::heap::FreeListHeap;
+use clean_slate_store::service::serve;
 use clean_slate_store::{ObjectStore, OpenError, Opened, StoreError};
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
@@ -226,126 +224,10 @@ fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u6
             )?;
             continue;
         }
-        let (status, read) = serve(&mut store, &request, len);
+        let (status, read) = serve(&mut store, &request, len, STORAGE_SERVICE_LIVE_BYTES_BUDGET);
         let payload = read.as_deref().unwrap_or(&[]);
         object_service_complete_or_abandon(role_handle, request.request_id, status, payload)?;
     }
-}
-
-/// `OBJECT_STATUS_STALE` when the request's capability is bound to an object epoch and the
-/// object it names is gone, or now has another epoch: a capability to a deleted object never
-/// reaches one re-created under its id. `None` lets the request go ahead.
-fn stale_status<D: BlockDevice>(
-    store: &ObjectStore<D>,
-    request: &ObjectServiceRequest,
-) -> Option<u64> {
-    if request.epoch == OBJECT_EPOCH_UNBOUND {
-        return None;
-    }
-    match store.epoch_of(request.object_id) {
-        Ok(epoch) if epoch == request.epoch => None,
-        _ => Some(OBJECT_STATUS_STALE),
-    }
-}
-
-/// Whether staging `request` would take the store's live bytes past
-/// [`STORAGE_SERVICE_LIVE_BYTES_BUDGET`]: the heap must still hold a commit's second copy
-/// of every payload, so a full store refuses the write rather than running out of heap.
-fn over_budget<D: BlockDevice>(
-    store: &ObjectStore<D>,
-    request: &ObjectServiceRequest,
-    len: usize,
-) -> bool {
-    let current = store.object_len(request.object_id).unwrap_or(0) as u64;
-    let new_len = match request.op {
-        OBJECT_OP_WRITE => len as u64,
-        OBJECT_OP_WRITE_AT => current.max(request.offset.saturating_add(len as u64)),
-        OBJECT_OP_TRUNCATE => request.offset,
-        _ => return false,
-    };
-    if new_len <= current {
-        return false;
-    }
-    let live = store.live_bytes() as u64;
-    live.saturating_add(new_len - current) > STORAGE_SERVICE_LIVE_BYTES_BUDGET
-}
-
-/// Serves one request: its completion status and, for a read, the bytes. A write or delete
-/// is committed before it completes, so `OBJECT_STATUS_OK` means it is durable, and the
-/// commit takes every staged offset write and truncate with it. `WRITE_AT` and `TRUNCATE`
-/// only stage (#304): many 512-byte requests build a file, and one commit makes it durable.
-fn serve<D: BlockDevice>(
-    store: &mut ObjectStore<D>,
-    request: &ObjectServiceRequest,
-    len: usize,
-) -> (u64, Option<alloc::vec::Vec<u8>>) {
-    if let Some(status) = stale_status(store, request) {
-        return (status, None);
-    }
-    if over_budget(store, request, len) {
-        return (OBJECT_STATUS_NO_SPACE, None);
-    }
-    let staged = match request.op {
-        OBJECT_OP_READ_AT => {
-            let mut out = vec![0u8; len];
-            return match store.read_object_at(request.object_id, request.offset, &mut out) {
-                Ok(read) => {
-                    out.truncate(read);
-                    (OBJECT_STATUS_OK, Some(out))
-                }
-                Err(StoreError::NotFound) => (OBJECT_STATUS_NOT_FOUND, None),
-                Err(_) => (OBJECT_STATUS_STORE_ERROR, None),
-            };
-        }
-        OBJECT_OP_WRITE_AT | OBJECT_OP_TRUNCATE => {
-            let name = object_name(request.object_id);
-            let result = if request.op == OBJECT_OP_WRITE_AT {
-                store.write_object_at(
-                    request.object_id,
-                    &name,
-                    request.offset,
-                    &request.payload[..len],
-                )
-            } else {
-                store.truncate_object(request.object_id, &name, request.offset)
-            };
-            let status = match result {
-                Ok(()) => OBJECT_STATUS_OK,
-                Err(StoreError::ObjectTooLarge { .. }) => OBJECT_STATUS_TOO_LARGE,
-                Err(StoreError::ObjectTableFull { .. }) => OBJECT_STATUS_NO_SPACE,
-                Err(_) => OBJECT_STATUS_STORE_ERROR,
-            };
-            return (status, None);
-        }
-        OBJECT_OP_READ => {
-            return match store.read_object_by_id(request.object_id) {
-                Ok(bytes) if bytes.len() <= OBJECT_MAX_PAYLOAD_BYTES => {
-                    (OBJECT_STATUS_OK, Some(bytes))
-                }
-                Ok(_) => (OBJECT_STATUS_TOO_LARGE, None),
-                Err(StoreError::NotFound) => (OBJECT_STATUS_NOT_FOUND, None),
-                Err(_) => (OBJECT_STATUS_STORE_ERROR, None),
-            };
-        }
-        OBJECT_OP_WRITE => {
-            let name = object_name(request.object_id);
-            store.write_object(request.object_id, &name, &request.payload[..len])
-        }
-        OBJECT_OP_DELETE => store.delete_object(request.object_id),
-        _ => return (OBJECT_STATUS_STORE_ERROR, None),
-    };
-    let status = match staged.and_then(|()| store.commit()) {
-        Ok(()) => OBJECT_STATUS_OK,
-        Err(StoreError::NotFound) => OBJECT_STATUS_NOT_FOUND,
-        Err(_) => OBJECT_STATUS_STORE_ERROR,
-    };
-    (status, None)
-}
-
-/// The store name of the object the service keeps for `id`: its id in hex, so every id has
-/// its own name.
-fn object_name(id: u64) -> alloc::string::String {
-    alloc::format!("o{id:016x}")
 }
 
 fn object_service_next(role_handle: u64, buffer: &mut [u8]) -> Result<u64, u64> {

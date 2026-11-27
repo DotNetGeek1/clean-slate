@@ -8,7 +8,7 @@
 //! restart policy, the new instance's launch audit and the capability re-issue.
 //!
 //! Before that boot, three short headless boots of the same kernel pass
-//! `-fw_cfg name=opt/clean-slate/desktop,string=q1` ([`crate::system_desktop`]): one with a
+//! `-fw_cfg name=opt/clean-slate/desktop,string=q1-bare` ([`crate::system_desktop`]): one with a
 //! VirtIO-GPU, where init launches the compositor, desktop shell and app rows next to the base
 //! rows; one with no display, which boots base; and one with only the `-vga std` framebuffer,
 //! which runs the desktop at Q0. The shell boot passes no entry and requires `profile=base` and

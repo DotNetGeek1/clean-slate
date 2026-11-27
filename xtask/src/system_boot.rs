@@ -215,22 +215,25 @@ struct RunOptions {
     net: bool,
     desktop: bool,
     framebuffer: bool,
-    /// `--terminal`: the desktop also declares the terminal window and its shell (#311).
-    terminal: bool,
+    /// `--bare`: the desktop without the terminal window and its shell (`q0-bare`, `q1-bare`).
+    bare: bool,
 }
 
-/// `opt/clean-slate/desktop` plus, for `q1`, the VirtIO-GPU device `run --desktop` adds.
+/// The bare desktop's `opt/clean-slate/desktop` (`q0-bare`, `q1-bare`) plus, for Q1, the
+/// VirtIO-GPU device `run --desktop` adds. The desktop lanes that count the compositor, shell and
+/// app rows boot this; [`desktop_qemu_args_with`] gives the default desktop with the terminal.
 pub(crate) fn desktop_qemu_args(framebuffer: bool) -> Vec<String> {
     desktop_qemu_args_with(framebuffer, false)
 }
 
-/// [`desktop_qemu_args`], with `-terminal` on the value when `terminal` (#311).
+/// [`desktop_qemu_args`] for the default desktop (`q0`, `q1`) when `terminal`, which also declares
+/// the terminal window and its shell (#311).
 pub(crate) fn desktop_qemu_args_with(framebuffer: bool, terminal: bool) -> Vec<String> {
     let value = match (framebuffer, terminal) {
-        (true, false) => "q0",
-        (false, false) => "q1",
-        (true, true) => "q0-terminal",
-        (false, true) => "q1-terminal",
+        (true, true) => "q0",
+        (false, true) => "q1",
+        (true, false) => "q0-bare",
+        (false, false) => "q1-bare",
     };
     let mut args = vec![
         "-fw_cfg".to_owned(),
@@ -257,17 +260,17 @@ fn parse_run_options(args: &[OsString]) -> Result<RunOptions, XtaskError> {
             options.framebuffer = true;
             continue;
         }
-        if arg == OsStr::new("--terminal") {
-            options.terminal = true;
+        if arg == OsStr::new("--bare") {
+            options.bare = true;
             continue;
         }
         return Err(XtaskError::InvalidOption(
             arg.to_string_lossy().into_owned(),
         ));
     }
-    if (options.framebuffer || options.terminal) && !options.desktop {
+    if (options.framebuffer || options.bare) && !options.desktop {
         return Err(XtaskError::InvalidCommand(
-            "usage: cargo xtask run [--net] [--desktop] [--framebuffer] [--terminal]".to_owned(),
+            "usage: cargo xtask run [--net] [--desktop] [--framebuffer] [--bare]".to_owned(),
         ));
     }
     Ok(options)
@@ -288,7 +291,7 @@ fn launch_config(options: RunOptions, disk: PathBuf, fixture_port: Option<u16>) 
         if options.framebuffer {
             config.vga = Some("std");
         }
-        config.extra_args = desktop_qemu_args_with(options.framebuffer, options.terminal);
+        config.extra_args = desktop_qemu_args_with(options.framebuffer, !options.bare);
     }
     config
 }
@@ -323,7 +326,7 @@ fn start_peer(m9_profile: bool) -> Result<M7FixturePeer, XtaskError> {
     .map_err(XtaskError::Io)
 }
 
-/// `cargo xtask run [--net] [--desktop] [--framebuffer] [--terminal]`. `run-gdb` and `run-gdb-entry` take
+/// `cargo xtask run [--net] [--desktop] [--framebuffer] [--bare]`. `run-gdb` and `run-gdb-entry` take
 /// `--net` only; `--desktop` is refused there.
 pub(crate) fn run(
     args: &[OsString],
@@ -354,7 +357,12 @@ pub(crate) fn run(
     if options.desktop {
         println!(
             "[XTSK] desktop boot option opt/clean-slate/desktop={} ({})",
-            if options.framebuffer { "q0" } else { "q1" },
+            match (options.framebuffer, options.bare) {
+                (true, false) => "q0",
+                (false, false) => "q1",
+                (true, true) => "q0-bare",
+                (false, true) => "q1-bare",
+            },
             if options.framebuffer {
                 "-vga std"
             } else {
@@ -1216,7 +1224,7 @@ mod tests {
                 net: true,
                 desktop: true,
                 framebuffer: true,
-                terminal: false,
+                bare: false,
             }
         );
         assert!(parse_run_options(&["--disk".into()]).is_err());
@@ -1235,7 +1243,7 @@ mod tests {
         );
         assert_eq!(virtio.machine_extra, Some("vmport=off"));
         assert_eq!(virtio.vga, None);
-        assert_eq!(virtio.extra_args, desktop_qemu_args(false));
+        assert_eq!(virtio.extra_args, desktop_qemu_args_with(false, true));
         assert!(virtio
             .extra_args
             .windows(2)
@@ -1254,17 +1262,23 @@ mod tests {
             None,
         );
         assert_eq!(framebuffer.vga, Some("std"));
-        assert_eq!(framebuffer.extra_args, desktop_qemu_args(true));
+        assert_eq!(framebuffer.extra_args, desktop_qemu_args_with(true, true));
+        assert!(virtio
+            .extra_args
+            .iter()
+            .any(|arg| arg == "name=opt/clean-slate/desktop,string=q1"));
+        assert!(parse_run_options(&["--bare".into()]).is_err());
         assert!(parse_run_options(&["--terminal".into()]).is_err());
-        let terminal = launch_config(
-            parse_run_options(&["--desktop".into(), "--terminal".into()]).unwrap(),
+        let bare = launch_config(
+            parse_run_options(&["--desktop".into(), "--bare".into()]).unwrap(),
             PathBuf::from("DISK.img"),
             None,
         );
-        assert!(terminal
+        assert_eq!(bare.extra_args, desktop_qemu_args(false));
+        assert!(bare
             .extra_args
             .iter()
-            .any(|arg| arg == "name=opt/clean-slate/desktop,string=q1-terminal"));
+            .any(|arg| arg == "name=opt/clean-slate/desktop,string=q1-bare"));
     }
 
     #[test]
