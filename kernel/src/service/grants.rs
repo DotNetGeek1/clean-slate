@@ -51,6 +51,8 @@ pub(crate) trait InstanceGrantAuthority {
         pid: u64,
         role: ConsoleClientRole,
     ) -> Result<(), &'static str>;
+    /// `LAUNCH_CONNECT` on init's launcher port (#237).
+    fn grant_launcher_client(&mut self, pid: u64) -> Result<(), &'static str>;
 }
 
 /// Which console port client a row is (#310, #311).
@@ -117,7 +119,8 @@ pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
             | Grant::ConsoleService
             | Grant::ConsoleClient
             | Grant::ConsoleSession
-            | Grant::ConsoleFrontEnd => {}
+            | Grant::ConsoleFrontEnd
+            | Grant::LauncherClient => {}
             // Applied by the Linux launch path while it builds the process.
             Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {}
         }
@@ -148,6 +151,7 @@ pub(crate) fn apply_instance_grants<A: InstanceGrantAuthority>(
             Grant::ConsoleFrontEnd => {
                 authority.grant_console_client(pid, ConsoleClientRole::FrontEnd)
             }
+            Grant::LauncherClient => authority.grant_launcher_client(pid),
             Grant::ObjectServiceRole
             | Grant::AuditReader
             | Grant::Console
@@ -182,6 +186,7 @@ mod tests {
         GraphicsRole(u64, GraphicsRole),
         ConsoleService(u64),
         ConsoleClient(u64, ConsoleClientRole),
+        LauncherClient(u64),
     }
 
     #[derive(Default)]
@@ -271,6 +276,11 @@ mod tests {
         ) -> Result<(), &'static str> {
             self.calls.push(Call::ConsoleClient(pid, role));
             self.outcome(role.grant())
+        }
+
+        fn grant_launcher_client(&mut self, pid: u64) -> Result<(), &'static str> {
+            self.calls.push(Call::LauncherClient(pid));
+            self.outcome(Grant::LauncherClient)
         }
     }
 
@@ -432,7 +442,10 @@ mod tests {
         );
         assert_eq!(
             calls(DESKTOP_SHELL_SERVICE_ID),
-            [Call::GraphicsRole(7, GraphicsRole::Shell)]
+            [
+                Call::GraphicsRole(7, GraphicsRole::Shell),
+                Call::LauncherClient(7)
+            ]
         );
         assert_eq!(
             calls(PLAYGROUND_SERVICE_ID),

@@ -183,6 +183,8 @@ pub struct ClientSlot {
     /// Serial and surface of the pointer press delivered to this client while its button is
     /// still held: the only authority for `BeginMove` / `BeginResize`.
     pub(crate) live_press: Option<(Serial, SurfaceId)>,
+    /// The client negotiated `WINDOW_LIST` and has been sent the whole list (#237).
+    pub(crate) window_list_synced: bool,
 }
 
 impl ClientSlot {
@@ -205,6 +207,7 @@ impl ClientSlot {
             stall_iterations: 0,
             pending_disconnect: None,
             live_press: None,
+            window_list_synced: false,
         }
     }
 
@@ -266,6 +269,7 @@ impl ClientSlot {
         self.stall_iterations = 0;
         self.pending_disconnect = None;
         self.live_press = None;
+        self.window_list_synced = false;
     }
 
     /// Drops queued unsolicited events about `window` or `surface` once they are destroyed.

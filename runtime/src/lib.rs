@@ -11,6 +11,7 @@
 //! - [`compositor`]: a compositor client: connect, register buffers, send requests, read events.
 //! - [`console`]: console lines over the console capability (syscall 3).
 //! - [`heap`]: a `GlobalAlloc` over the native memory call (syscall 23, #306).
+//! - [`launcher`]: ask init to start a manifest row by name (#237).
 //! - [`process`]: exit, abort and the service ready report (syscall 22).
 //! - [`storage`]: offset reads, writes, truncates and commits on a persistent object (syscall 8,
 //!   #312).
@@ -27,6 +28,7 @@ pub mod compositor;
 pub mod console;
 pub mod error;
 pub mod heap;
+pub mod launcher;
 pub mod port;
 pub mod process;
 pub mod storage;

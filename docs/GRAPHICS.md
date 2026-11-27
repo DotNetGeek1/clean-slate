@@ -62,8 +62,9 @@ Items marked **(planned)** are fixed in shape but not implemented; their owning 
 - **Presentation.** Damage is clipped to the output, merged into at most `MAX_PRESENT_DAMAGE_RECTS`, and skipped where opaque surfaces above cover it. Fully occluded surfaces get no frame callback. A move or restack damages the old and new footprint and needs no client repaint.
 - **Launch bootstrap (P5, #118).** The adapter reads the [launch page](#desktop-118) and finds its `Graphics{GFX_SERVE}`, `Display` and `Input` handles with each `FIND_HANDLE`. The page's tier selects `Q0` or `Q1`, and its console handle carries the `[COMP]`, `[WIN ]` and `[INPT]` diagnostics.
 - **Window management (#115).** Policy lives in `compositor::wm` (state, pure geometry) and `compositor/src/compositor/routing.rs` (transitions). `WindowPolicy` supplies placement, the `ChromeStyle` and the cursor; `DefaultPolicy` uses `clean-slate-ui` (`CLEAN_SLATE_DARK`, `ARROW`, `ShellZones::window_area`). Rules:
-  - *Focus.* Click-to-focus with raise. A newly shown toplevel takes focus only when nothing is focused or the focused window belongs to the same connection; otherwise the focused window stays on top (no focus stealing). When the focused window is hidden, destroyed or its client exits, focus moves to the topmost visible toplevel. Focus changes send `KeyboardFocus`, `ModifiersChanged` and a `Configure` toggling `ACTIVATED`, and damage only the chrome strips. There is no client focus request.
+  - *Focus.* Click-to-focus with raise. A newly shown toplevel takes focus only when nothing is focused or the focused window belongs to the same connection; otherwise the focused window stays on top (no focus stealing). When the focused window is hidden, destroyed or its client exits, focus moves to the topmost visible toplevel. Focus changes send `KeyboardFocus`, `ModifiersChanged` and a `Configure` toggling `ACTIVATED`, and damage only the chrome strips. There is no client focus request; the shell's `ActivateWindow` (below) is the one way to move focus without a click.
   - *Text input and key repeat (#309).* For a focused client that negotiated `TEXT_INPUT`, a key press is followed by `Text` when `Config::layout` types something, and the newest held key that repeats is re-sent as `KeyRepeat` (plus its `Text`) after `Config::repeat.delay_ns`, then every `interval_ns` (defaults 500 ms and 30 per second; interval 0 turns repeat off). The repeat deadline joins the loop's wait deadline only while a key is held, so an idle desktop still blocks with none. A late wake sends one repeat, not a burst. Release, another key press, a focus change and `InputReset` stop it.
+  - *Window list (#237).* After every loop turn `compositor::window_list` compares the shown toplevels and the focus with what it last reported, and tells every `WINDOW_LIST` connection what changed: `WindowRemoved`, then `WindowAdded` plus `WindowTitle` for a new window, `WindowTitle` on a retitle, then `WindowFocused`. A connection that has just negotiated the feature gets the whole list and the focus first. No show, hide, destroy or focus path reports anything itself, so none can forget to. `ActivateWindow` from the shell raises and focuses a listed window exactly as a click on it would; a handle no longer listed is `InvalidObject`, and any other connection gets `UnsupportedFeature`.
   - *Seat routing.* Keys go only to the focused client. Pointer events go to the surface under the pointer (input region aware), or to the capturing surface while a button pressed on it is held. `Overflow` ends every gesture and sends `InputReset` then `ModifiersChanged` to the focused client.
   - *Decorations.* Server-side for toplevels: title-bar press starts a move grab, border or resize-margin press starts a resize grab, Close press-and-release posts `CloseRequested` (Minimise and Maximise are reserved no-ops in M10).
   - *Move and resize.* A move only changes the scene origin (no client repaint), keeping `MIN_VISIBLE` pixels and the title bar on the output; all arithmetic is `i64` and saturating. A resize sends `Configure` with the size clamped to the client's limits and the output; a left or top resize keeps the opposite edge fixed when the client commits. Client `BeginMove` / `BeginResize` must quote the live press serial the client received on that window, still held and captured.
@@ -394,7 +395,7 @@ Every generation starts at 1; generation 0 is invalid on the wire. Releasing a s
 
 **Serials.** `SerialMinter` starts at 1, increments by one and skips 0 on wrap. One minter per connection is shared by every window of that connection and by input serials, so an ack meant for one window can never match another.
 
-**Reserved.** `GlobalWindowToken(u64)`: compositor-global, issued only to `GFX_SHELL` holders, for a future rail task list. Not issued in M10.
+**Window handles (#237).** `WindowHandle(u32)` is the compositor-global name of a listed window, issued only on connections that negotiated `WINDOW_LIST` (which needs `GFX_SHELL`), for the rail's task list. It fills the `GlobalWindowToken` reservation. Handles start at 1, skip 0 and are not reused while the compositor runs; a window shown again after a hide gets a new one. A handle confers nothing by itself.
 
 ## Lifecycles
 
@@ -613,6 +614,7 @@ Protocol version `1.0` (`PROTOCOL_MAJOR`, `PROTOCOL_MINOR`); `M10_SERVER_FEATURE
 | pointer | — | `PointerEnter` 0x8050, `PointerLeave` 0x8051, `PointerMotion` 0x8052, `PointerButton` 0x8053, `PointerAxis` 0x8054 |
 | seat | — | `InputReset` 0x8060 |
 | text input (`TEXT_INPUT`) | — | `Text` 0x8100, `KeyRepeat` 0x8101 (0x8102 reserved for preedit) |
+| window list (`WINDOW_LIST`, shell only) | `ActivateWindow` 0x0700 | `WindowAdded` 0x8700, `WindowTitle` 0x8701, `WindowRemoved` 0x8702, `WindowFocused` 0x8703 |
 
 Per-frame limits: `Damage` carries at most `DAMAGE_RECTS_PER_FRAME` (5) `BufferRect`s and the region requests at most `REGION_RECTS_PER_FRAME` (3) `Rect`s; larger sets use several requests before one `Commit`. `SetTitle` carries a `WindowTitle` of at most `MAX_TITLE_BYTES` (40) bytes of UTF-8, truncated on a character boundary by the encoder. `Commit` carries `request_frame`, `color_space` and an optional configure `ack`.
 
@@ -624,6 +626,14 @@ Per-frame limits: `Damage` carries at most `DAMAGE_RECTS_PER_FRAME` (5) `BufferR
 - Text is printable characters only. Enter, Tab, Backspace, Escape, Delete, arrows, navigation and function keys produce none, and nothing is typed while Ctrl, Alt or Super is held: the client maps those from `Key` and `Modifiers`, so no keystroke reaches it twice. Caps Lock changes letters only; keypad digits need Num Lock (Shift inverts it).
 - `KeyRepeat` (0x8101): `serial` u32 @12, `time_ns` u64 @16, `usage` u16 @24, 26..28 zero, `modifiers` u16 @28 (Key's offsets without the state byte). The compositor repeats the most recently pressed key that repeats (`keymap::repeats`: not modifiers or lock keys) after a delay, at a rate; a `Text` follows each repeat that types. Repeat stops on that key's release, on another key press, on a focus change and on `InputReset`.
 - Dead keys and compose will use a preedit event at 0x8102; it decodes as `UnknownOpcode` today.
+
+**Window list (#237).** The desktop shell sets `Features::WINDOW_LIST` in `Hello` to learn which windows are open and which has focus, and to switch between them from the rail. The compositor offers the bit (`SHELL_SERVER_FEATURES`) only when the `Hello` envelope's rights carry `GFX_SHELL`; anyone else negotiates it off and never receives these events. Every frame has object 0.
+
+- `ActivateWindow` (0x0700): `window` `WindowHandle` u32 @12 (nonzero), 16..64 zero. Raises and focuses the window, like a click.
+- `WindowAdded` (0x8700): `window` @12, `pid` u64 @16 (the window's client as the kernel stamped it, so the shell can match the window to a launcher row), 24..64 zero. A `WindowTitle` for the same handle follows.
+- `WindowTitle` (0x8701): `window` @12, `len` u8 @16 (0..=40), 17..24 zero, UTF-8 @24..64 (`len` bytes, the rest zero).
+- `WindowRemoved` (0x8702): `window` @12. The window was hidden or destroyed, or its client left.
+- `WindowFocused` (0x8703): `window` @12, 0 when no listed window has focus (a shell surface or nothing does).
 
 **Negotiation.** `Hello { version, features }` must be the first request; `Welcome` replies with the negotiated version and features and the output (`OutputInfo`: id, mode, logical size). `negotiate`:
 
@@ -829,8 +839,8 @@ None collides with `NETWORK_STATUS_PENDING` (`u64::MAX - 15`). Capability failur
 ## Versioning and extension points
 
 - **Version.** `ProtocolVersion { major, minor }`, 1.0 in M10. A major bump is incompatible and rejected at `Hello`. A minor bump may only add opcodes inside the reserved ranges below, and the server may use them only when the negotiated minor allows it.
-- **Opcodes.** In 1.0 every reserved or unassigned opcode decodes to `UnknownOpcode` (recoverable). Core growth: requests `0x0002..=0x000F` and unused holes in `0x0010..=0x00FF`; events `0x8003..=0x800F` (`0x8003` is earmarked for `OutputChanged` when `MAX_OUTPUTS > 1`) and unused holes in `0x8010..=0x80FF`. Unassigned: `0x0700..=0x7FFF` and `0x8700..=0xFFFF`.
-- **Features.** `Features(u64)`; `Features::KNOWN` = `0x3F` (the OR of `Features::TEXT_INPUT` … `Features::SUBSURFACES`). The compositor offers `TEXT_INPUT` (#309) and nothing else, so every other feature below is negotiated off. Opcodes of a feature not negotiated are never sent. The bit assignments and opcode ranges are frozen in `graphics::protocol`.
+- **Opcodes.** In 1.0 every reserved or unassigned opcode decodes to `UnknownOpcode` (recoverable). Core growth: requests `0x0002..=0x000F` and unused holes in `0x0010..=0x00FF`; events `0x8003..=0x800F` (`0x8003` is earmarked for `OutputChanged` when `MAX_OUTPUTS > 1`) and unused holes in `0x8010..=0x80FF`. Unassigned: `0x0800..=0x7FFF` and `0x8800..=0xFFFF`.
+- **Features.** `Features(u64)`; `Features::KNOWN` = `0x7F` (the OR of `Features::TEXT_INPUT` … `Features::WINDOW_LIST`). The compositor offers `TEXT_INPUT` (#309) to everyone and `WINDOW_LIST` (#237) to `GFX_SHELL` holders, so every other feature below is negotiated off. Opcodes of a feature not negotiated are never sent. The bit assignments and opcode ranges are frozen in `graphics::protocol`.
 
 | Bit | Feature | Opcodes (request / event) | Future content |
 |---|---|---|---|
@@ -840,8 +850,9 @@ None collides with `NETWORK_STATUS_PENDING` (`u64::MAX - 15`). Capability failur
 | `1 << 3` | fractional scale | `0x0400..=0x04FF` / `0x8400..=0x84FF` | preferred-scale event; `Scale120` ≠ 120 |
 | `1 << 4` | client decorations | `0x0500..=0x05FF` / `0x8500..=0x85FF` | decoration negotiation (`DecorationMode::Client`) |
 | `1 << 5` | subsurfaces | `0x0600..=0x06FF` / `0x8600..=0x86FF` | `SurfaceRole::Subsurface`, position and stacking |
+| `1 << 6` | window list | `0x0700..=0x07FF` / `0x8700..=0x87FF` | `ActivateWindow`; `WindowAdded`, `WindowTitle`, `WindowRemoved`, `WindowFocused` (#237; `GFX_SHELL` only) |
 
-Other reserved vocabulary: `SurfaceRole::Cursor` (client cursors), `Layer::Cursor`, `WindowStates` bits other than `ACTIVATED`, `GlobalWindowToken` (shell task list, `GFX_SHELL` only), `ColorSpace` values other than `Srgb`, display subops 7 and above (`SET_MODE`, `RELEASE_PRESENTER`), `OutputChanged`.
+Other reserved vocabulary: `SurfaceRole::Cursor` (client cursors), `Layer::Cursor`, `WindowStates` bits other than `ACTIVATED`, `ColorSpace` values other than `Srgb`, display subops 7 and above (`SET_MODE`, `RELEASE_PRESENTER`), `OutputChanged`.
 
 **Compatibility shims.** The contract leaves room for Linux (M11: DRM/KMS subset, evdev) and Windows (M13) guest surfaces without adopting their semantics. Shims translate into this protocol as ordinary clients; for example the evdev shim negates `vertical` for `REL_WHEEL`. Nothing in the protocol is a Wayland, X11, DRM or GDI object.
 

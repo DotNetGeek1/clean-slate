@@ -145,6 +145,11 @@ pub static REQUEST_SPECS: &[OpcodeSpec] = &[
         object: ObjectRule::Required,
         pads: &[(16, 64)],
     },
+    OpcodeSpec {
+        opcode: super::OP_ACTIVATE_WINDOW,
+        object: ObjectRule::MustBeZero,
+        pads: &[(16, 64)],
+    },
 ];
 
 /// Event opcode layout (§3.3).
@@ -253,6 +258,26 @@ pub static EVENT_SPECS: &[OpcodeSpec] = &[
         opcode: super::OP_KEY_REPEAT,
         object: ObjectRule::MustBeZero,
         pads: &[(26, 28), (30, 64)],
+    },
+    OpcodeSpec {
+        opcode: super::OP_WINDOW_ADDED,
+        object: ObjectRule::MustBeZero,
+        pads: &[(24, 64)],
+    },
+    OpcodeSpec {
+        opcode: super::OP_WINDOW_TITLE,
+        object: ObjectRule::MustBeZero,
+        pads: &[(17, 24)],
+    },
+    OpcodeSpec {
+        opcode: super::OP_WINDOW_REMOVED,
+        object: ObjectRule::MustBeZero,
+        pads: &[(16, 64)],
+    },
+    OpcodeSpec {
+        opcode: super::OP_WINDOW_FOCUSED,
+        object: ObjectRule::MustBeZero,
+        pads: &[(16, 64)],
     },
 ];
 

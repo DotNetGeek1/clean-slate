@@ -106,6 +106,13 @@
 //! | 16 | 1 | `edges` u8 |
 //! | 17..64 | — | static padding |
 //!
+//! ## `ActivateWindow` (`0x0700`, `WINDOW_LIST`, object must be 0)
+//!
+//! | Off | W | Field |
+//! |---|---|---|
+//! | 12 | 4 | `window` `WindowHandle` u32, nonzero |
+//! | 16..64 | — | static padding |
+//!
 //! # Events
 //!
 //! ## `Welcome` (`0x8001`, object must be 0)
@@ -242,6 +249,31 @@
 //! | 26..28 | — | static padding |
 //! | 28 | 2 | `modifiers` u16 |
 //! | 30..64 | — | static padding |
+//!
+//! ## `WindowAdded` (`0x8700`, `WINDOW_LIST`, object must be 0)
+//!
+//! | Off | W | Field |
+//! |---|---|---|
+//! | 12 | 4 | `window` `WindowHandle` u32, nonzero |
+//! | 16 | 8 | `pid` u64 (the window's client, kernel-stamped) |
+//! | 24..64 | — | static padding |
+//!
+//! ## `WindowTitle` (`0x8701`, `WINDOW_LIST`, object must be 0)
+//!
+//! | Off | W | Field |
+//! |---|---|---|
+//! | 12 | 4 | `window` `WindowHandle` u32, nonzero |
+//! | 16 | 1 | `len` u8, `0..=40` |
+//! | 17..24 | — | static padding |
+//! | 24 | `len` | UTF-8 title |
+//! | 24+`len`..64 | — | padding, checked against `len` |
+//!
+//! ## `WindowRemoved` / `WindowFocused` (`0x8702` / `0x8703`, `WINDOW_LIST`, object must be 0)
+//!
+//! | Off | W | Field |
+//! |---|---|---|
+//! | 12 | 4 | `window` `WindowHandle` u32 (`WindowFocused`: 0 = none) |
+//! | 16..64 | — | static padding |
 //!
 //! Empty-body events (`BufferRegistered`, `BufferReleased`, `BufferUnregistered`, `SurfaceCreated`,
 //! `WindowCreated`, `CloseRequested`, `KeyboardFocus`, `InputReset`): 12..64 static padding; see §3.1 for object rules.

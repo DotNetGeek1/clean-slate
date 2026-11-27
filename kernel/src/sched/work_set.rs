@@ -286,6 +286,21 @@ pub(crate) fn signal(binding: WorkSetBinding, bit: u32) {
     });
 }
 
+/// Creates `holder`'s work set, for other sources' host tests.
+#[cfg(test)]
+pub(crate) fn create_for_test(holder: HolderId) -> WorkSetId {
+    without_interrupts(|| work_sets_mut().create(holder)).unwrap()
+}
+
+/// The ready bits of `holder`'s work set `id`, cleared, for other sources' host tests.
+#[cfg(test)]
+pub(crate) fn take_ready_for_test(holder: HolderId, id: WorkSetId) -> u32 {
+    match work_sets_mut().begin_wait(holder, id, u32::MAX, true, false) {
+        Ok(WaitStep::Ready(bits)) => bits,
+        _ => 0,
+    }
+}
+
 /// P4 teardown: frees the holder's work set. Runs after its sources are unbound; the holder's
 /// own waiters are cancelled by the thread reap.
 pub(crate) fn on_holder_exit(holder: HolderId) -> usize {
@@ -416,13 +431,21 @@ fn handle_wait(frame: &mut SyscallContext, holder: HolderId) -> u64 {
         let deadline_passed = args
             .deadline_ns
             .is_some_and(|deadline_ns| monotonic_ns() >= deadline_ns);
-        wait_step_rax(work_sets_mut().begin_wait(
+        let rax = wait_step_rax(work_sets_mut().begin_wait(
             holder,
             args.id,
             args.mask,
             args.nonblock,
             deadline_passed,
-        ))
+        ));
+        // Init sleeps here once it serves the launcher port (#237).
+        #[cfg(clean_slate_system_init)]
+        crate::service::system_init::observe_init_wait(
+            holder.0,
+            args.deadline_ns.is_none() && !args.nonblock,
+            matches!(rax, BlockCheck::Block),
+        );
+        rax
     };
     match block_current_thread_unless(frame, wait_key(args.id), deadline, resume, check) {
         Ok(rax) => rax,

@@ -1435,3 +1435,4 @@ fn window_tables_are_bounded_per_client_and_globally() {
 }
 
 mod text_input;
+mod window_list;

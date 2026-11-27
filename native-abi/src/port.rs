@@ -180,6 +180,10 @@ pub const fn port_rights_for(class: ResourceClass) -> Option<PortRights> {
             connect: Rights::CONSOLE_CONNECT,
             serve: Rights::CONSOLE_SERVE,
         }),
+        ResourceClass::Launcher => Some(PortRights {
+            connect: Rights::LAUNCH_CONNECT,
+            serve: Rights::LAUNCH_SERVE,
+        }),
         _ => None,
     }
 }
@@ -726,10 +730,13 @@ mod tests {
 
     #[test]
     fn port_rights_for_all_classes() {
-        for raw in 1u8..=12 {
+        for raw in 1u8..=13 {
             let class = ResourceClass::from_u8(raw).unwrap();
             let rights = port_rights_for(class);
-            if matches!(class, ResourceClass::Graphics | ResourceClass::Console) {
+            if matches!(
+                class,
+                ResourceClass::Graphics | ResourceClass::Console | ResourceClass::Launcher
+            ) {
                 let pr = rights.unwrap();
                 assert!(pr.serve.is_subset_of(Rights::root_only_for(class)));
                 assert!(!pr.connect.intersects(pr.serve));

@@ -64,7 +64,7 @@ fn rights_subset_and_names() {
     assert!(Rights::READ.is_subset_of(full));
     assert_eq!(full.attenuate(Rights::READ), Rights::READ);
     assert!(!Rights::WRITE.is_subset_of(Rights::READ));
-    assert_eq!(Rights::from_bits(1 << 24), None);
+    assert_eq!(Rights::from_bits(1 << 26), None);
     let mut buf = alloc::string::String::new();
     full.write_names(&mut buf).unwrap();
     assert_eq!(buf, "read|write|delegate");
@@ -336,7 +336,7 @@ fn network_rights_mask_and_authorization() {
     let handle = CapabilityHandle::new(0, 1);
     let valid = Rights::valid_for(ResourceClass::Network);
     assert!(valid.contains(Rights::NET_SEND));
-    assert_eq!(Rights::from_bits(valid.bits() | (1 << 24)), None);
+    assert_eq!(Rights::from_bits(valid.bits() | (1 << 26)), None);
     assert!(!Rights::NET_SEND.is_subset_of(Rights::valid_for(ResourceClass::BlockDevice)));
 
     let parent = live_record(holder, resource, valid, 1);
@@ -410,11 +410,11 @@ fn shared_buffer_id_raw(slot: u16, generation: u32) -> u64 {
 
 #[test]
 fn resource_class_from_u8_includes_m10_classes() {
-    for raw in 1u8..=12 {
+    for raw in 1u8..=13 {
         assert_eq!(ResourceClass::from_u8(raw).map(|c| c.as_u8()), Some(raw));
     }
     assert_eq!(ResourceClass::from_u8(0), None);
-    assert_eq!(ResourceClass::from_u8(13), None);
+    assert_eq!(ResourceClass::from_u8(14), None);
 }
 
 #[test]
@@ -447,6 +447,37 @@ fn m10_valid_for_masks_exact() {
         Rights::root_only_for(ResourceClass::PersistentObject),
         Rights::empty()
     );
+}
+
+#[test]
+fn launcher_rights_keep_serving_at_the_root() {
+    assert_eq!(
+        Rights::valid_for(ResourceClass::Launcher),
+        Rights::LAUNCH_CONNECT
+            .union(Rights::LAUNCH_SERVE)
+            .union(Rights::DELEGATE)
+            .union(Rights::REVOKE)
+    );
+    assert_eq!(
+        Rights::root_only_for(ResourceClass::Launcher),
+        Rights::LAUNCH_SERVE
+    );
+    assert_eq!(ResourceClass::Launcher.name(), "launcher");
+    assert_eq!(ResourceClass::from_u8(13), Some(ResourceClass::Launcher));
+    assert_eq!(
+        ResourceRef::launcher_port(),
+        ResourceRef {
+            class: ResourceClass::Launcher,
+            id: crate::LAUNCHER_PORT_ID,
+            instance_generation: 0,
+        }
+    );
+    let mut names = alloc::string::String::new();
+    Rights::LAUNCH_CONNECT
+        .union(Rights::LAUNCH_SERVE)
+        .write_names(&mut names)
+        .unwrap();
+    assert_eq!(names, "launch_connect|launch_serve");
 }
 
 #[test]

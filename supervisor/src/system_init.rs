@@ -10,7 +10,8 @@
 
 use core::fmt::{self, Write};
 
-use clean_slate_service_fixtures::manifest::{RestartSpec, ServiceSpec};
+use clean_slate_native_abi::launcher::{AppEntry, AppName, AppState, StartResult};
+use clean_slate_service_fixtures::manifest::{RestartSpec, ServiceSpec, Start};
 use clean_slate_service_lifecycle::{
     ticks_add, ticks_reached, DependencyEdge, DependencyMetadata, LivenessConfig, MonotonicTicks,
     ProcessId, ServiceId, ServiceLifecycleState,
@@ -63,6 +64,8 @@ const fn resets_on_ready(spec: RestartSpec) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Progress {
     NotStarted,
+    /// A `Start::OnRequest` row with no instance: started only by [`SystemInit::launch`].
+    Idle,
     Started,
     /// No retry left (or none allowed); init leaves the service down.
     GaveUp,
@@ -134,7 +137,10 @@ where
             init.supervisor.set_dependencies(metadata)?;
             init.slots[index] = Some(ServiceSlot {
                 spec,
-                progress: Progress::NotStarted,
+                progress: match spec.start {
+                    Start::AtBoot => Progress::NotStarted,
+                    Start::OnRequest => Progress::Idle,
+                },
                 ready_deadline: None,
                 announced_ready_generation: 0,
             });
@@ -268,7 +274,9 @@ where
                 }
                 ServiceLifecycleState::Faulted | ServiceLifecycleState::Exited => {
                     self.set_ready_deadline(index, None);
-                    self.give_up_if_exhausted(index);
+                    if !self.idle_if_on_request(index, snapshot.state) {
+                        self.give_up_if_exhausted(index);
+                    }
                 }
                 _ => {}
             }
@@ -284,7 +292,7 @@ where
                             ServiceLifecycleState::Faulted | ServiceLifecycleState::Exited
                         )
                     });
-                if failed {
+                if failed && !self.idle_if_on_request(index, ServiceLifecycleState::Exited) {
                     self.give_up_if_exhausted(index);
                 }
             }
@@ -384,9 +392,11 @@ where
     fn announce_settled(&mut self) {
         let mut running = 0;
         let mut down = 0;
+        let mut idle = 0;
         for slot in self.slots.iter().flatten() {
             match slot.progress {
                 Progress::GaveUp | Progress::Blocked => down += 1,
+                Progress::Idle => idle += 1,
                 Progress::Started
                     if self
                         .supervisor
@@ -402,13 +412,151 @@ where
             }
         }
         let total = self.slots.iter().flatten().count();
-        let settled = running + down == total && self.next_deadline().is_none();
+        let settled = running + down + idle == total && self.next_deadline().is_none();
         if settled && !self.settled_announced {
-            let _ = self.emit(format_args!(
-                "[INIT] boot settled running={running} down={down}; waiting, no deadline"
-            ));
+            // `idle=` appears only with on-request rows, so manifests without any keep the line.
+            let _ = if idle == 0 {
+                self.emit(format_args!(
+                    "[INIT] boot settled running={running} down={down}; waiting, no deadline"
+                ))
+            } else {
+                self.emit(format_args!(
+                    "[INIT] boot settled running={running} down={down} idle={idle}; waiting, no deadline"
+                ))
+            };
         }
         self.settled_announced = settled;
+    }
+
+    /// An on-request row whose instance ended goes back to [`Progress::Idle`]: it restarts
+    /// `Never` and starts again only when asked. Returns whether `index` was such a row.
+    fn idle_if_on_request(&mut self, index: usize, state: ServiceLifecycleState) -> bool {
+        let Some(slot) = self.slots[index] else {
+            return false;
+        };
+        if slot.spec.start != Start::OnRequest || slot.progress != Progress::Started {
+            return slot.spec.start == Start::OnRequest;
+        }
+        if let Some(slot) = self.slots[index].as_mut() {
+            slot.progress = Progress::Idle;
+            slot.ready_deadline = None;
+        }
+        let how = if state == ServiceLifecycleState::Faulted {
+            "faulted"
+        } else {
+            "exited"
+        };
+        let _ = self.emit(format_args!(
+            "[INIT] service={} {how}; starts again on request",
+            slot.spec.id.0
+        ));
+        true
+    }
+
+    /// #237: a launcher client asks for the row named `name`. Starts it when it is idle (an
+    /// on-request row with no instance) and every row it depends on is running. Returns the
+    /// answer and the row's service id (0 when no row has that name).
+    pub fn launch(&mut self, now: MonotonicTicks, name: &[u8]) -> (StartResult, u32) {
+        let Some(index) = self.slots.iter().position(|slot| {
+            slot.is_some_and(|slot| {
+                slot.spec
+                    .launch_name
+                    .is_some_and(|own| own.as_bytes() == name)
+            })
+        }) else {
+            return (StartResult::UnknownName, 0);
+        };
+        let Some(slot) = self.slots[index] else {
+            return (StartResult::UnknownName, 0);
+        };
+        let service = slot.spec.id.0;
+        let result = match self.app_state(&slot) {
+            AppState::Starting | AppState::Running => StartResult::AlreadyRunning,
+            AppState::Restarting => StartResult::Busy,
+            AppState::Down => StartResult::Refused,
+            AppState::Idle if slot.progress != Progress::Idle => StartResult::Busy,
+            AppState::Idle => self.start_on_request(index, now),
+        };
+        let _ = self.emit(format_args!(
+            "[INIT] launch name={} service={service} result={}",
+            slot.spec.launch_name.unwrap_or(""),
+            result.name()
+        ));
+        (result, service)
+    }
+
+    fn start_on_request(&mut self, index: usize, now: MonotonicTicks) -> StartResult {
+        let Some(slot) = self.slots[index] else {
+            return StartResult::Refused;
+        };
+        if slot
+            .spec
+            .depends_on
+            .iter()
+            .any(|dependency| self.has_given_up(*dependency))
+        {
+            return StartResult::Refused;
+        }
+        if !self.dependencies_running(slot.spec) {
+            return StartResult::Busy;
+        }
+        let _ = self.emit_start_line(slot.spec);
+        if self.supervisor.request_start(slot.spec.id).is_err() {
+            return StartResult::Refused;
+        }
+        let generation = self
+            .supervisor
+            .registry()
+            .query(slot.spec.id)
+            .map_or(0, |snapshot| snapshot.generation);
+        if let Some(slot) = self.slots[index].as_mut() {
+            slot.progress = Progress::Started;
+        }
+        self.set_ready_deadline(
+            index,
+            Some((generation, ticks_add(now, self.ready_timeout_ns))),
+        );
+        self.settled_announced = false;
+        StartResult::Started
+    }
+
+    /// The rows a launcher client may list and start, in manifest order.
+    pub fn launch_entries(&self) -> impl Iterator<Item = AppEntry> + '_ {
+        self.slots.iter().flatten().filter_map(|slot| {
+            let name = AppName::new(slot.spec.launch_name?.as_bytes())?;
+            let snapshot = self.supervisor.registry().query(slot.spec.id);
+            let state = self.app_state(slot);
+            let live = matches!(state, AppState::Starting | AppState::Running);
+            Some(AppEntry {
+                service: slot.spec.id.0,
+                state,
+                generation: snapshot.map_or(0, |snapshot| snapshot.generation),
+                pid: snapshot
+                    .and_then(|snapshot| snapshot.active_pid)
+                    .filter(|_| live)
+                    .unwrap_or(0),
+                name,
+            })
+        })
+    }
+
+    fn app_state(&self, slot: &ServiceSlot) -> AppState {
+        match slot.progress {
+            Progress::GaveUp | Progress::Blocked => return AppState::Down,
+            Progress::Idle | Progress::NotStarted => return AppState::Idle,
+            Progress::Started => {}
+        }
+        let Some(snapshot) = self.supervisor.registry().query(slot.spec.id) else {
+            return AppState::Idle;
+        };
+        match snapshot.state {
+            ServiceLifecycleState::Declared => AppState::Idle,
+            ServiceLifecycleState::Starting => AppState::Starting,
+            ServiceLifecycleState::Running | ServiceLifecycleState::Stopping => AppState::Running,
+            ServiceLifecycleState::Exited
+            | ServiceLifecycleState::Faulted
+            | ServiceLifecycleState::RestartPending => AppState::Restarting,
+        }
     }
 
     fn emit_start_line(&mut self, spec: &ServiceSpec) -> Result<(), ConvergedSupervisorError> {
@@ -498,7 +646,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     extern crate std;
 
     use std::cell::RefCell;
@@ -526,8 +674,8 @@ mod tests {
     /// Answers control requests the way the kernel does: Start spawns a new instance,
     /// Terminate reports it exited. Requests are recorded by the wrapped fake.
     #[derive(Default)]
-    struct KernelModel {
-        fake: FakeLifecycleControl<64>,
+    pub(crate) struct KernelModel {
+        pub(crate) fake: FakeLifecycleControl<64>,
         next_pid: u64,
         live: Vec<(ServiceId, ServiceInstanceId)>,
         generations: Vec<(ServiceId, u32)>,
@@ -543,14 +691,14 @@ mod tests {
                 .expect("service has a live instance")
         }
 
-        fn report(&mut self, service: ServiceId, kind: LifecycleEventKind) {
+        pub(crate) fn report(&mut self, service: ServiceId, kind: LifecycleEventKind) {
             let event = LifecycleEvent::new(self.instance(service), kind);
             self.fake.push_pending(event).expect("queue event");
         }
     }
 
     #[derive(Clone, Default)]
-    struct SharedKernel(Rc<RefCell<KernelModel>>);
+    pub(crate) struct SharedKernel(pub(crate) Rc<RefCell<KernelModel>>);
 
     impl LifecycleControl for SharedKernel {
         fn issue_control(&mut self, request: ControlRequest) -> Result<(), LifecycleControlError> {
@@ -608,7 +756,7 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct SharedLog(Rc<RefCell<Vec<String>>>);
+    pub(crate) struct SharedLog(Rc<RefCell<Vec<String>>>);
 
     impl DiagnosticSink for SharedLog {
         fn emit_line(&mut self, line: &str) -> Result<(), SupervisorError> {
@@ -620,9 +768,9 @@ mod tests {
     /// Init's `SERVICE_SLOTS`.
     const SLOTS: usize = 12;
 
-    struct Harness {
-        init: SystemInit<SharedKernel, SharedLog, SLOTS>,
-        kernel: SharedKernel,
+    pub(crate) struct Harness {
+        pub(crate) init: SystemInit<SharedKernel, SharedLog, SLOTS>,
+        pub(crate) kernel: SharedKernel,
         log: SharedLog,
     }
 
@@ -633,14 +781,14 @@ mod tests {
 
         /// Boots `manifest`; its audit and console services, which depend on nothing, report
         /// ready at once so that the tests below follow the other rows.
-        fn boot_manifest(manifest: &'static [ServiceSpec]) -> Self {
+        pub(crate) fn boot_manifest(manifest: &'static [ServiceSpec]) -> Self {
             let mut harness = Self::boot_manifest_unready(manifest);
             harness.report(0, AUDIT_SERVICE_ID, LifecycleEventKind::Ready);
             harness.report(0, CONSOLE_SERVICE_ID, LifecycleEventKind::Ready);
             harness
         }
 
-        fn boot_manifest_unready(manifest: &'static [ServiceSpec]) -> Self {
+        pub(crate) fn boot_manifest_unready(manifest: &'static [ServiceSpec]) -> Self {
             let kernel = SharedKernel::default();
             let log = SharedLog::default();
             let mut init = SystemInit::new(
@@ -655,12 +803,12 @@ mod tests {
             Self { init, kernel, log }
         }
 
-        fn report(&mut self, now: u64, service: ServiceId, kind: LifecycleEventKind) {
+        pub(crate) fn report(&mut self, now: u64, service: ServiceId, kind: LifecycleEventKind) {
             self.kernel.0.borrow_mut().report(service, kind);
             self.init.on_wake(now, Some(service));
         }
 
-        fn requests(&self) -> Vec<(ServiceId, ControlRequestKind)> {
+        pub(crate) fn requests(&self) -> Vec<(ServiceId, ControlRequestKind)> {
             self.kernel
                 .0
                 .borrow()
@@ -670,14 +818,14 @@ mod tests {
                 .collect()
         }
 
-        fn starts_of(&self, service: ServiceId) -> usize {
+        pub(crate) fn starts_of(&self, service: ServiceId) -> usize {
             self.requests()
                 .iter()
                 .filter(|request| **request == (service, ControlRequestKind::Start))
                 .count()
         }
 
-        fn lines_with(&self, needle: &str) -> Vec<String> {
+        pub(crate) fn lines_with(&self, needle: &str) -> Vec<String> {
             self.log
                 .0
                 .borrow()

@@ -10,12 +10,15 @@ use clean_slate_graphics::ids::{ClientBufferId, Serial, SurfaceId, WindowId};
 use clean_slate_graphics::keymap::{self, Layout};
 use clean_slate_graphics::limits::{
     MAX_BUFFERS_PER_CLIENT, MAX_CLIENTS, MAX_CLIENT_STALL_ITERATIONS, MAX_PRESENT_DAMAGE_RECTS,
-    MAX_REGISTERED_BUFFERS, MAX_SURFACES, MAX_SURFACES_PER_CLIENT, MAX_SURFACE_EXTENT,
+    MAX_REGISTERED_BUFFERS, MAX_SURFACES, MAX_SURFACES_PER_CLIENT, MAX_SURFACE_EXTENT, MAX_WINDOWS,
     SERVER_REQUEST_QUEUE_DEPTH,
 };
 use clean_slate_graphics::objects::{GlobalBudget, ObjectKind};
 use clean_slate_graphics::pixel::BufferLayout;
-use clean_slate_graphics::protocol::{DisconnectReason, Event, ProtocolError, Request};
+use clean_slate_graphics::protocol::{
+    DisconnectReason, Event, Features, ProtocolError, Request, M10_SERVER_FEATURES,
+    SHELL_SERVER_FEATURES,
+};
 use clean_slate_graphics::raw_input::RawInputRecord;
 use clean_slate_graphics::role::{ParentRef, RoleGrant, SurfaceRole};
 use clean_slate_graphics::surface::{
@@ -39,6 +42,7 @@ use crate::present::{DisplayHealth, PresentTracker};
 use crate::repeat::{KeyRepeater, RepeatConfig};
 use crate::scene::{Scene, SurfaceKey};
 use crate::trace::InputTrace;
+use crate::window_list::{Shown, WindowList};
 use crate::wm::{GrabKind, PlaceRequest, Target, WindowPolicy, Wm, WmHit};
 use clean_slate_graphics::window::WindowTitle;
 use clean_slate_ui::chrome::ChromeState;
@@ -181,6 +185,7 @@ pub struct Compositor<P: WindowPolicy> {
     input_clock_ns: u64,
     trace: InputTrace,
     wm: Wm,
+    window_list: WindowList,
     policy: P,
     config: Config,
     stats: Stats,
@@ -201,6 +206,7 @@ impl<P: WindowPolicy> Compositor<P> {
             input_clock_ns: 0,
             trace: InputTrace::new(),
             wm: Wm::new(),
+            window_list: WindowList::new(),
             policy,
             config,
             stats: Stats {
@@ -232,6 +238,11 @@ impl<P: WindowPolicy> Compositor<P> {
     /// Button edges and settled pointer positions since the last call.
     pub fn take_input_trace(&mut self) -> InputTrace {
         self.trace.take()
+    }
+
+    /// The shell's window list (#237) as last published.
+    pub fn window_list(&self) -> &WindowList {
+        &self.window_list
     }
 
     pub fn budget(&self) -> &GlobalBudget {
@@ -483,6 +494,7 @@ impl<P: WindowPolicy> Compositor<P> {
         if display_due {
             self.poll_display(io);
         }
+        self.publish_window_list();
         if self.needs_composite {
             let now = io.waiter.now_ns();
             iteration.presented = self.composite(io, now);
@@ -552,7 +564,16 @@ impl<P: WindowPolicy> Compositor<P> {
             }
             return;
         };
-        match self.clients[slot].phase.admit(&record.frame) {
+        // The window list is offered only to a connection holding `GFX_SHELL`.
+        let offered = if RoleGrant::from_rights_bits(envelope.rights).has_shell() {
+            SHELL_SERVER_FEATURES
+        } else {
+            M10_SERVER_FEATURES
+        };
+        match self.clients[slot]
+            .phase
+            .admit_offering(&record.frame, offered)
+        {
             Admission::Welcome {
                 tag,
                 version,
@@ -640,6 +661,23 @@ impl<P: WindowPolicy> Compositor<P> {
                     connection: envelope.connection,
                     surface,
                 });
+                return Ok(());
+            }
+            Request::ActivateWindow { window } => {
+                if !self.clients[slot]
+                    .features()
+                    .contains(Features(Features::WINDOW_LIST))
+                {
+                    return Err(ProtocolError::UnsupportedFeature);
+                }
+                // A handle names a window listed this turn; a stale one (the window went
+                // away after the shell sent this) is a recoverable error.
+                let key = self
+                    .window_list
+                    .key_of(window)
+                    .filter(|&key| self.visible_window(key).is_some())
+                    .ok_or(ProtocolError::InvalidObject)?;
+                self.activate(key);
                 return Ok(());
             }
             _ => {}
@@ -888,11 +926,63 @@ impl<P: WindowPolicy> Compositor<P> {
                 *needs_composite = true;
                 Ok(())
             }
-            Request::BeginMove { .. } | Request::BeginResize { .. } => Ok(()),
+            Request::BeginMove { .. }
+            | Request::BeginResize { .. }
+            | Request::ActivateWindow { .. } => Ok(()),
             Request::AckConfigure { window, serial } => {
                 client.objects.window_mut(window)?.configure.ack(serial)?;
                 resend_wanted(client, window);
                 Ok(())
+            }
+        }
+    }
+
+    // ---- window list (#237) ------------------------------------------------------------------
+
+    /// Brings the shell's window list in line with the window manager: changes go to
+    /// subscribers already in sync, and a subscriber that has just negotiated the feature gets
+    /// the whole list. Idempotent; with nothing changed it queues nothing.
+    fn publish_window_list(&mut self) {
+        let mut shown = [None; MAX_WINDOWS];
+        let mut count = 0;
+        for (_, entry) in self.scene.iter() {
+            if count == MAX_WINDOWS {
+                break;
+            }
+            let Some(window) = self.visible_window(entry.key) else {
+                continue;
+            };
+            let client = &self.clients[entry.client];
+            let (Some(identity), Ok(window)) = (client.identity, client.objects.window(window))
+            else {
+                continue;
+            };
+            shown[count] = Some(Shown {
+                key: entry.key,
+                pid: identity.pid,
+                title: window.title,
+            });
+            count += 1;
+        }
+        let Self {
+            clients,
+            window_list,
+            wm,
+            ..
+        } = self;
+        let subscribed =
+            |c: &ClientSlot| c.is_live() && c.features().contains(Features(Features::WINDOW_LIST));
+        window_list.update(&shown[..count], wm.focus, |event| {
+            for client in clients.iter_mut() {
+                if subscribed(client) && client.window_list_synced {
+                    client.queue(UNSOLICITED_TAG, event);
+                }
+            }
+        });
+        for client in clients.iter_mut() {
+            if subscribed(client) && !client.window_list_synced {
+                window_list.snapshot(|event| client.queue(UNSOLICITED_TAG, event));
+                client.window_list_synced = true;
             }
         }
     }

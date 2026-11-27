@@ -39,7 +39,7 @@ pub use handle::{
 pub use holder::HolderId;
 pub use provenance::Provenance;
 pub use record::CapabilityRecord;
-pub use resource::{ResourceClass, ResourceRef};
+pub use resource::{ResourceClass, ResourceRef, LAUNCHER_PORT_ID};
 pub use revocation::{
     authorize_revoke, drop_own, has_live_child, release_revoked, revoke_holder_tree,
     revoke_holder_tree_visiting, revoke_resource_tree, revoke_subtree, DropRefusal,
