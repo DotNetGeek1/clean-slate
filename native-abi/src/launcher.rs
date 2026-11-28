@@ -9,15 +9,18 @@
 //!
 //! Requests (client to init), one 64-byte port frame each; bytes past the payload are zero:
 //!
-//! | Byte | `LIST` | `START` |
-//! |------|--------|---------|
-//! | 0 | [`LAUNCHER_REQUEST_LIST`] | [`LAUNCHER_REQUEST_START`] |
-//! | 1 | 0 | name length, 1..=[`LAUNCHER_NAME_MAX`] |
-//! | 2.. | zero | name |
+//! | Byte | `LIST` | `START` | `SYSTEM_STOP` |
+//! |------|--------|---------|---------------|
+//! | 0 | [`LAUNCHER_REQUEST_LIST`] | [`LAUNCHER_REQUEST_START`] | [`LAUNCHER_REQUEST_SYSTEM_STOP`] |
+//! | 1 | 0 | name length, 1..=[`LAUNCHER_NAME_MAX`] | 0 |
+//! | 2.. | zero | name | zero |
 //!
 //! `LIST` is answered with one [`LAUNCHER_EVENT_ENTRY`] per listed row, in manifest order, and
 //! then one [`LAUNCHER_EVENT_LIST_END`]. `START` is answered with one
-//! [`LAUNCHER_EVENT_START_RESULT`]. Each connection also gets a [`LAUNCHER_EVENT_CHANGED`],
+//! [`LAUNCHER_EVENT_START_RESULT`]. `SYSTEM_STOP` (#373) is answered with one
+//! [`LAUNCHER_EVENT_STOP_RESULT`]; init accepts it only from a connection whose capability
+//! holds `LAUNCH_POWER`, which the kernel's trusted envelope reports, and refuses it otherwise
+//! without closing the connection. Each connection also gets a [`LAUNCHER_EVENT_CHANGED`],
 //! laid out as an entry, whenever a listed row's state or instance changes, so a client that
 //! listed once stays current. An unknown or malformed request closes the connection.
 //!
@@ -34,6 +37,9 @@
 //! | 12..16 | zero | zero | zero |
 //! | 16..24 | pid of the live instance, 0 when none | zero | zero |
 //! | 24..56 | name | zero | zero |
+//!
+//! `STOP_RESULT` is byte 0 [`LAUNCHER_EVENT_STOP_RESULT`], byte 1 a [`StopResult`], the rest
+//! zero.
 
 use crate::port::PORT_FRAME_BYTES;
 
@@ -42,11 +48,13 @@ pub const LAUNCHER_NAME_MAX: usize = 32;
 
 pub const LAUNCHER_REQUEST_LIST: u8 = 1;
 pub const LAUNCHER_REQUEST_START: u8 = 2;
+pub const LAUNCHER_REQUEST_SYSTEM_STOP: u8 = 3;
 
 pub const LAUNCHER_EVENT_ENTRY: u8 = 1;
 pub const LAUNCHER_EVENT_LIST_END: u8 = 2;
 pub const LAUNCHER_EVENT_START_RESULT: u8 = 3;
 pub const LAUNCHER_EVENT_CHANGED: u8 = 4;
+pub const LAUNCHER_EVENT_STOP_RESULT: u8 = 5;
 
 const NAME_OFFSET: usize = 24;
 const _: () = assert!(NAME_OFFSET + LAUNCHER_NAME_MAX <= PORT_FRAME_BYTES);
@@ -196,10 +204,43 @@ impl StartResult {
     }
 }
 
+/// Init's answer to a `SYSTEM_STOP` (#373).
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopResult {
+    /// Init is stopping every service, last started first.
+    Accepted = 0,
+    /// A system stop is already under way.
+    AlreadyStopping = 1,
+    /// The connection does not hold `LAUNCH_POWER`; nothing was stopped.
+    Refused = 2,
+}
+
+impl StopResult {
+    pub const fn from_u8(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Accepted),
+            1 => Some(Self::AlreadyStopping),
+            2 => Some(Self::Refused),
+            _ => None,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::AlreadyStopping => "already-stopping",
+            Self::Refused => "refused",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LauncherRequest {
     List,
     Start(AppName),
+    /// Stop the whole system (#373); needs `LAUNCH_POWER`.
+    SystemStop,
 }
 
 impl LauncherRequest {
@@ -207,6 +248,7 @@ impl LauncherRequest {
         let mut frame = [0u8; PORT_FRAME_BYTES];
         match self {
             Self::List => frame[0] = LAUNCHER_REQUEST_LIST,
+            Self::SystemStop => frame[0] = LAUNCHER_REQUEST_SYSTEM_STOP,
             Self::Start(name) => {
                 frame[0] = LAUNCHER_REQUEST_START;
                 frame[1] = name.len;
@@ -223,6 +265,10 @@ impl LauncherRequest {
                 Ok(Self::List)
             }
             LAUNCHER_REQUEST_START => AppName::decode(frame[1], &frame[2..]).map(Self::Start),
+            LAUNCHER_REQUEST_SYSTEM_STOP => {
+                zero_after(frame, 1)?;
+                Ok(Self::SystemStop)
+            }
             _ => Err(LauncherFrameError::UnknownKind),
         }
     }
@@ -280,6 +326,8 @@ pub enum LauncherEvent {
     StartResult { result: StartResult, service: u32 },
     /// A listed row's state or instance changed.
     Changed(AppEntry),
+    /// The answer to `SYSTEM_STOP`.
+    StopResult(StopResult),
 }
 
 impl LauncherEvent {
@@ -298,6 +346,12 @@ impl LauncherEvent {
                 frame[0] = LAUNCHER_EVENT_START_RESULT;
                 frame[1] = *result as u8;
                 frame[4..8].copy_from_slice(&service.to_le_bytes());
+                frame
+            }
+            Self::StopResult(result) => {
+                let mut frame = [0u8; PORT_FRAME_BYTES];
+                frame[0] = LAUNCHER_EVENT_STOP_RESULT;
+                frame[1] = *result as u8;
                 frame
             }
         }
@@ -322,6 +376,12 @@ impl LauncherEvent {
                     result,
                     service: u32_at(frame, 4),
                 })
+            }
+            LAUNCHER_EVENT_STOP_RESULT => {
+                let result =
+                    StopResult::from_u8(frame[1]).ok_or(LauncherFrameError::UnknownValue)?;
+                zero_after(frame, 2)?;
+                Ok(Self::StopResult(result))
             }
             _ => Err(LauncherFrameError::UnknownKind),
         }
@@ -368,6 +428,7 @@ mod tests {
     fn requests_round_trip() {
         for request in [
             LauncherRequest::List,
+            LauncherRequest::SystemStop,
             LauncherRequest::Start(name("terminal")),
             LauncherRequest::Start(AppName::new(&[b'z'; LAUNCHER_NAME_MAX]).unwrap()),
         ] {
@@ -407,6 +468,12 @@ mod tests {
             LauncherRequest::decode(&frame),
             Err(LauncherFrameError::Name)
         );
+        let mut frame = LauncherRequest::SystemStop.encode();
+        frame[1] = 1;
+        assert_eq!(
+            LauncherRequest::decode(&frame),
+            Err(LauncherFrameError::ReservedNonZero)
+        );
         let mut frame = [0u8; PORT_FRAME_BYTES];
         frame[0] = 9;
         assert_eq!(
@@ -440,6 +507,9 @@ mod tests {
                 result: StartResult::UnknownName,
                 service: 0,
             },
+            LauncherEvent::StopResult(StopResult::Accepted),
+            LauncherEvent::StopResult(StopResult::AlreadyStopping),
+            LauncherEvent::StopResult(StopResult::Refused),
         ] {
             assert_eq!(LauncherEvent::decode(&event.encode()), Ok(event));
         }

@@ -115,6 +115,28 @@ fn wait_step(
     }
 }
 
+/// #373: a stopping instance still live at its stop deadline is terminated here, on a
+/// lifecycle-control holder's wait, so that its `Exited` is queued before the check below.
+/// Init wakes for every stop deadline it waits on and then waits here, so a deadline is kept
+/// within one of init's wakes. The teardown needs the lifecycle allocator, which the timer path
+/// cannot take, and a caller that does not hold the capability changes nothing.
+fn terminate_overdue_stops(caller_pid: u64, capability: u64) {
+    if tsc_hz().is_none() {
+        return;
+    }
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    if controller
+        .pending_service_authorized(caller_pid, capability)
+        .is_err()
+    {
+        return;
+    }
+    let Some(allocator) = crate::syscall::service_lifecycle_syscall_allocator_mut().as_mut() else {
+        return;
+    };
+    controller.terminate_overdue_stops(allocator, monotonic_ns());
+}
+
 pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     match frame.rdx {
         LIFECYCLE_WAIT_OP_WAIT => handle_wait(frame),
@@ -172,6 +194,7 @@ fn handle_wait(frame: &mut SyscallContext) {
             return;
         }
     };
+    terminate_overdue_stops(caller_pid, args.capability);
     let check = || {
         let controller = unsafe { service_lifecycle_controller_mut() };
         let pending = controller.pending_service_authorized(caller_pid, args.capability);

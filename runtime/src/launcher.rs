@@ -47,6 +47,17 @@ impl Launcher {
         )
     }
 
+    /// Asks init to stop the whole system (#373); the answer is a
+    /// [`LauncherEvent::StopResult`], `Refused` unless the connection holds `LAUNCH_POWER`.
+    pub fn request_system_stop<S: Syscalls>(self, sys: &mut S) -> Result<(), Error> {
+        self.connection.send(
+            sys,
+            &LauncherRequest::SystemStop.encode(),
+            None,
+            Deadline::NEVER,
+        )
+    }
+
     /// The next event from init. Init ending the connection is [`Error::Gone`].
     pub fn next_event<S: Syscalls>(self, sys: &mut S, wait: Wait) -> Result<LauncherEvent, Error> {
         let frame = self.connection.recv_frame(sys, wait)?;

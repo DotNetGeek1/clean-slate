@@ -66,7 +66,9 @@ impl Apps {
     pub fn on_launcher(&mut self, event: &LauncherEvent) -> bool {
         match *event {
             LauncherEvent::Entry(entry) | LauncherEvent::Changed(entry) => self.upsert(entry),
-            LauncherEvent::ListEnd { .. } | LauncherEvent::StartResult { .. } => false,
+            LauncherEvent::ListEnd { .. }
+            | LauncherEvent::StartResult { .. }
+            | LauncherEvent::StopResult(_) => false,
         }
     }
 
