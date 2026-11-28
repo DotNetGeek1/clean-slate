@@ -22,6 +22,7 @@ use clean_slate_native_abi::status::STATUS_EBADF;
 use clean_slate_native_abi::ConnectionId;
 use clean_slate_runtime::console::Console;
 use clean_slate_runtime::port::{Deadline, Server, Wait, WorkSet};
+use clean_slate_runtime::resources::{self, ResourceSnapshot};
 use clean_slate_runtime::{port, process, Error, Kernel, Syscalls};
 use clean_slate_service_fixtures::init_bootstrap::{
     InitBootstrap, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_TERMINAL,
@@ -33,6 +34,7 @@ const TERMINAL_VIRTIO_GPU: u64 = DESKTOP_MODE_VIRTIO_GPU | DESKTOP_MODE_TERMINAL
 use clean_slate_service_fixtures::manifest::{manifest_for, SYSTEM_TERMINAL_DESKTOP_MANIFEST};
 use clean_slate_service_lifecycle::ServiceId;
 use clean_slate_supervisor::launcher::{Launcher, LauncherPort, PostRefused};
+use clean_slate_supervisor::usage::UsageSummary;
 use clean_slate_supervisor::{
     DiagnosticSink, SupervisorError, SyscallLifecycleControl, SystemInit, INIT_READY_TIMEOUT_NS,
 };
@@ -122,7 +124,11 @@ pub extern "C" fn _start() -> ! {
     let mut launcher = Launcher::new();
     let _ = console.send(&mut Kernel, b"[INIT] launcher serving\n");
 
+    // #379: the first resource snapshot, before any service starts; the second is taken once
+    // boot settles, and init logs what changed.
+    let mut first_snapshot = Some(resources::snapshot(&mut Kernel));
     init.boot(now(console));
+    report_usage_once_settled(&mut init, &mut first_snapshot, bootstrap.self_pid);
     launcher.publish_changes(&init, &mut server);
     // Set when a drain stopped at its bound with work left: the next wait does not block.
     let mut more = false;
@@ -182,7 +188,32 @@ pub extern "C" fn _start() -> ! {
             }
             more |= !drained;
         }
+        report_usage_once_settled(&mut init, &mut first_snapshot, bootstrap.self_pid);
         launcher.publish_changes(&init, &mut server);
+    }
+}
+
+/// The first time boot has settled: a second snapshot and the summary of both (#379).
+fn report_usage_once_settled<C, D, const N: usize>(
+    init: &mut SystemInit<C, D, N>,
+    first: &mut Option<Result<ResourceSnapshot, Error>>,
+    self_pid: u64,
+) where
+    C: clean_slate_supervisor::LifecycleControl,
+    D: DiagnosticSink,
+{
+    if !init.is_settled() {
+        return;
+    }
+    let Some(first) = first.take() else {
+        return;
+    };
+    match first.and_then(|before| resources::snapshot(&mut Kernel).map(|after| (before, after))) {
+        Ok((before, after)) => init.report_usage(&UsageSummary::of(&before, &after, self_pid)),
+        Err(error) => init.report_usage_unavailable(match error {
+            Error::Failed(status) => status,
+            _ => clean_slate_native_abi::status::STATUS_EIO,
+        }),
     }
 }
 

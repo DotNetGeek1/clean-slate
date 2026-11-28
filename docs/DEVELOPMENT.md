@@ -61,7 +61,7 @@ In the default image the kernel launches userspace init instead of the two kerne
 [SVC ] declared service=21504
 [SVC ] declared service=21760
 [KERN] init launched pid=1 slot=0 declared-services=5
-[KERN] init authority pid=1 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=1 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-console-launcher=1
+[KERN] init authority pid=1 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=1 launch-client=0 observe=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-console-launcher=1
 [KERN] init lifecycle scope pid=1 services=5 matches-manifest=1
 [KERN] scheduler initialized
 [IPC ] console pid=1: [INIT] boot profile=base
@@ -70,14 +70,14 @@ In the default image the kernel launches userspace init instead of the two kerne
 [IPC ] console write refused pid=1 handle=0x200000000010000: not the console sink
 [IPC ] console pid=1: [INIT] console write on the lifecycle handle refused: EBADF
 [IPC ] console pid=1: [INIT] starting service=20736
-[SVC ] authority service=20736 pid=2 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1
+[SVC ] authority service=20736 pid=2 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1
 [SVC ] launch service=20736 pid=2 gen=1
 [IPC ] console pid=1: [INIT] starting service=22016
 [CONS] authority granted pid=3 port=22016:3 rights=serve registered=1 device=read|write
-[SVC ] authority service=22016 pid=3 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=1 con-device=1 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1
+[SVC ] authority service=22016 pid=3 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=1 con-device=1 con-client=0 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1
 [SVC ] launch service=22016 pid=3 gen=1
 [IPC ] console pid=1: [INIT] starting service=21760
-[SVC ] authority service=21760 pid=4 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 audit-store=1 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1
+[SVC ] authority service=21760 pid=4 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 audit-store=1 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1
 [SVC ] launch service=21760 pid=4 gen=1
 [SVC ] ready service=20736 pid=2 gen=1 source=live-instance kernel-observed block-write-requests=0 service-reported formatted=0 store-generation=0
 [SVC ] ready service=22016 pid=3 gen=1 source=live-instance kernel-observed ports=1 port-connections=0 work-sets=1 service-reported detail=0x0
@@ -85,14 +85,14 @@ In the default image the kernel launches userspace init instead of the two kerne
 [IPC ] console pid=4: [ADT ] drained through=21 records=21 lost=0
 [IPC ] console pid=1: [INIT] service=20736 ready; starting service=20992
 [SVC ] ready service=21760 pid=4 gen=1 source=live-instance kernel-observed audit-read-through=21 audit-next=23 audit-dropped=0 service-reported first-drain-records=21
-[SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1
+[SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1
 [SVC ] launch service=20992 pid=5 gen=1
 [IPC ] console pid=1: [INIT] service=22016 ready gen=1
 [IPC ] console pid=1: [INIT] service=20736,22016 ready; starting service=21504
 [SVC ] shell process pid=6 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1
 [SVC ] console input so far lines=0 eofs=0 deferred=0 edit-overflow=0 refused=0 eof-dropped=0 control-dropped=0 irqs=0 spurious=0 bytes=0 max-drained=0 overruns=0 line-errors=0 rearms=0 stale=0 wakes=0 woken=0 committed=0 deferred-line=0
 [CONS] authority granted pid=6 port=22016:3 rights=connect
-[SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=1 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1
+[SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=1 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1
 [SVC ] launch service=21504 pid=6 gen=1
 [IPC ] console pid=1: [INIT] service=21760 ready gen=1
 [SVC ] ready service=20992 pid=5 gen=1 source=live-instance kernel-observed raw-backend=loopback service-reported link-up=1

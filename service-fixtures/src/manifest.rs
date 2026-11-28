@@ -79,6 +79,28 @@ impl ServiceImage {
         }
     }
 
+    /// The short name a process running the image goes by in the resource snapshot (#379)
+    /// when its row has no launch name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Storage => "storage",
+            Self::Network => "network",
+            Self::ImmediateExit => "immediate-exit",
+            Self::M3UserTest => "m3-user-test",
+            Self::CrashService => "crash-service",
+            Self::M6Fixture => "m6-fixture",
+            Self::LinuxHello => "linux-hello",
+            Self::LinuxShell => "shell",
+            Self::Compositor => "compositor",
+            Self::DesktopShell => "desktop-shell",
+            Self::Playground => "playground",
+            Self::Audit => "audit",
+            Self::Console => "console",
+            Self::Terminal => "terminal",
+            Self::NetProbe => "net-probe",
+        }
+    }
+
     /// The #118 desktop images and the #311 terminal, which read a `DesktopLaunchPage`.
     pub const fn is_desktop(self) -> bool {
         matches!(
@@ -182,6 +204,11 @@ pub enum Grant {
     /// a listed row by name, and list those rows. Init always serves the port, so the grant
     /// needs no dependency. Desktop-shell rows only.
     LauncherClient,
+    /// Root `OBSERVE` on `ResourceRef::system_observe()` (#379): the instance may read every
+    /// process's row of the resource snapshot (syscall 28 `RESOURCES`, SYSTEM), not only its
+    /// own. The kernel finds the capability itself, so no page carries its handle. Native
+    /// images only; meant for the task monitor (#380). Init holds it without a row.
+    SystemObserver,
 }
 
 /// When init starts a row (#237).
@@ -244,6 +271,15 @@ pub struct ServiceSpec {
 }
 
 impl ServiceSpec {
+    /// The name its processes go by in the resource snapshot (#379): the launch name, else the
+    /// image's name.
+    pub const fn process_name(&self) -> &'static str {
+        match self.launch_name {
+            Some(name) => name,
+            None => self.image.name(),
+        }
+    }
+
     /// Whether instances of the row are network clients, Linux or native: the rows the per-app
     /// network policy names.
     pub const fn is_network_client(&self) -> bool {
@@ -875,6 +911,8 @@ const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
         Grant::GraphicsAppRole => {
             matches!(image, ServiceImage::Playground | ServiceImage::Terminal)
         }
+        // A Linux process cannot make the native call.
+        Grant::SystemObserver => !image.is_linux(),
     }
 }
 
@@ -1265,6 +1303,31 @@ mod tests {
             &[Grant::NativeNetworkClient, Grant::NetworkStats],
         )];
         assert_eq!(validate_manifest(&ordered), Ok(()));
+    }
+
+    #[test]
+    fn system_observer_is_native_only() {
+        let native = [row(7, ServiceImage::NetProbe, &[Grant::SystemObserver])];
+        assert_eq!(validate_manifest(&native), Ok(()));
+        let linux = [row(7, ServiceImage::LinuxShell, &[Grant::SystemObserver])];
+        assert_eq!(
+            validate_manifest(&linux),
+            Err(ManifestError::GrantNotSupportedByImage { row: 0 })
+        );
+    }
+
+    #[test]
+    fn process_names_prefer_the_launch_name() {
+        assert_eq!(TERMINAL_SERVICE_SPEC.process_name(), "terminal");
+        assert_eq!(COMPOSITOR_SERVICE_SPEC.process_name(), "compositor");
+        assert_eq!(TERMINAL_SHELL_SPEC.process_name(), "shell");
+        for spec in SYSTEM_TERMINAL_DESKTOP_MANIFEST {
+            let name = spec.process_name();
+            assert!(
+                !name.is_empty()
+                    && name.len() <= clean_slate_native_abi::resources::PROCESS_NAME_MAX
+            );
+        }
     }
 
     #[test]

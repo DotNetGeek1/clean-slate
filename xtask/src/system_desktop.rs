@@ -133,12 +133,31 @@ const SETTLED_BASE: &str = "[INIT] boot settled running=5 down=0; waiting, no de
 /// What the app writes through its console stream once it starts (#310).
 const APP_CONSOLE_GREETING: &str = "playground: console stream open";
 /// A desktop row that never reports ready is restarted until init gives up on it.
+/// #379: init's resource snapshot once a desktop boot settles lists init and the compositor,
+/// and init ran between its two snapshots.
+pub(crate) const USAGE_DESKTOP: MarkerStep<'static> = MarkerStep::Line {
+    prefix: "[INIT] usage rows=",
+    fields: &[
+        ("init=", "1"),
+        ("compositor=", "1"),
+        ("init-cpu-grew=", "1"),
+    ],
+};
+/// [`USAGE_DESKTOP`] on a base boot: no compositor.
+pub(crate) const USAGE_BASE: MarkerStep<'static> = MarkerStep::Line {
+    prefix: "[INIT] usage rows=",
+    fields: &[
+        ("init=", "1"),
+        ("compositor=", "0"),
+        ("init-cpu-grew=", "1"),
+    ],
+};
 pub(crate) const GIVE_UP_LINES: [&str; 2] = ["[INIT] gave up", "[INIT] not starting"];
 
 /// Each desktop row's authority, launch and ready, in the order init must reach them: a row starts
 /// only once every row it depends on is ready. The tier is checked per machine by
 /// [`check_desktop_boot`].
-const DESKTOP_MARKERS: [MarkerStep<'static>; 13] = [
+const DESKTOP_MARKERS: [MarkerStep<'static>; 14] = [
     MarkerStep::Line {
         prefix: "[KERN] boot profile=",
         fields: &[("profile=", "desktop"), ("source=", "fw_cfg")],
@@ -161,12 +180,13 @@ const DESKTOP_MARKERS: [MarkerStep<'static>; 13] = [
     MarkerStep::Ordered("[SVC ] launch service=21250 "),
     MarkerStep::Ordered("[SVC ] ready service=21250 "),
     MarkerStep::Ordered(SETTLED_DESKTOP),
+    USAGE_DESKTOP,
 ];
 
 /// [`DESKTOP_MARKERS`] on the default desktop: ten declared rows, the terminal once the app is
 /// ready, and the ten-row settle line. The terminal's shell depends only on storage and the
 /// console service, so it is not ordered against the desktop rows.
-const TERMINAL_DESKTOP_MARKERS: [MarkerStep<'static>; 16] = [
+const TERMINAL_DESKTOP_MARKERS: [MarkerStep<'static>; 17] = [
     MarkerStep::Line {
         prefix: "[KERN] boot profile=",
         fields: &[("profile=", "desktop"), ("source=", "fw_cfg")],
@@ -192,9 +212,10 @@ const TERMINAL_DESKTOP_MARKERS: [MarkerStep<'static>; 16] = [
     MarkerStep::Ordered("[SVC ] launch service=21251 "),
     MarkerStep::Ordered("[SVC ] ready service=21251 "),
     MarkerStep::Ordered(SETTLED_TERMINAL_DESKTOP),
+    USAGE_DESKTOP,
 ];
 
-const NO_DISPLAY_MARKERS: [MarkerStep<'static>; 5] = [
+const NO_DISPLAY_MARKERS: [MarkerStep<'static>; 6] = [
     MarkerStep::Line {
         prefix: "[KERN] boot profile=",
         fields: &[
@@ -213,11 +234,12 @@ const NO_DISPLAY_MARKERS: [MarkerStep<'static>; 5] = [
         fields: &[("profile=", "base")],
     },
     MarkerStep::Ordered(SETTLED_BASE),
+    USAGE_BASE,
 ];
 
 /// `q1` on a machine with only the framebuffer: the kernel says once that it runs Q0, and init
 /// and the desktop rows run at Q0.
-const FRAMEBUFFER_TIER_MARKERS: [MarkerStep<'static>; 5] = [
+const FRAMEBUFFER_TIER_MARKERS: [MarkerStep<'static>; 6] = [
     MarkerStep::Line {
         prefix: "[KERN] boot profile=",
         fields: &[
@@ -236,6 +258,7 @@ const FRAMEBUFFER_TIER_MARKERS: [MarkerStep<'static>; 5] = [
         fields: &[("profile=", "desktop"), ("tier=", "Q0")],
     },
     MarkerStep::Ordered(SETTLED_DESKTOP),
+    USAGE_DESKTOP,
 ];
 
 /// Fails the no-display boot as soon as init gives up on a row.
@@ -412,11 +435,11 @@ fn expected_audit(service: u32, pid: u64) -> String {
         return expected_console_authority(pid);
     }
     let counts = match service {
-        STORAGE => "lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
-        NETWORK => "lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1",
-        COMPOSITOR => "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=24 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
-        DESKTOP_SHELL => "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=1 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
-        _ => "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=1 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=1 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
+        STORAGE => "lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
+        NETWORK => "lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1",
+        COMPOSITOR => "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=24 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
+        DESKTOP_SHELL => "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=1 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=1 observe=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
+        _ => "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=1 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=1 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0",
     };
     format!(
         "[SVC ] authority service={service} pid={pid} {counts} linux=0 console-input=0 matches-manifest=1"
@@ -1472,6 +1495,9 @@ mod tests {
              [CON ] pid=7: playground: console stream open\n",
         );
         text.push_str(&format!("[IPC ] console pid={INIT}: {SETTLED_DESKTOP}\n"));
+        text.push_str(&format!(
+            "[IPC ] console pid={INIT}: [INIT] usage rows=9 init=1 compositor=1 init-cpu-grew=1\n"
+        ));
         text
     }
 
@@ -1670,7 +1696,8 @@ mod tests {
              [SVC ] ready service=22016 pid=6 gen=1 source=live-instance\n\
              [SVC ] ready service=20992 pid=3 gen=1 source=live-instance\n\
              [SVC ] ready service=21504 pid=4 gen=1 source=live-instance\n\
-             [IPC ] console pid={INIT}: {SETTLED_BASE}\n"
+             [IPC ] console pid={INIT}: {SETTLED_BASE}\n\
+             [IPC ] console pid={INIT}: [INIT] usage rows=6 init=1 compositor=0 init-cpu-grew=1\n"
         )
     }
 

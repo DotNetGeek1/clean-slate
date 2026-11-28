@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn port_rights_for_all_classes() {
-        for raw in 1u8..=13 {
+        for raw in (1u8..=13).chain([15]) {
             let class = ResourceClass::from_u8(raw).unwrap();
             let rights = port_rights_for(class);
             if matches!(

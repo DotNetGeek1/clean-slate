@@ -414,11 +414,11 @@ fn shared_buffer_id_raw(slot: u16, generation: u32) -> u64 {
 
 #[test]
 fn resource_class_from_u8_includes_m10_classes() {
-    for raw in 1u8..=13 {
+    for raw in (1u8..=13).chain([15]) {
         assert_eq!(ResourceClass::from_u8(raw).map(|c| c.as_u8()), Some(raw));
     }
     assert_eq!(ResourceClass::from_u8(0), None);
-    assert_eq!(ResourceClass::from_u8(14), None);
+    assert_eq!(ResourceClass::from_u8(16), None);
 }
 
 #[test]
@@ -870,4 +870,30 @@ fn a_refused_network_destination_round_trips_and_prints_its_address() {
     );
     let allowed = event.with_result(Ok(()));
     assert_eq!(NetDestination::of_refusal(&allowed), None);
+}
+
+#[test]
+fn system_observe_is_observe_only_and_stays_at_the_root() {
+    assert_eq!(
+        Rights::valid_for(ResourceClass::SystemObserve),
+        Rights::OBSERVE
+    );
+    assert_eq!(
+        Rights::root_only_for(ResourceClass::SystemObserve),
+        Rights::OBSERVE
+    );
+    assert!(!Rights::valid_for(ResourceClass::SystemObserve).contains(Rights::DELEGATE));
+    assert_eq!(ResourceClass::SystemObserve.name(), "system-observe");
+    assert_eq!(
+        ResourceClass::from_u8(15),
+        Some(ResourceClass::SystemObserve)
+    );
+    assert_eq!(
+        ResourceRef::system_observe(),
+        ResourceRef {
+            class: ResourceClass::SystemObserve,
+            id: crate::SYSTEM_OBSERVE_ID,
+            instance_generation: 0,
+        }
+    );
 }

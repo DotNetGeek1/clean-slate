@@ -21,6 +21,7 @@ mod runtime;
 #[cfg(feature = "userspace")]
 mod syscall_lifecycle;
 mod system_init;
+pub mod usage;
 
 pub use control::{FakeLifecycleControl, LifecycleControl, LifecycleControlError};
 pub use convergence::{ConvergedSupervisor, ConvergedSupervisorError, ServiceConvergenceConfig};

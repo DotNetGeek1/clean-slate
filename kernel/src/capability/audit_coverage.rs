@@ -130,6 +130,11 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
     ("capability/mod.rs", "holder_has_resource_rights", Records),
     (
         "capability/mod.rs",
+        "holder_has_resource_rights_audit_refusal",
+        Records,
+    ),
+    (
+        "capability/mod.rs",
         "copy_capabilities_for_fork",
         RecordedBy("inherit_capabilities_for_fork"),
     ),

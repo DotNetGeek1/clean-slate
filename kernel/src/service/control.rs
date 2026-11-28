@@ -572,6 +572,15 @@ impl ServiceLifecycleController {
             .and_then(|record| record.live.map(|live| live.pid))
     }
 
+    /// The manifest row whose live instance is `pid` (#379: the resource snapshot's names).
+    pub(crate) fn live_row_for_pid(&self, pid: u64) -> Option<&'static ServiceSpec> {
+        let record = self
+            .services
+            .iter()
+            .find(|entry| entry.service.0 != 0 && entry.live.is_some_and(|live| live.pid == pid))?;
+        find_service(self.manifest, record.service)
+    }
+
     #[cfg(feature = "m8-linux-hello")]
     pub(crate) fn live_service_id_for_pid(&self, pid: u64) -> Option<ServiceId> {
         self.services.iter().find_map(|entry| {
@@ -1648,6 +1657,18 @@ impl InstanceGrantAuthority for KernelInstanceGrants {
         Ok(())
     }
 
+    /// #379: root `OBSERVE` on the system usage view, which the resource snapshot finds.
+    fn grant_system_observer(&mut self, pid: u64) -> Result<(), &'static str> {
+        use clean_slate_capability::HolderId;
+
+        crate::process::snapshot::grant_system_observer(HolderId(pid))
+            .map_err(|_| self.grant_failed(pid, "system observer", "capability refused"))?;
+        kernel_log_fmt(format_args!(
+            "[KERN] system observer granted pid={pid} rights=observe\n"
+        ));
+        Ok(())
+    }
+
     #[cfg(not(clean_slate_desktop))]
     fn grant_console_service(&mut self, pid: u64) -> Result<(), &'static str> {
         Err(self.grant_failed(pid, "console port", DESKTOP_NOT_COMPILED))
@@ -1709,6 +1730,7 @@ const fn rollback_failure_message(grant: Grant) -> &'static str {
         Grant::NativeNetworkClient | Grant::NetworkStats => {
             "network client grant rollback teardown failed"
         }
+        Grant::SystemObserver => "system observer grant rollback teardown failed",
     }
 }
 

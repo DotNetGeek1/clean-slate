@@ -19,6 +19,9 @@ pub enum ResourceClass {
     Console = 12,
     /// The launcher port init serves (#237): ask init to start a manifest row by name.
     Launcher = 13,
+    /// Reading every process's CPU time and memory (#379): one resource, granted to init and
+    /// to manifest rows with `Grant::SystemObserver`. 14 is taken by #372's power class.
+    SystemObserve = 15,
 }
 
 impl ResourceClass {
@@ -41,6 +44,7 @@ impl ResourceClass {
             11 => Some(Self::Input),
             12 => Some(Self::Console),
             13 => Some(Self::Launcher),
+            15 => Some(Self::SystemObserve),
             _ => None,
         }
     }
@@ -60,6 +64,7 @@ impl ResourceClass {
             Self::Input => "input",
             Self::Console => "console",
             Self::Launcher => "launcher",
+            Self::SystemObserve => "system-observe",
         }
     }
 }
@@ -70,6 +75,9 @@ pub const SERIAL_CONSOLE_DEVICE_ID: u64 = 0;
 
 /// `ResourceClass::Launcher` id of the one launcher port, served by init (#237).
 pub const LAUNCHER_PORT_ID: u64 = 1;
+
+/// `ResourceClass::SystemObserve` id of the system-wide usage view, the only one (#379).
+pub const SYSTEM_OBSERVE_ID: u64 = 0;
 
 /// Stable resource key bound by a capability (independent of handle slot/generation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -192,6 +200,17 @@ impl ResourceRef {
         Self {
             class: ResourceClass::Launcher,
             id: LAUNCHER_PORT_ID,
+            instance_generation: 0,
+        }
+    }
+
+    /// The system-wide usage view (#379): `OBSERVE` on it lets a process read every process's
+    /// row of the resource snapshot (syscall 28), not only its own. The kernel grants it at
+    /// the root, and it is never delegated.
+    pub const fn system_observe() -> Self {
+        Self {
+            class: ResourceClass::SystemObserve,
+            id: SYSTEM_OBSERVE_ID,
             instance_generation: 0,
         }
     }

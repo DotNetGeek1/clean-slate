@@ -33,6 +33,7 @@ pub(crate) mod linux_socket;
 pub(crate) mod linux_stdio_m9_payload;
 pub(crate) mod native_mem;
 pub(crate) mod personality;
+pub(crate) mod snapshot;
 pub(crate) mod usage;
 
 use crate::arch::x86_64::cpu::without_interrupts;
