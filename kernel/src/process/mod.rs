@@ -33,6 +33,7 @@ pub(crate) mod linux_socket;
 pub(crate) mod linux_stdio_m9_payload;
 pub(crate) mod native_mem;
 pub(crate) mod personality;
+pub(crate) mod usage;
 
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::mm::address_space::AddressSpaceResourceCounts;
@@ -74,6 +75,8 @@ pub(super) struct ResourceDomain {
     pub(crate) id: u64,
     root_frame: u64,
     address_space: Option<ProcessAddressSpace>,
+    /// TSC ticks of this process's threads whose scheduler slots were reaped (#377).
+    retired_cpu_ticks: u64,
 }
 
 #[allow(dead_code)]
@@ -82,6 +85,7 @@ impl ResourceDomain {
         id: 0,
         root_frame: 0,
         address_space: None,
+        retired_cpu_ticks: 0,
     };
 
     pub(crate) const fn new(id: u64) -> Self {
@@ -89,6 +93,7 @@ impl ResourceDomain {
             id,
             root_frame: 0,
             address_space: None,
+            retired_cpu_ticks: 0,
         }
     }
 
@@ -97,6 +102,7 @@ impl ResourceDomain {
             id,
             root_frame,
             address_space: None,
+            retired_cpu_ticks: 0,
         }
     }
 
@@ -105,6 +111,7 @@ impl ResourceDomain {
             id,
             root_frame: address_space.root_frame,
             address_space: Some(address_space),
+            retired_cpu_ticks: 0,
         }
     }
 
@@ -136,6 +143,14 @@ impl ResourceDomain {
             AddressSpaceResourceCounts::default(),
             ProcessAddressSpace::resource_counts,
         )
+    }
+
+    pub(crate) fn retired_cpu_ticks(&self) -> u64 {
+        self.retired_cpu_ticks
+    }
+
+    pub(crate) fn credit_retired_cpu_ticks(&mut self, ticks: u64) {
+        self.retired_cpu_ticks = self.retired_cpu_ticks.saturating_add(ticks);
     }
 
     pub(crate) fn take_address_space(&mut self) -> Option<ProcessAddressSpace> {

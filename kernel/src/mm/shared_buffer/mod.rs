@@ -219,6 +219,26 @@ pub(crate) fn mapping_count(pid: u64) -> usize {
     })
 }
 
+/// What `pid`'s shared window holds on its behalf (#377).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WindowUsage {
+    /// Buffer pages mapped by Live rows; a buffer mapped by two processes counts in each.
+    pub(crate) shared_pages: usize,
+    /// The window's directory frames and its rows' private page tables.
+    pub(crate) page_table_frames: usize,
+}
+
+/// Bounded scan of `pid`'s window rows; reads counters set at map, orphan and unmap.
+pub(crate) fn window_usage(pid: u64) -> WindowUsage {
+    state()
+        .windows
+        .get(pid)
+        .map_or(WindowUsage::default(), |window| WindowUsage {
+            shared_pages: window.rows().iter().map(|row| row.mapped_pages()).sum(),
+            page_table_frames: window.page_table_frames(),
+        })
+}
+
 /// Table-wide buffer, page and mapping totals for the #118 desktop resource snapshot.
 #[cfg(clean_slate_desktop_snapshot)]
 pub(crate) fn desktop_stats() -> table::SharedBufferStats {
