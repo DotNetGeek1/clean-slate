@@ -1,7 +1,7 @@
 //! Generic native kernel ABI shared by the kernel and userspace binaries.
 //!
-//! Shared buffers, the bounded service port, work-set, lifecycle-wait, service-ready, memory and
-//! clock ABI live here; the port engine is the separate `clean-slate-port` crate. Graphics protocol
+//! Shared buffers, the bounded service port, work-set, lifecycle-wait, service-ready, memory,
+//! clock and power ABI live here; the port engine is the separate `clean-slate-port` crate. Graphics protocol
 //! types remain in `clean-slate-graphics`.
 
 #![cfg_attr(not(test), no_std)]
@@ -16,6 +16,7 @@ pub mod lifecycle;
 pub mod memory;
 pub mod net;
 pub mod object;
+pub mod power;
 pub mod shared_buffer;
 
 #[macro_use]

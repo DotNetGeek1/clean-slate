@@ -256,6 +256,21 @@ fn emit_userspace_dispatch_cfgs() -> Option<&'static str> {
     selected
 }
 
+/// The power self-test boots (#372, `cargo xtask test-m10-power`). They keep the boot tail and
+/// keep init out, so the arm runs once the tail has brought the machine up, just before the
+/// scheduler would start: `off` powers the machine off, `reset` resets it.
+const POWER_SELFTEST_ARMS: &[(&str, &[&str])] = &[
+    ("off", &["power-off-self-test"]),
+    ("reset", &["power-reset-self-test"]),
+];
+
+/// Sets `clean_slate_power_selftest` by [`POWER_SELFTEST_ARMS`].
+fn emit_power_selftest_cfg() {
+    if let Some(arm) = declare_dispatch_arms("clean_slate_power_selftest", POWER_SELFTEST_ARMS) {
+        println!("cargo::rustc-cfg=clean_slate_power_selftest=\"{arm}\"");
+    }
+}
+
 /// Lanes that spawn an M6 fixture program. The object lane is included only when it is the
 /// selected userspace arm: `m9-linux-fs` and `m9-userspace` enable the object feature without
 /// running that arm.
@@ -676,6 +691,7 @@ fn main() {
     emit_desktop_snapshot_cfg();
     let userspace_arm = emit_userspace_dispatch_cfgs();
     emit_fixture_spawn_cfg(userspace_arm);
+    emit_power_selftest_cfg();
     emit_selftest_timer_wait_cfg();
     emit_bump_allocator_cfg();
     emit_userspace_spawn_cfg();

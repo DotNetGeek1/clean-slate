@@ -18,6 +18,7 @@ mod interrupt;
 mod ipc;
 mod limits;
 mod mm;
+mod power;
 mod process;
 mod sched;
 mod service;

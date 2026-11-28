@@ -1,5 +1,6 @@
 //! ACPI discovery of the interrupt topology (I/O APICs and ISA source
-//! overrides from the MADT).
+//! overrides from the MADT) and of the power registers (the FADT and the
+//! DSDT's `\_S5`, decoded by `crate::power::acpi`, #372).
 //!
 //! The RSDP comes from the UEFI configuration table and the tables are parsed
 //! before `ExitBootServices`, while the firmware identity map is the active
@@ -12,9 +13,12 @@ use crate::sync::global_cell::GlobalCell;
 pub(crate) const MAX_IO_APICS: usize = 4;
 pub(crate) const MAX_SOURCE_OVERRIDES: usize = 16;
 
-const SDT_HEADER_BYTES: usize = 36;
-/// Upper bound on any table we read; real MADT/XSDT tables are a few hundred bytes.
+pub(crate) const SDT_HEADER_BYTES: usize = 36;
+/// Upper bound on any table we read but the DSDT; real MADT/XSDT tables are a few hundred bytes.
 const MAX_TABLE_BYTES: usize = 64 * 1024;
+/// Upper bound on the DSDT, which holds the machine's AML and runs to a few hundred KiB on
+/// real hardware.
+const MAX_DSDT_BYTES: usize = 1024 * 1024;
 const RSDP_V1_BYTES: usize = 20;
 const RSDP_V2_BYTES: usize = 36;
 const MADT_ENTRIES_OFFSET: usize = 44;
@@ -86,10 +90,10 @@ pub(crate) fn interrupt_topology() -> Result<InterruptTopology, &'static str> {
     unsafe { *INTERRUPT_TOPOLOGY.get() }
 }
 
-/// Locate the RSDP in the UEFI configuration table and parse the MADT.
-/// Must run before `ExitBootServices` (the firmware identity map is live and
-/// the system table is still valid).
-pub(crate) fn capture_interrupt_topology_from_firmware() {
+/// Locate the RSDP in the UEFI configuration table and parse the MADT, the
+/// FADT and the DSDT. Must run before `ExitBootServices` (the firmware
+/// identity map is live and the system table is still valid).
+pub(crate) fn capture_acpi_from_firmware() {
     use ::uefi::table::cfg::ConfigTableEntry;
 
     let rsdp_address = ::uefi::system::with_config_table(|entries| {
@@ -104,15 +108,18 @@ pub(crate) fn capture_interrupt_topology_from_firmware() {
             .map(|entry| entry.address as u64)
     });
     let topology = match rsdp_address {
-        Some(address) => unsafe { topology_from_identity_mapped_rsdp(address) },
+        Some(address) => unsafe { capture_from_identity_mapped_rsdp(address) },
         None => Err("UEFI configuration table has no ACPI RSDP"),
     };
     unsafe { *INTERRUPT_TOPOLOGY.get() = topology };
 }
 
+/// Walks the root table: returns the MADT's topology and stores the FADT's power
+/// registers with `crate::power::set_captured`.
+///
 /// # Safety
 /// Physical memory must be identity-mapped (true while boot services run).
-unsafe fn topology_from_identity_mapped_rsdp(
+unsafe fn capture_from_identity_mapped_rsdp(
     rsdp_address: u64,
 ) -> Result<InterruptTopology, &'static str> {
     let rsdp = unsafe { identity_bytes(rsdp_address, RSDP_V2_BYTES)? };
@@ -124,6 +131,8 @@ unsafe fn topology_from_identity_mapped_rsdp(
         b"RSDT"
     };
     let root_entries = validate_table(root_table, signature)?;
+    let mut topology = Err("ACPI root table has no MADT");
+    let mut power = Err("ACPI root table has no FADT");
     for entry in root_entries.chunks_exact(root.entry_bytes) {
         let address = if root.entry_bytes == 8 {
             u64::from_le_bytes(entry.try_into().map_err(|_| "ACPI XSDT entry malformed")?)
@@ -133,13 +142,24 @@ unsafe fn topology_from_identity_mapped_rsdp(
             ))
         };
         let header = unsafe { identity_bytes(address, SDT_HEADER_BYTES)? };
-        if &header[0..4] != b"APIC" {
-            continue;
+        match &header[0..4] {
+            b"APIC" if topology.is_err() => {
+                topology = unsafe { identity_table(address) }.and_then(parse_madt);
+            }
+            b"FACP" if power.is_err() => {
+                power = unsafe { identity_table(address) }
+                    .and_then(crate::power::acpi::parse_fadt)
+                    .map(|registers| {
+                        let s5 = unsafe { identity_table_up_to(registers.dsdt, MAX_DSDT_BYTES) }
+                            .and_then(crate::power::acpi::s5_sleep_type);
+                        crate::power::PowerControl::new(registers, s5)
+                    });
+            }
+            _ => {}
         }
-        let madt = unsafe { identity_table(address)? };
-        return parse_madt(madt);
     }
-    Err("ACPI root table has no MADT")
+    crate::power::set_captured(power);
+    topology
 }
 
 /// # Safety
@@ -157,9 +177,18 @@ unsafe fn identity_bytes(address: u64, len: usize) -> Result<&'static [u8], &'st
 /// # Safety
 /// See [`identity_bytes`]; reads the SDT header, then the declared length.
 unsafe fn identity_table(address: u64) -> Result<&'static [u8], &'static str> {
+    unsafe { identity_table_up_to(address, MAX_TABLE_BYTES) }
+}
+
+/// # Safety
+/// See [`identity_table`].
+unsafe fn identity_table_up_to(
+    address: u64,
+    max_bytes: usize,
+) -> Result<&'static [u8], &'static str> {
     let header = unsafe { identity_bytes(address, SDT_HEADER_BYTES)? };
     let len = read_u32(header, 4)? as usize;
-    if !(SDT_HEADER_BYTES..=MAX_TABLE_BYTES).contains(&len) {
+    if !(SDT_HEADER_BYTES..=max_bytes).contains(&len) {
         return Err("ACPI table length out of range");
     }
     unsafe { identity_bytes(address, len) }
@@ -209,7 +238,10 @@ fn parse_rsdp(bytes: &[u8]) -> Result<RootTable, &'static str> {
 }
 
 /// Validate signature, declared length and checksum; returns the table body.
-fn validate_table<'a>(table: &'a [u8], signature: &[u8; 4]) -> Result<&'a [u8], &'static str> {
+pub(crate) fn validate_table<'a>(
+    table: &'a [u8],
+    signature: &[u8; 4],
+) -> Result<&'a [u8], &'static str> {
     if table.len() < SDT_HEADER_BYTES {
         return Err("ACPI table shorter than its header");
     }
@@ -304,21 +336,21 @@ fn checksum(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte))
 }
 
-fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, &'static str> {
+pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, &'static str> {
     bytes
         .get(offset..offset + 2)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
         .ok_or("ACPI field out of range")
 }
 
-fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, &'static str> {
+pub(crate) fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, &'static str> {
     bytes
         .get(offset..offset + 4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .ok_or("ACPI field out of range")
 }
 
-fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, &'static str> {
+pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, &'static str> {
     bytes
         .get(offset..offset + 8)
         .map(|b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))

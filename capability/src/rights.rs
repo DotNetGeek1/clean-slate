@@ -69,6 +69,8 @@ impl Rights {
     /// On the launcher port, beside `LAUNCH_CONNECT`: ask init to stop the whole system (#373).
     /// Root grants only, never delegated.
     pub const LAUNCH_POWER: Self = Self(1 << 28);
+    /// On `ResourceClass::Power`: power the machine off or reset it (#372, syscall 26 `POWER`).
+    pub const POWER_CONTROL: Self = Self(1 << 29);
 
     const ALL_KNOWN: u32 = (1 << 0)
         | (1 << 1)
@@ -98,7 +100,8 @@ impl Rights {
         | (1 << 25)
         | (1 << 26)
         | (1 << 27)
-        | (1 << 28);
+        | (1 << 28)
+        | (1 << 29);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -214,6 +217,9 @@ impl Rights {
                     | Self::DELEGATE.0
                     | Self::REVOKE.0,
             ),
+            // Power control is never delegated: init holds the kernel's root grant and no one
+            // else can hold it.
+            ResourceClass::Power => Self::POWER_CONTROL,
         }
     }
 
@@ -237,13 +243,14 @@ impl Rights {
             }
             // Asking for a system stop comes only from a manifest row, like serving the port.
             ResourceClass::Launcher => Self(Self::LAUNCH_SERVE.0 | Self::LAUNCH_POWER.0),
+            ResourceClass::Power => Self::POWER_CONTROL,
             _ => Self::empty(),
         }
     }
 
     /// Lowercase, pipe-separated names in deterministic bit order.
     pub fn write_names(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        const NAMES: [(&str, u32); 29] = [
+        const NAMES: [(&str, u32); 30] = [
             ("read", 1 << 0),
             ("write", 1 << 1),
             ("inspect", 1 << 2),
@@ -273,6 +280,7 @@ impl Rights {
             ("directory", 1 << 26),
             ("net_stats", 1 << 27),
             ("launch_power", 1 << 28),
+            ("power_control", 1 << 29),
         ];
         let mut first = true;
         for (name, bit) in NAMES {
