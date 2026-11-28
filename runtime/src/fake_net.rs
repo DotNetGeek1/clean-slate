@@ -1,6 +1,7 @@
 //! The fake kernel's network (#353): syscall 14 hands out the client capability, and syscall 15
 //! runs a scripted network service: names it resolves, destinations its policy refuses, TCP
-//! peers that answer a request, TLS peers, and UDP peers that echo.
+//! peers that answer a request, TLS peers, UDP peers that echo, and peers that connect in to a
+//! listener (#359).
 
 extern crate std;
 
@@ -9,10 +10,11 @@ use std::string::{String, ToString};
 use std::vec::Vec;
 
 use clean_slate_native_abi::net::{
-    NetAddr, NetResponse, NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NET_ERROR_CLOSED,
-    NET_ERROR_DESTINATION_DENIED, NET_ERROR_INVALID_REQUEST, NET_ERROR_NOT_FOUND, NET_ERROR_RESET,
-    NET_ERROR_STALE_GENERATION, NET_ERROR_TIMEOUT, NET_FRAME_BYTES, NET_KIND_CLOSE,
-    NET_KIND_CONNECT, NET_KIND_OPEN, NET_KIND_RECEIVE, NET_KIND_RESOLVE, NET_KIND_SEND,
+    NetAddr, NetResponse, NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID,
+    NET_ERROR_ADDRESS_IN_USE, NET_ERROR_CLOSED, NET_ERROR_DESTINATION_DENIED,
+    NET_ERROR_INVALID_REQUEST, NET_ERROR_NOT_FOUND, NET_ERROR_RESET, NET_ERROR_STALE_GENERATION,
+    NET_ERROR_TIMEOUT, NET_FRAME_BYTES, NET_KIND_ACCEPT, NET_KIND_CLOSE, NET_KIND_CONNECT,
+    NET_KIND_LISTEN, NET_KIND_OPEN, NET_KIND_RECEIVE, NET_KIND_RESOLVE, NET_KIND_SEND,
     NET_MAX_PAYLOAD_BYTES, NET_SOCKET_DATAGRAM, NET_SOCKET_STREAM, NET_SOCKET_TLS_EXCHANGE,
     NET_SUBOP_DISCARD, NET_SUBOP_POLL, NET_SUBOP_SUBMIT, NET_SUBOP_WAIT,
 };
@@ -38,11 +40,37 @@ struct Session {
     inbound: VecDeque<Vec<u8>>,
     peer_closed: bool,
     answered: bool,
+    /// The local port a listening stream listens on.
+    listening: Option<u16>,
+}
+
+impl Session {
+    fn new(id: u64, kind: u8) -> Self {
+        Self {
+            id,
+            kind,
+            peer: None,
+            sent: Vec::new(),
+            inbound: VecDeque::new(),
+            peer_closed: false,
+            answered: false,
+            listening: None,
+        }
+    }
+}
+
+/// A peer that connects in to a local port (#359).
+struct Incoming {
+    port: u16,
+    peer: NetAddr,
+    bytes: Vec<u8>,
+    close: bool,
 }
 
 enum Request {
     Done(NetResponse, Vec<u8>),
     Receive { session: u64, max_len: usize },
+    Accept { session: u64 },
 }
 
 #[derive(Default)]
@@ -61,6 +89,10 @@ pub(crate) struct FakeNet {
     next_request: u64,
     next_session: u64,
     refusals: Vec<Option<NetAddr>>,
+    listen_denied: Vec<u16>,
+    incoming: VecDeque<Incoming>,
+    /// What closed sessions sent, and to whom.
+    closed_sent: Vec<(NetAddr, Vec<u8>)>,
 }
 
 fn session_of(frame: &[u8; NET_FRAME_BYTES]) -> u64 {
@@ -124,13 +156,26 @@ impl FakeNet {
         }
     }
 
+    pub(crate) fn forbid_listen(&mut self, port: u16) {
+        self.listen_denied.push(port);
+    }
+
+    pub(crate) fn connect_in(&mut self, port: u16, peer: NetAddr, bytes: &[u8], close: bool) {
+        self.incoming.push_back(Incoming {
+            port,
+            peer,
+            bytes: bytes.to_vec(),
+            close,
+        });
+    }
+
     /// The service restarts: open sessions are stale and the client capability changes.
     pub(crate) fn restart(&mut self, new_handle: u64) {
         self.generation += 1;
         self.handle = Some(new_handle);
         let stale: Vec<u64> = self.sessions.iter().map(|s| s.id).collect();
         for (_, request) in &mut self.requests {
-            if let Request::Receive { session, .. } = request {
+            if let Request::Receive { session, .. } | Request::Accept { session } = request {
                 if stale.contains(session) {
                     *request = error(NET_ERROR_RESET);
                 }
@@ -138,12 +183,19 @@ impl FakeNet {
         }
     }
 
+    /// Everything sent to `addr`, on closed sessions first.
     pub(crate) fn sent_to(&self, addr: NetAddr) -> Vec<u8> {
-        self.sessions
+        let closed = self
+            .closed_sent
+            .iter()
+            .filter(|(peer, _)| *peer == addr)
+            .flat_map(|(_, sent)| sent.iter().copied());
+        let open = self
+            .sessions
             .iter()
             .filter(|s| s.peer == Some(addr))
-            .flat_map(|s| s.sent.iter().copied())
-            .collect()
+            .flat_map(|s| s.sent.iter().copied());
+        closed.chain(open).collect()
     }
 
     pub(crate) fn open_sessions(&self) -> usize {
@@ -194,7 +246,7 @@ impl FakeNet {
                     None => STATUS_EINVAL,
                     Some((_, Request::Done(..))) => 0,
                     // The fake has no time: an unanswered request reaches any deadline at once.
-                    Some((_, Request::Receive { .. })) => STATUS_ETIMEDOUT,
+                    Some((_, Request::Receive { .. } | Request::Accept { .. })) => STATUS_ETIMEDOUT,
                 }
             }
             NET_SUBOP_POLL => {
@@ -236,9 +288,19 @@ impl FakeNet {
         }
     }
 
-    /// Completes receives that have something to return.
+    /// Completes receives that have something to return, and accepts with a peer waiting.
     fn advance(&mut self) {
         for index in 0..self.requests.len() {
+            if let Request::Accept { session } = self.requests[index].1 {
+                self.requests[index].1 = match self.sessions.iter().find(|s| s.id == session) {
+                    None => error(NET_ERROR_RESET),
+                    Some(listener) => match self.take_incoming(listener.listening) {
+                        Some(done) => done,
+                        None => continue,
+                    },
+                };
+                continue;
+            }
             let Request::Receive { session, max_len } = self.requests[index].1 else {
                 continue;
             };
@@ -259,6 +321,39 @@ impl FakeNet {
                 self.requests[index].1 = Request::Done(NetResponse::Receive { len: 0 }, Vec::new());
             }
         }
+    }
+
+    /// The oldest peer connecting in to `port`, as a new stream session.
+    fn take_incoming(&mut self, port: Option<u16>) -> Option<Request> {
+        let at = self.incoming.iter().position(|i| Some(i.port) == port)?;
+        let incoming = self.incoming.remove(at)?;
+        self.next_session += 1;
+        let id = (self.generation << 32) | self.next_session;
+        let mut session = Session::new(id, NET_SOCKET_STREAM);
+        session.peer = Some(incoming.peer);
+        if !incoming.bytes.is_empty() {
+            session.inbound.push_back(incoming.bytes);
+        }
+        if incoming.close && session.inbound.is_empty() {
+            // It sent nothing: it gave up and closes at once.
+            session.peer_closed = true;
+        } else if incoming.close {
+            // It closes its side once it has had as many bytes back as it sent: an echo client.
+            self.tcp.push(TcpPeer {
+                addr: incoming.peer,
+                answer: Vec::new(),
+                after: session.inbound.iter().map(Vec::len).sum(),
+                close: true,
+            });
+        }
+        self.sessions.push(session);
+        Some(Request::Done(
+            NetResponse::Accept {
+                session: id,
+                peer: incoming.peer,
+            },
+            Vec::new(),
+        ))
     }
 
     fn refuse(&mut self, addr: Option<NetAddr>) -> Request {
@@ -302,17 +397,37 @@ impl FakeNet {
                 }
                 self.next_session += 1;
                 let id = (generation << 32) | self.next_session;
-                self.sessions.push(Session {
-                    id,
-                    kind,
-                    peer: None,
-                    sent: Vec::new(),
-                    inbound: VecDeque::new(),
-                    peer_closed: false,
-                    answered: false,
-                });
+                self.sessions.push(Session::new(id, kind));
                 Request::Done(NetResponse::Open { session: id }, Vec::new())
             }
+            NET_KIND_LISTEN => {
+                let Some(index) = index else {
+                    return error(NET_ERROR_INVALID_REQUEST);
+                };
+                let port = u16::from_le_bytes([frame[16], frame[17]]);
+                let session = &self.sessions[index];
+                if session.kind != NET_SOCKET_STREAM
+                    || session.peer.is_some()
+                    || session.listening.is_some()
+                    || port == 0
+                {
+                    return error(NET_ERROR_INVALID_REQUEST);
+                }
+                if self.listen_denied.contains(&port) {
+                    return self.refuse(Some(NetAddr::new([0; 4], port)));
+                }
+                if self.sessions.iter().any(|s| s.listening == Some(port)) {
+                    return error(NET_ERROR_ADDRESS_IN_USE);
+                }
+                self.sessions[index].listening = Some(port);
+                Request::Done(NetResponse::Listen, Vec::new())
+            }
+            NET_KIND_ACCEPT => match index {
+                Some(index) if self.sessions[index].listening.is_some() => Request::Accept {
+                    session: session_id,
+                },
+                _ => error(NET_ERROR_INVALID_REQUEST),
+            },
             NET_KIND_CONNECT => {
                 let Some(index) = index else {
                     return error(NET_ERROR_INVALID_REQUEST);
@@ -394,9 +509,12 @@ impl FakeNet {
                 let Some(index) = index else {
                     return error(NET_ERROR_INVALID_REQUEST);
                 };
-                self.sessions.remove(index);
+                let closed = self.sessions.remove(index);
+                if let Some(peer) = closed.peer {
+                    self.closed_sent.push((peer, closed.sent));
+                }
                 for (_, request) in &mut self.requests {
-                    if matches!(request, Request::Receive { session, .. } if *session == session_id)
+                    if matches!(request, Request::Receive { session, .. } | Request::Accept { session } if *session == session_id)
                     {
                         *request = error(NET_ERROR_RESET);
                     }

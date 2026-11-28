@@ -20,7 +20,8 @@ pub struct TcpStats {
     pub out_of_order_queued: u64,
     /// SYNs to a listener that started a passive open.
     pub passive_opens: u64,
-    /// SYNs to a listener whose backlog (or the connection table) was full.
+    /// SYNs to a listener whose backlog (or the connection table) was full; each is answered
+    /// with RST (and counted in `resets_sent` too).
     pub dropped_syn_backlog: u64,
     pub timeouts: u64,
     pub segments_sent: u64,

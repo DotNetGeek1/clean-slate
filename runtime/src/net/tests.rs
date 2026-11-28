@@ -224,3 +224,83 @@ fn a_service_restart_makes_open_sockets_gone() {
     let again = TcpStream::connect(&mut sys, WEB, SOON);
     assert!(again.is_ok(), "a new stream uses the new capability");
 }
+
+const LISTEN_PORT: u16 = 7000;
+const VISITOR: NetAddr = NetAddr::new([10, 0, 2, 2], 51_000);
+
+#[test]
+fn a_listener_accepts_a_peer_and_echoes_it() {
+    let mut sys = kernel();
+    let mut listener = TcpListener::bind(&mut sys, LISTEN_PORT).unwrap();
+    assert_eq!(listener.port(), LISTEN_PORT);
+    assert_eq!(
+        listener.accept(&mut sys, SOON).err(),
+        Some(Error::TimedOut),
+        "nobody has connected"
+    );
+    sys.net_connect_in(LISTEN_PORT, VISITOR, b"ping", false);
+    let (mut stream, peer) = listener.accept(&mut sys, SOON).unwrap();
+    assert_eq!(peer, VISITOR);
+    let mut got = [0u8; 4];
+    let len = stream.read_to_end(&mut sys, &mut got, SOON).unwrap();
+    assert_eq!(&got[..len], b"ping");
+    stream.write_all(&mut sys, &got[..len], SOON).unwrap();
+    assert_eq!(sys.net_sent_to(VISITOR), b"ping");
+    stream.close(&mut sys);
+    listener.close(&mut sys);
+    assert_eq!(sys.net_open_sessions(), 0);
+    assert_eq!(sys.net_outstanding_requests(), 0);
+}
+
+#[test]
+fn a_timed_out_accept_is_kept_for_the_next_call() {
+    let mut sys = kernel();
+    let mut listener = TcpListener::bind(&mut sys, LISTEN_PORT).unwrap();
+    assert_eq!(listener.accept(&mut sys, SOON).err(), Some(Error::TimedOut));
+    assert_eq!(sys.net_outstanding_requests(), 1);
+    sys.net_connect_in(LISTEN_PORT, VISITOR, b"", false);
+    let (stream, _) = listener.accept(&mut sys, SOON).unwrap();
+    let submits = sys
+        .calls()
+        .iter()
+        .filter(|(nr, args)| *nr == SYSCALL_NR_NETWORK_REQUEST && args[0] == NET_SUBOP_SUBMIT)
+        .count();
+    assert_eq!(submits, 3, "open, listen and one accept");
+    stream.close(&mut sys);
+    listener.close(&mut sys);
+    assert_eq!(sys.net_outstanding_requests(), 0);
+}
+
+#[test]
+fn a_port_outside_the_policy_is_refused_and_a_taken_one_is_in_use() {
+    use clean_slate_native_abi::status::STATUS_EADDRINUSE;
+    let mut sys = kernel();
+    sys.net_forbid_listen(7001);
+    assert_eq!(
+        TcpListener::bind(&mut sys, 7001).err(),
+        Some(Error::Failed(STATUS_EACCES))
+    );
+    assert_eq!(sys.net_refusals(), [Some(NetAddr::new([0; 4], 7001))]);
+    let listener = TcpListener::bind(&mut sys, LISTEN_PORT).unwrap();
+    assert_eq!(
+        TcpListener::bind(&mut sys, LISTEN_PORT).err(),
+        Some(Error::Failed(STATUS_EADDRINUSE))
+    );
+    assert_eq!(
+        sys.net_open_sessions(),
+        1,
+        "the refused sessions were closed"
+    );
+    listener.close(&mut sys);
+    assert_eq!(sys.net_open_sessions(), 0);
+}
+
+#[test]
+fn closing_a_listener_with_an_accept_outstanding_cancels_it() {
+    let mut sys = kernel();
+    let mut listener = TcpListener::bind(&mut sys, LISTEN_PORT).unwrap();
+    assert_eq!(listener.accept(&mut sys, SOON).err(), Some(Error::TimedOut));
+    listener.close(&mut sys);
+    assert_eq!(sys.net_outstanding_requests(), 0);
+    assert_eq!(sys.net_open_sessions(), 0);
+}

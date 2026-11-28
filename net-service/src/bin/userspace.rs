@@ -34,7 +34,7 @@ use clean_slate_network::rng::NetRng;
 use clean_slate_network::session::{SessionGeneration, SessionId, SocketKind};
 use clean_slate_network::stack::L3Stack;
 use clean_slate_network::tcp::TcpState;
-use clean_slate_network::tcp::TcpTransport;
+use clean_slate_network::tcp::{ListenerId, TcpTransport};
 use clean_slate_network::tls::{
     tls_transaction, TlsConfig, TlsError, TlsTransactionBudget, TlsTransactionClock,
     TLS_RECORD_BUFFER_BYTES, TLS_SCRATCH_PAGES,
@@ -783,6 +783,16 @@ struct LinuxTcpConnection {
 
 static mut PLAIN_TCP_BY_SESSION: [Option<LinuxTcpConnection>; MAX_SESSIONS as usize] =
     [None; MAX_SESSIONS as usize];
+/// Stream session -> shared-transport listener, owned by the caller that asked to listen
+/// (#359). A session listens or holds a connection, never both.
+#[derive(Clone, Copy)]
+struct PlainTcpListener {
+    owner: clean_slate_network::protocol::TrustedCaller,
+    listener: ListenerId,
+}
+
+static mut PLAIN_TCP_LISTENER_BY_SESSION: [Option<PlainTcpListener>; MAX_SESSIONS as usize] =
+    [None; MAX_SESSIONS as usize];
 /// Linux UDP session -> datagram endpoint, owned by the caller that connected it.
 #[derive(Clone, Copy)]
 struct LinuxUdpEndpoint {
@@ -821,6 +831,9 @@ enum ParkedWork {
     /// Linux TCP receive: completes on data, end of stream or a connection error. No
     /// service deadline, as for UDP.
     TcpReceive { session: SessionId, max_len: u32 },
+    /// Accept on a listening stream session (#359): completes when the listener has an
+    /// established connection. No service deadline; the client cancels by closing.
+    TcpAccept { session: SessionId },
     /// Linux TCP connect waiting for the handshake to finish by `deadline`.
     TcpConnect {
         session: SessionId,
@@ -844,6 +857,7 @@ impl ParkedRequest {
         match self.work {
             ParkedWork::UdpReceive { session, .. }
             | ParkedWork::TcpReceive { session, .. }
+            | ParkedWork::TcpAccept { session }
             | ParkedWork::TcpConnect { session, .. } => Some(session),
             ParkedWork::Resolve { .. } => None,
         }
@@ -1531,6 +1545,51 @@ fn close_linux_tcp_connections_for_caller(
     for slot in mappings.iter_mut() {
         close_tcp_mapping_owned_by(service_generation, caller, slot);
     }
+    let listeners = unsafe { &mut *core::ptr::addr_of_mut!(PLAIN_TCP_LISTENER_BY_SESSION) };
+    for slot in listeners.iter_mut() {
+        close_tcp_listener_owned_by(service_generation, caller, slot);
+    }
+}
+
+fn plain_tcp_listener_slot(session: SessionId) -> Option<&'static mut Option<PlainTcpListener>> {
+    let index = session.index() as usize;
+    if index >= MAX_SESSIONS as usize {
+        return None;
+    }
+    unsafe {
+        Some(&mut *core::ptr::addr_of_mut!(
+            PLAIN_TCP_LISTENER_BY_SESSION[index]
+        ))
+    }
+}
+
+fn plain_tcp_listener(
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+) -> Option<ListenerId> {
+    plain_tcp_listener_slot(session)
+        .and_then(|slot| *slot)
+        .filter(|mapping| mapping.owner == caller)
+        .map(|mapping| mapping.listener)
+}
+
+/// Stops a listener: connections it holds that nobody accepted are reset; accepted ones are
+/// sessions of their own and stay open.
+fn close_tcp_listener_owned_by(
+    service_generation: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    slot: &mut Option<PlainTcpListener>,
+) {
+    let Some(mapping) = slot.filter(|mapping| mapping.owner == caller) else {
+        return;
+    };
+    *slot = None;
+    let now = monotonic_ticks().unwrap_or(0);
+    let _ = shared_tcp_transport_mut().close_listener(
+        now,
+        mapping.listener,
+        plain_tcp_owner(service_generation),
+    );
 }
 
 #[inline(never)]
@@ -1887,6 +1946,10 @@ fn poll_parked(
                 Some((response, 0))
             }
         },
+        ParkedWork::TcpAccept { session } => match try_tcp_accept_once(ctx, caller, session) {
+            Ok(None) => None,
+            Ok(Some(response)) | Err(response) => Some((response, 0)),
+        },
         ParkedWork::Resolve { query_id } => {
             let result = udp_resolver().ok()?.take_result(query_id, caller)?;
             Some((resolve_response(result), 0))
@@ -1995,6 +2058,9 @@ fn handle_service_plain_tcp_connect(
     let Some(slot) = plain_tcp_slot(session) else {
         return LinuxSocketDispatch::Done(invalid, 0);
     };
+    if plain_tcp_listener_slot(session).is_some_and(|listener| listener.is_some()) {
+        return LinuxSocketDispatch::Done(invalid, 0);
+    }
     match *slot {
         Some(mapping) if mapping.owner == caller => {
             let response =
@@ -2070,6 +2136,93 @@ fn handle_service_plain_tcp_send(
     Ok(sent)
 }
 
+/// Stream `listen` (#359): the session becomes a listener on `port` of the service's address.
+/// The policy decision (`authorize_request`) has already let the caller's app listen there.
+fn handle_service_plain_tcp_listen(
+    ctx: &ServiceContext<'_>,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    port: u16,
+) -> NetworkResponse {
+    let invalid = NetworkResponse::Error {
+        code: NetworkError::InvalidRequest.code(),
+    };
+    let (Some(listener_slot), Some(stream_slot)) =
+        (plain_tcp_listener_slot(session), plain_tcp_slot(session))
+    else {
+        return invalid;
+    };
+    let connecting = ctx.parked.slots.iter().flatten().any(|entry| {
+        entry.caller == caller
+            && matches!(entry.work, ParkedWork::TcpConnect { session: s, .. } if s == session)
+    });
+    if listener_slot.is_some() || stream_slot.is_some() || connecting {
+        return invalid;
+    }
+    let owner = plain_tcp_owner(ctx.service_generation);
+    match shared_tcp_transport_mut().listen(owner, port) {
+        Ok(listener) => {
+            *listener_slot = Some(PlainTcpListener {
+                owner: caller,
+                listener,
+            });
+            NetworkResponse::Listen
+        }
+        Err(err) => NetworkResponse::Error { code: err.code() },
+    }
+}
+
+/// One non-blocking accept on a listening session: the oldest established connection, now a
+/// stream session of the caller's, or `None` while the listener has none ready.
+fn try_tcp_accept_once(
+    ctx: &mut ServiceContext<'_>,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+) -> Result<Option<NetworkResponse>, NetworkResponse> {
+    let error = |err: NetworkError| NetworkResponse::Error { code: err.code() };
+    // A listener closed while the accept waited (`close` cancels it first) reads as a reset.
+    let listener = plain_tcp_listener(caller, session).ok_or(error(NetworkError::Reset))?;
+    let owner = plain_tcp_owner(ctx.service_generation);
+    let tcp = shared_tcp_transport_mut();
+    let Some(connection) = tcp.accept(listener, owner).map_err(error)? else {
+        return Ok(None);
+    };
+    let peer = match tcp.table().get(connection, owner) {
+        Ok(conn) => conn.remote,
+        Err(err) => return Err(error(err)),
+    };
+    let accepted = match ctx.service.open_accepted(caller, peer) {
+        Ok(accepted) => accepted,
+        Err(response) => {
+            let _ = tcp.abort(connection, owner);
+            return Err(response);
+        }
+    };
+    match plain_tcp_slot(accepted) {
+        Some(slot) if slot.is_none() => {
+            *slot = Some(LinuxTcpConnection {
+                owner: caller,
+                connection,
+            });
+            Ok(Some(NetworkResponse::Accept {
+                session: accepted,
+                peer,
+            }))
+        }
+        _ => {
+            let _ = tcp.abort(connection, owner);
+            let mut out = [0u8; 0];
+            let _ = ctx.service.handle_request(
+                caller,
+                NetworkRequest::Close { session: accepted },
+                &[],
+                &mut out,
+            );
+            Err(error(NetworkError::InvalidRequest))
+        }
+    }
+}
+
 /// One non-blocking receive attempt on the session's stream: bytes, `Some(0)` at end of
 /// stream, or `None` while the connection has nothing buffered.
 fn try_tcp_receive_once(
@@ -2102,12 +2255,8 @@ fn handle_linux_socket_data_plane(
     request: NetworkRequest,
     payload: &[u8],
 ) -> LinuxSocketDispatch {
-    let session = match request {
-        NetworkRequest::Connect { session, .. }
-        | NetworkRequest::Send { session, .. }
-        | NetworkRequest::Receive { session, .. }
-        | NetworkRequest::Close { session } => session,
-        _ => return LinuxSocketDispatch::NotHandled,
+    let Some(session) = request.session() else {
+        return LinuxSocketDispatch::NotHandled;
     };
     let kind = match ctx.service.session_kind(caller, session) {
         Ok(kind @ (SocketKind::LinuxUdp | SocketKind::LinuxTcp)) => kind,
@@ -2135,6 +2284,29 @@ fn handle_linux_socket_data_plane(
         }
         (NetworkRequest::Connect { dest, .. }, _) => {
             handle_service_plain_tcp_connect(ctx, request_id, caller, session, dest)
+        }
+        // #359: only stream sessions listen.
+        (NetworkRequest::Listen { .. } | NetworkRequest::Accept { .. }, SocketKind::LinuxUdp) => {
+            LinuxSocketDispatch::Done(invalid, 0)
+        }
+        (NetworkRequest::Listen { port, .. }, _) => LinuxSocketDispatch::Done(
+            handle_service_plain_tcp_listen(ctx, caller, session, port),
+            0,
+        ),
+        (NetworkRequest::Accept { .. }, _) => {
+            let accepting = ctx.parked.slots.iter().flatten().any(|entry| {
+                entry.caller == caller
+                    && matches!(entry.work, ParkedWork::TcpAccept { session: s } if s == session)
+            });
+            if accepting {
+                return LinuxSocketDispatch::Done(invalid, 0);
+            }
+            match try_tcp_accept_once(ctx, caller, session) {
+                Ok(Some(response)) | Err(response) => LinuxSocketDispatch::Done(response, 0),
+                Ok(None) => {
+                    park_or_refuse(ctx, request_id, caller, ParkedWork::TcpAccept { session })
+                }
+            }
         }
         (NetworkRequest::Send { payload_len, .. }, _) if payload.len() != payload_len as usize => {
             LinuxSocketDispatch::Done(invalid, 0)
@@ -2174,6 +2346,9 @@ fn handle_linux_socket_data_plane(
                 close_linux_udp_endpoint(caller, session);
             } else {
                 close_linux_tcp_connection(ctx.service_generation, caller, session);
+                if let Some(slot) = plain_tcp_listener_slot(session) {
+                    close_tcp_listener_owned_by(ctx.service_generation, caller, slot);
+                }
             }
             let (response, out_len) =
                 ctx.service

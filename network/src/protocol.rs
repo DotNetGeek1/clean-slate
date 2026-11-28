@@ -63,6 +63,10 @@ pub enum NetworkRequestKind {
     Send = 4,
     Receive = 5,
     Close = 6,
+    /// Makes a stream session a listener on a local port (#359).
+    Listen = 7,
+    /// Takes the next connection a listener's backlog holds (#359).
+    Accept = 8,
 }
 
 impl NetworkRequestKind {
@@ -74,6 +78,8 @@ impl NetworkRequestKind {
             4 => Some(Self::Send),
             5 => Some(Self::Receive),
             6 => Some(Self::Close),
+            7 => Some(Self::Listen),
+            8 => Some(Self::Accept),
             _ => None,
         }
     }
@@ -102,6 +108,16 @@ pub enum NetworkRequest {
         max_len: u32,
     },
     Close {
+        session: SessionId,
+    },
+    /// Listen on our address, `port`, with a stream session that is not connected (#359).
+    /// `Close` on the session stops listening.
+    Listen {
+        session: SessionId,
+        port: u16,
+    },
+    /// The oldest established connection on listening `session`, as a new stream session.
+    Accept {
         session: SessionId,
     },
 }
@@ -156,8 +172,30 @@ impl NetworkRequest {
                 out[6] = NetworkRequestKind::Close as u8;
                 out[8..16].copy_from_slice(&session.raw().to_le_bytes());
             }
+            Self::Listen { session, port } => {
+                out[6] = NetworkRequestKind::Listen as u8;
+                out[8..16].copy_from_slice(&session.raw().to_le_bytes());
+                out[16..18].copy_from_slice(&port.to_le_bytes());
+            }
+            Self::Accept { session } => {
+                out[6] = NetworkRequestKind::Accept as u8;
+                out[8..16].copy_from_slice(&session.raw().to_le_bytes());
+            }
         }
         out
+    }
+
+    /// The session a request acts on; `None` for `Resolve` and `Open`.
+    pub const fn session(&self) -> Option<SessionId> {
+        match *self {
+            Self::Resolve { .. } | Self::Open { .. } => None,
+            Self::Connect { session, .. }
+            | Self::Send { session, .. }
+            | Self::Receive { session, .. }
+            | Self::Close { session }
+            | Self::Listen { session, .. }
+            | Self::Accept { session } => Some(session),
+        }
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, NetworkRequestDecodeError> {
@@ -227,6 +265,19 @@ impl NetworkRequest {
                 ));
                 Ok(Self::Close { session })
             }
+            NetworkRequestKind::Listen => {
+                let session = SessionId::from_raw(u64::from_le_bytes(
+                    bytes[8..16].try_into().expect("slice"),
+                ));
+                let port = u16::from_le_bytes(bytes[16..18].try_into().expect("slice"));
+                Ok(Self::Listen { session, port })
+            }
+            NetworkRequestKind::Accept => {
+                let session = SessionId::from_raw(u64::from_le_bytes(
+                    bytes[8..16].try_into().expect("slice"),
+                ));
+                Ok(Self::Accept { session })
+            }
         }
     }
 }
@@ -255,6 +306,12 @@ pub enum NetworkResponse {
         payload_len: u32,
     },
     Close,
+    Listen,
+    /// The accepted connection's new stream session and its peer.
+    Accept {
+        session: SessionId,
+        peer: SocketAddrV4,
+    },
     Error {
         code: u16,
     },
@@ -303,6 +360,16 @@ impl NetworkResponse {
             Self::Close => {
                 out[6] = NetworkRequestKind::Close as u8;
                 out[7] = NetworkResponseStatus::Ok as u8;
+            }
+            Self::Listen => {
+                out[6] = NetworkRequestKind::Listen as u8;
+                out[7] = NetworkResponseStatus::Ok as u8;
+            }
+            Self::Accept { session, peer } => {
+                out[6] = NetworkRequestKind::Accept as u8;
+                out[7] = NetworkResponseStatus::Ok as u8;
+                out[8..16].copy_from_slice(&session.raw().to_le_bytes());
+                out[16..22].copy_from_slice(&peer.encode());
             }
             Self::Error { code } => {
                 out[7] = NetworkResponseStatus::Error as u8;
@@ -360,6 +427,15 @@ impl NetworkResponse {
                         Ok(Self::Receive { payload_len })
                     }
                     NetworkRequestKind::Close => Ok(Self::Close),
+                    NetworkRequestKind::Listen => Ok(Self::Listen),
+                    NetworkRequestKind::Accept => {
+                        let session = SessionId::from_raw(u64::from_le_bytes(
+                            bytes[8..16].try_into().expect("slice"),
+                        ));
+                        let peer = SocketAddrV4::decode(bytes[16..22].try_into().expect("slice"))
+                            .map_err(|_| NetworkResponseDecodeError::Truncated)?;
+                        Ok(Self::Accept { session, peer })
+                    }
                 }
             }
             other => Err(NetworkResponseDecodeError::InvalidStatus(other)),

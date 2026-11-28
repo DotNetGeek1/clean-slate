@@ -405,8 +405,9 @@ fn emit_network_launch_inputs() {
     println!("cargo::rustc-check-cfg=cfg(clean_slate_fixture_network)");
     // #355: the acceptance kernel runs the M7.8 lane (so it has fixture features) but must be
     // launched like production, with no fixture network and no test CA.
+    // #359: the listen kernel runs the native probe on slirp, with `CLEAN_SLATE_NET_STATIC`.
     if any_feature_enabled(FIXTURE_NETWORK_FEATURES)
-        && !any_feature_enabled(&[NET_ACCEPTANCE_FEATURE])
+        && !any_feature_enabled(&[NET_ACCEPTANCE_FEATURE, NET_LISTEN_FEATURE])
     {
         println!("cargo::rustc-cfg=clean_slate_fixture_network");
     }
@@ -463,6 +464,9 @@ fn emit_network_launch_inputs() {
 
 /// The kernel feature of `cargo xtask test-net-acceptance` (#355).
 const NET_ACCEPTANCE_FEATURE: &str = "net-acceptance-self-test";
+
+/// The kernel feature of `cargo xtask test-m10-net-listen` (#359).
+const NET_LISTEN_FEATURE: &str = "m10-net-listen-self-test";
 
 const PLACEHOLDER_ACCEPTANCE_PROBE: &str =
     "name=probe.invalid,ipv4=0.0.0.0,ttl=0,tls_port=443,silent=0.0.0.0:9,request=00,response=00";

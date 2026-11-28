@@ -1458,6 +1458,7 @@ dependencies = [
  "clean-slate-playground",
  "clean-slate-raster",
  "clean-slate-rootfs",
+ "clean-slate-service-fixtures",
  "clean-slate-store",
  "clean-slate-terminal",
  "clean-slate-ui",

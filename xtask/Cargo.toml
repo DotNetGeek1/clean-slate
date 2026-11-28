@@ -18,6 +18,8 @@ clean-slate-network = { path = "../network", features = ["fixture"] }
 clean-slate-block = { path = "../block", features = ["alloc"] }
 clean-slate-store = { path = "../store" }
 clean-slate-native-abi = { path = "../native-abi" }
+# The probe constants the native network lanes share with the guest (#359).
+clean-slate-service-fixtures = { path = "../service-fixtures" }
 rcgen = { version = "=0.13.2", default-features = false, features = ["pem", "crypto", "ring"] }
 rustls = { version = "=0.23.26", default-features = false, features = ["ring", "std", "tls12"] }
 time = { version = "=0.3.39", default-features = false, features = ["formatting", "parsing", "macros"] }

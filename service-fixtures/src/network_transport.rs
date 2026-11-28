@@ -393,12 +393,12 @@ mod lease_report_tests {
 #[cfg(test)]
 mod native_abi_mirrors_the_service_protocol {
     use clean_slate_native_abi::net::{
-        net_error_status, NetAddr, NetRequest, NetResponse, NET_ERROR_CLOSED,
-        NET_ERROR_DESTINATION_DENIED, NET_ERROR_INVALID_REQUEST, NET_ERROR_NOT_FOUND,
-        NET_ERROR_PROTOCOL, NET_ERROR_QUEUE_FULL, NET_ERROR_RESET, NET_ERROR_SESSION_EXHAUSTED,
-        NET_ERROR_TIMEOUT, NET_ERROR_UNREACHABLE, NET_FRAME_BYTES, NET_FRAME_MAGIC,
-        NET_FRAME_VERSION, NET_MAX_HOSTNAME_BYTES, NET_MAX_PAYLOAD_BYTES, NET_SOCKET_DATAGRAM,
-        NET_SOCKET_STREAM, NET_SOCKET_TLS_EXCHANGE,
+        net_error_status, NetAddr, NetRequest, NetResponse, NET_ERROR_ADDRESS_IN_USE,
+        NET_ERROR_CLOSED, NET_ERROR_DESTINATION_DENIED, NET_ERROR_INVALID_REQUEST,
+        NET_ERROR_NOT_FOUND, NET_ERROR_PROTOCOL, NET_ERROR_QUEUE_FULL, NET_ERROR_RESET,
+        NET_ERROR_SESSION_EXHAUSTED, NET_ERROR_TIMEOUT, NET_ERROR_UNREACHABLE, NET_FRAME_BYTES,
+        NET_FRAME_MAGIC, NET_FRAME_VERSION, NET_MAX_HOSTNAME_BYTES, NET_MAX_PAYLOAD_BYTES,
+        NET_SOCKET_DATAGRAM, NET_SOCKET_STREAM, NET_SOCKET_TLS_EXCHANGE,
     };
     use clean_slate_native_abi::status::{STATUS_EACCES, STATUS_ESTALE};
     use clean_slate_network::addr::{BoundedHostname, Ipv4Addr, SocketAddrV4};
@@ -512,6 +512,22 @@ mod native_abi_mirrors_the_service_protocol {
                 },
                 NetworkRequest::Close { session },
             ),
+            (
+                NetRequest::Listen {
+                    session: session.raw(),
+                    port: 7000,
+                },
+                NetworkRequest::Listen {
+                    session,
+                    port: 7000,
+                },
+            ),
+            (
+                NetRequest::Accept {
+                    session: session.raw(),
+                },
+                NetworkRequest::Accept { session },
+            ),
         ];
         for (native, service) in cases {
             let frame = native.encode().unwrap();
@@ -550,6 +566,17 @@ mod native_abi_mirrors_the_service_protocol {
                 NetResponse::Receive { len: 31 },
             ),
             (NetworkResponse::Close, NetResponse::Close),
+            (NetworkResponse::Listen, NetResponse::Listen),
+            (
+                NetworkResponse::Accept {
+                    session,
+                    peer: SocketAddrV4::new(Ipv4Addr::new([10, 0, 2, 2]), 51_000),
+                },
+                NetResponse::Accept {
+                    session: session.raw(),
+                    peer: NetAddr::new([10, 0, 2, 2], 51_000),
+                },
+            ),
             (
                 NetworkResponse::Error { code: 8 },
                 NetResponse::Error { code: 8 },
@@ -592,6 +619,7 @@ mod native_abi_mirrors_the_service_protocol {
             (NET_ERROR_SESSION_EXHAUSTED, NetworkError::SessionExhausted),
             (NET_ERROR_NOT_FOUND, NetworkError::NotFound),
             (NET_ERROR_CLOSED, NetworkError::Closed),
+            (NET_ERROR_ADDRESS_IN_USE, NetworkError::AddressInUse),
         ];
         for (code, error) in named {
             assert_eq!(code, error.code(), "{error:?}");

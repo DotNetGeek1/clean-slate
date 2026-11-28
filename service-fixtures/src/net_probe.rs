@@ -7,6 +7,12 @@
 //! fetches a page over a TCP stream, makes a TLS exchange and a UDP round trip, all through the
 //! network service, then connects to [`NET_PROBE_DENIED`], which its policy does not name: the
 //! service refuses it and records the refusal in the audit log, which the kernel checks.
+//!
+//! The same probe runs the #359 listen lane (`m10-net-listen-self-test`) when the kernel's
+//! [`NET_PROBE_CHECK_MODE`] answers [`NET_PROBE_MODE_LISTEN`]: it listens on
+//! [`NET_PROBE_LISTEN_PORT`], is refused [`NET_PROBE_LISTEN_DENIED_PORT`] (audited), and echoes
+//! what the host sends through QEMU's `hostfwd` on the first connection that carries
+//! [`NET_PROBE_ECHO`].
 
 use clean_slate_capability::NetTransport;
 use clean_slate_network::addr::Ipv4Addr;
@@ -67,6 +73,13 @@ pub const NET_PROBE_REQUEST: &[u8] = b"clean-slate-m7-fixture-request";
 pub const NET_PROBE_PAGE: &[u8] = b"clean-slate-m7-fixture-response";
 pub const NET_PROBE_DATAGRAM: &[u8] = b"clean-slate-native-datagram";
 
+/// The port the listen lane's probe listens on; its policy names only this one.
+pub const NET_PROBE_LISTEN_PORT: u16 = 7000;
+/// A port the probe's policy does not let it listen on.
+pub const NET_PROBE_LISTEN_DENIED_PORT: u16 = 7001;
+/// What the host sends in through `hostfwd` and expects back.
+pub const NET_PROBE_ECHO: &[u8] = b"clean-slate-native-listen-echo";
+
 const fn peer_port(transport: NetTransport, port: u16) -> DestinationRule {
     DestinationRule {
         transport,
@@ -87,6 +100,7 @@ pub const NET_PROBE_POLICY: AppNetworkPolicy = AppNetworkPolicy {
         peer_port(NetTransport::Tcp, NET_PROBE_TLS_PORT),
         peer_port(NetTransport::Udp, NET_PROBE_UDP_PORT),
     ],
+    listen_ports: &[(NET_PROBE_LISTEN_PORT, NET_PROBE_LISTEN_PORT)],
 };
 
 /// `SYSCALL_NR_CAP_GRANT` harness sub-operation of the M6 fixtures, which the lane serves for
@@ -103,6 +117,18 @@ pub const NET_PROBE_CHECK_DONE: u64 = 3;
 /// Lane check: a step failed; the argument is [`NetProbeFailure::encode`]. The kernel ends the
 /// boot there, with a failure.
 pub const NET_PROBE_CHECK_FAILED: u64 = 4;
+/// Lane check: which steps to run. The kernel answers [`NET_PROBE_MODE_LISTEN`] in the listen
+/// lane; any other answer (the client lane's kernel, or one that does not know the check)
+/// means the client steps.
+pub const NET_PROBE_CHECK_MODE: u64 = 5;
+/// Lane check: the probe listens; the argument is the port. The host may connect from now.
+pub const NET_PROBE_CHECK_LISTENING: u64 = 6;
+/// Lane check: the listen on [`NET_PROBE_LISTEN_DENIED_PORT`] was refused; the kernel checks the
+/// audit log holds the refusal. The argument is the port.
+pub const NET_PROBE_CHECK_LISTEN_REFUSED: u64 = 7;
+
+/// [`NET_PROBE_CHECK_MODE`]'s answer for the listen lane.
+pub const NET_PROBE_MODE_LISTEN: u64 = 1;
 
 /// A step of the probe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,16 +140,28 @@ pub enum NetProbeStep {
     Tls = 4,
     Udp = 5,
     Denied = 6,
+    /// Listen lane (#359): listen on the policy's port.
+    Listen = 7,
+    /// Listen lane: listen on a port the policy does not name; must be refused.
+    ListenDenied = 8,
+    /// Listen lane: accept the host's connection.
+    Accept = 9,
+    /// Listen lane: read the host's bytes and send them back.
+    Echo = 10,
 }
 
 impl NetProbeStep {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 10] = [
         Self::Resolve,
         Self::Connect,
         Self::Fetch,
         Self::Tls,
         Self::Udp,
         Self::Denied,
+        Self::Listen,
+        Self::ListenDenied,
+        Self::Accept,
+        Self::Echo,
     ];
 
     pub const fn code(self) -> u64 {
@@ -149,6 +187,10 @@ impl NetProbeStep {
             Self::Tls => "tls",
             Self::Udp => "udp",
             Self::Denied => "denied",
+            Self::Listen => "listen",
+            Self::ListenDenied => "listen-denied",
+            Self::Accept => "accept",
+            Self::Echo => "echo",
         }
     }
 }
@@ -241,6 +283,14 @@ mod tests {
         assert!(authorizer
             .authorize_target(&probe, NetworkTarget::Resolve)
             .is_ok());
+        let listen = |port| {
+            authorizer
+                .authorize_target(&probe, NetworkTarget::Listen { port })
+                .is_ok()
+        };
+        assert!(listen(NET_PROBE_LISTEN_PORT));
+        assert!(!listen(NET_PROBE_LISTEN_DENIED_PORT));
+        assert!(!listen(NET_PROBE_TCP_PORT));
         assert_eq!(NET_PROBE_DENIED, (NET_PROBE_PEER, NET_PROBE_DENIED_PORT));
         assert_eq!(
             NET_PROBE_PEER,

@@ -23,7 +23,8 @@ pub const TCP_POLL_RX_BUDGET: usize = crate::limits::MAX_DEVICE_RX_QUEUE_DEPTH a
 pub const MAX_TCP_LISTENERS: usize = 4;
 
 /// Connections a listener holds that the application has not accepted yet (half-open
-/// SYN-RECEIVED ones included), so a SYN flood cannot take the whole table.
+/// SYN-RECEIVED ones included), so a SYN flood cannot take the whole table. A SYN past it is
+/// answered with RST and counted in [`TcpStats::dropped_syn_backlog`].
 pub const TCP_LISTEN_BACKLOG: usize = 4;
 
 /// Most segments one send pass puts on the wire for a connection.
@@ -474,7 +475,7 @@ impl<L: NetworkLink> TcpTransport<L> {
                 .flatten()
                 .any(|c| c.local.port == port);
         if in_use {
-            return Err(NetworkError::InvalidRequest);
+            return Err(NetworkError::AddressInUse);
         }
         let index = self
             .table
@@ -754,11 +755,39 @@ impl<L: NetworkLink> TcpTransport<L> {
             .table
             .alloc_passive_slot(now, listener, local, remote, seg)
         else {
+            // #359: a full backlog answers with RST, so the peer fails at once instead of
+            // retrying its SYN into a listener that has no room.
             self.stats.dropped_syn_backlog += 1;
+            self.refuse_syn(now, local, remote, seg);
             return;
         };
         self.stats.passive_opens += 1;
         let _ = self.send_syn_at(now, index);
+    }
+
+    /// RST|ACK for a SYN no connection takes (RFC 793 §3.4, reset generation case 1).
+    fn refuse_syn(
+        &mut self,
+        now: u64,
+        local: SocketAddrV4,
+        remote: SocketAddrV4,
+        syn: &TcpSegment,
+    ) {
+        let rst = TcpSegment {
+            src_port: local.port,
+            dst_port: remote.port,
+            seq: 0,
+            ack: syn.seq.wrapping_add(1),
+            data_offset: 5,
+            flags: TcpFlags::RST.union(TcpFlags::ACK),
+            window: 0,
+            checksum: 0,
+            urgent: 0,
+            mss_option: None,
+        };
+        if self.transmit_raw(now, remote.addr, &rst, &[]).is_ok() {
+            self.stats.resets_sent += 1;
+        }
     }
 
     /// Our SYN (active) or SYN-ACK (passive).

@@ -8,7 +8,8 @@
 //! and from it a client capability bound to the live network-service instance, re-issued each
 //! time an instance registers (`NET_RESOLVE | NET_CONNECT | NET_SEND | NET_RECEIVE`, never raw NIC
 //! authority). The kernel also attributes the process to its manifest row, which the service
-//! reads as the caller's app, so the per-app destination policy decides what it may reach.
+//! reads as the caller's app, so the per-app destination policy decides what it may reach and
+//! which ports it may listen on. `LISTEN` needs `NET_CONNECT` and `ACCEPT` `NET_RECEIVE`.
 //! Identity is the kernel's: nothing in a frame names the caller.
 //!
 //! `NETWORK_CAPABILITY` (`rdi` = [`NETWORK_CLIENT_DEVICE_ID`], `rsi` =
@@ -51,6 +52,8 @@
 //! | `SEND` | `[8..16]` session, `[16..20]` payload length | `[8..12]` bytes accepted |
 //! | `RECEIVE` | `[8..16]` session, `[16..20]` most bytes wanted | `[8..12]` payload length |
 //! | `CLOSE` | `[8..16]` session | — |
+//! | `LISTEN` | `[8..16]` session, `[16..18]` local port | — |
+//! | `ACCEPT` | `[8..16]` listening session | `[8..16]` new session, `[16..20]` peer IPv4 address, `[20..22]` peer port |
 //!
 //! An error response has status [`NET_RESPONSE_ERROR`] and `[8..10]` a service error code
 //! ([`net_error_status`] turns it into a status).
@@ -60,6 +63,14 @@
 //! - [`NET_SOCKET_STREAM`]: a TCP stream. `CONNECT` completes once the handshake has; `SEND`
 //!   may accept fewer bytes than offered; `RECEIVE` completes when bytes arrive, with length 0 at
 //!   the end of the stream. `CLOSE` cancels an outstanding `RECEIVE` (it completes with a reset).
+//!   Instead of `CONNECT`, a stream may `LISTEN` on a local port (#359): SYNs to that port on
+//!   the service's address then start connections the listener holds, up to a small backlog
+//!   (past it a SYN is answered with a reset). `ACCEPT` completes with the oldest established
+//!   one as a new stream session of the caller's, already connected, and its peer; it waits
+//!   while none is ready. `CLOSE` on a listener stops listening, resets the connections not yet
+//!   accepted and cancels an outstanding `ACCEPT`; sessions already accepted stay open. The
+//!   ports an app may listen on are its row's policy: another port is refused (`EACCES`) and
+//!   the refusal audited, and a port already in use is `EADDRINUSE`.
 //! - [`NET_SOCKET_DATAGRAM`]: a UDP socket, connected to one peer by `CONNECT` before `SEND`;
 //!   `RECEIVE` completes with one datagram.
 //! - [`NET_SOCKET_TLS_EXCHANGE`]: one TLS request and response. `CONNECT` only records the
@@ -71,8 +82,9 @@
 //! datagram kinds the Linux socket layer also uses, and the M7 TLS kind.
 
 use crate::status::{
-    STATUS_EACCES, STATUS_ECONNRESET, STATUS_EHOSTUNREACH, STATUS_EINVAL, STATUS_EIO,
-    STATUS_ENOBUFS, STATUS_ENOENT, STATUS_EPIPE, STATUS_EPROTO, STATUS_ESTALE, STATUS_ETIMEDOUT,
+    STATUS_EACCES, STATUS_EADDRINUSE, STATUS_ECONNRESET, STATUS_EHOSTUNREACH, STATUS_EINVAL,
+    STATUS_EIO, STATUS_ENOBUFS, STATUS_ENOENT, STATUS_EPIPE, STATUS_EPROTO, STATUS_ESTALE,
+    STATUS_ETIMEDOUT,
 };
 
 pub use clean_slate_capability::syscall_abi::{
@@ -107,6 +119,8 @@ pub const NET_KIND_CONNECT: u8 = 3;
 pub const NET_KIND_SEND: u8 = 4;
 pub const NET_KIND_RECEIVE: u8 = 5;
 pub const NET_KIND_CLOSE: u8 = 6;
+pub const NET_KIND_LISTEN: u8 = 7;
+pub const NET_KIND_ACCEPT: u8 = 8;
 
 pub const NET_RESPONSE_OK: u8 = 0;
 pub const NET_RESPONSE_ERROR: u8 = 1;
@@ -148,6 +162,8 @@ pub enum NetRequest<'a> {
     Send { session: u64, len: u32 },
     Receive { session: u64, max_len: u32 },
     Close { session: u64 },
+    Listen { session: u64, port: u16 },
+    Accept { session: u64 },
 }
 
 /// Checks a name `RESOLVE` can carry.
@@ -197,6 +213,11 @@ impl NetRequest<'_> {
                 out[16..20].copy_from_slice(&max_len.to_le_bytes());
             }
             Self::Close { session } => session_and(&mut out, NET_KIND_CLOSE, session),
+            Self::Listen { session, port } => {
+                session_and(&mut out, NET_KIND_LISTEN, session);
+                out[16..18].copy_from_slice(&port.to_le_bytes());
+            }
+            Self::Accept { session } => session_and(&mut out, NET_KIND_ACCEPT, session),
         }
         Ok(out)
     }
@@ -227,6 +248,12 @@ pub enum NetResponse {
         len: u32,
     },
     Close,
+    Listen,
+    /// The accepted connection's own stream session, and its peer.
+    Accept {
+        session: u64,
+        peer: NetAddr,
+    },
     /// A service error code; see [`net_error_status`].
     Error {
         code: u16,
@@ -260,17 +287,21 @@ impl NetResponse {
                 ip: [frame[8], frame[9], frame[10], frame[11]],
                 ttl: word(12),
             },
-            NET_KIND_OPEN => {
-                let mut session = [0u8; 8];
-                session.copy_from_slice(&frame[8..16]);
-                Self::Open {
-                    session: u64::from_le_bytes(session),
-                }
-            }
+            NET_KIND_OPEN => Self::Open {
+                session: session_at(frame),
+            },
             NET_KIND_CONNECT => Self::Connect,
             NET_KIND_SEND => Self::Send { accepted: word(8) },
             NET_KIND_RECEIVE => Self::Receive { len: word(8) },
             NET_KIND_CLOSE => Self::Close,
+            NET_KIND_LISTEN => Self::Listen,
+            NET_KIND_ACCEPT => Self::Accept {
+                session: session_at(frame),
+                peer: NetAddr::new(
+                    [frame[16], frame[17], frame[18], frame[19]],
+                    u16::from_le_bytes([frame[20], frame[21]]),
+                ),
+            },
             _ => return Err(BadFrame),
         })
     }
@@ -299,6 +330,13 @@ impl NetResponse {
                 out[8..12].copy_from_slice(&len.to_le_bytes());
             }
             Self::Close => out[6] = NET_KIND_CLOSE,
+            Self::Listen => out[6] = NET_KIND_LISTEN,
+            Self::Accept { session, peer } => {
+                out[6] = NET_KIND_ACCEPT;
+                out[8..16].copy_from_slice(&session.to_le_bytes());
+                out[16..20].copy_from_slice(&peer.ip);
+                out[20..22].copy_from_slice(&peer.port.to_le_bytes());
+            }
             Self::Error { code } => {
                 out[7] = NET_RESPONSE_ERROR;
                 out[8..10].copy_from_slice(&code.to_le_bytes());
@@ -306,6 +344,12 @@ impl NetResponse {
         }
         out
     }
+}
+
+fn session_at(frame: &[u8; NET_FRAME_BYTES]) -> u64 {
+    let mut session = [0u8; 8];
+    session.copy_from_slice(&frame[8..16]);
+    u64::from_le_bytes(session)
 }
 
 /// Service error codes (`clean_slate_network::error::NetworkError::code`).
@@ -325,6 +369,8 @@ pub const NET_ERROR_NOT_FOUND: u16 = 13;
 pub const NET_ERROR_CLOSED: u16 = 14;
 /// The caller's app may not reach the destination, or resolve names (#221 stage E).
 pub const NET_ERROR_DESTINATION_DENIED: u16 = 15;
+/// A `LISTEN` on a port already listened on or in use (#359).
+pub const NET_ERROR_ADDRESS_IN_USE: u16 = 16;
 
 /// The native status a service error code means. A TLS exchange that fails for any reason
 /// (handshake, peer identity, timeout) answers [`NET_ERROR_TIMEOUT`], so it reads `ETIMEDOUT`.
@@ -343,6 +389,7 @@ pub const fn net_error_status(code: u16) -> u64 {
         NET_ERROR_QUEUE_FULL | NET_ERROR_SESSION_EXHAUSTED => STATUS_ENOBUFS,
         NET_ERROR_NOT_FOUND => STATUS_ENOENT,
         NET_ERROR_CLOSED => STATUS_EPIPE,
+        NET_ERROR_ADDRESS_IN_USE => STATUS_EADDRINUSE,
         _ => STATUS_EINVAL,
     }
 }
@@ -392,6 +439,11 @@ mod tests {
             NetResponse::Send { accepted: 17 },
             NetResponse::Receive { len: 4096 },
             NetResponse::Close,
+            NetResponse::Listen,
+            NetResponse::Accept {
+                session: 0x1_0000_0009,
+                peer: NetAddr::new([10, 0, 2, 2], 51_000),
+            },
             NetResponse::Error { code: 15 },
         ] {
             assert_eq!(NetResponse::decode(&response.encode()), Ok(response));
@@ -409,6 +461,10 @@ mod tests {
         );
         assert_eq!(net_error_status(NET_ERROR_STALE_GENERATION), STATUS_ESTALE);
         assert_eq!(net_error_status(NET_ERROR_CLOSED), STATUS_EPIPE);
+        assert_eq!(
+            net_error_status(NET_ERROR_ADDRESS_IN_USE),
+            STATUS_EADDRINUSE
+        );
         assert_eq!(net_error_status(999), STATUS_EINVAL);
     }
 }

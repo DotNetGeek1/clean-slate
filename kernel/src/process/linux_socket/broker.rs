@@ -97,7 +97,9 @@ fn session_generation_for_broker(
         NetworkRequest::Connect { .. }
         | NetworkRequest::Send { .. }
         | NetworkRequest::Receive { .. }
-        | NetworkRequest::Close { .. } => {
+        | NetworkRequest::Close { .. }
+        | NetworkRequest::Listen { .. }
+        | NetworkRequest::Accept { .. } => {
             live_network_service_generation().map(|g| SessionGeneration::new(u64::from(g.0)))
         }
         _ => caller_session,
@@ -133,6 +135,9 @@ pub(crate) fn broker_sync(
             NetworkRequest::Receive { .. } => NetworkOp::Receive,
             NetworkRequest::Close { .. } => NetworkOp::Receive,
             NetworkRequest::Resolve { .. } => NetworkOp::Resolve,
+            // Native only (#359); Linux `bind`/`listen` are not brokered yet (#222).
+            NetworkRequest::Listen { .. } => NetworkOp::Connect,
+            NetworkRequest::Accept { .. } => NetworkOp::Receive,
         };
         if let Err(reason) = authorize_network_op(holder, handle, op, effective_generation) {
             return Err(Err(denial_errno(reason)));

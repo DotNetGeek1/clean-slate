@@ -753,11 +753,18 @@ fn listen_backlog_bounds_half_open_connections() {
     for i in 0..TCP_LISTEN_BACKLOG as u16 {
         assert!(peer_syn(&mut guest, &mut peer, 0, 7100 + i).is_some());
     }
-    assert!(
-        peer_syn(&mut guest, &mut peer, 0, 7200).is_none(),
-        "backlog full"
-    );
+    // #359: a full backlog refuses the SYN with RST|ACK, so the peer fails at once.
+    let refused = peer_syn(&mut guest, &mut peer, 0, 7200).expect("backlog full: RST");
+    assert!(refused
+        .seg
+        .flags
+        .contains(TcpFlags::RST.union(TcpFlags::ACK)));
+    assert!(!refused.seg.flags.contains(TcpFlags::SYN));
+    assert_eq!(refused.seg.ack, PEER_ISS + 1);
+    assert_eq!(refused.seg.dst_port, 7200);
     assert_eq!(guest.stats().dropped_syn_backlog, 1);
+    let resets_before_close = guest.stats().resets_sent;
+    assert_eq!(resets_before_close, 1);
     assert_eq!(guest.connections_in_use(), TCP_LISTEN_BACKLOG);
 
     // Closing the listener resets the connections nobody accepted.
@@ -804,7 +811,7 @@ fn listener_ids_are_owned_and_ports_exclusive() {
     let listener = guest.listen(OWNER, LISTEN_PORT).unwrap();
     assert_eq!(
         guest.listen(OTHER, LISTEN_PORT).unwrap_err(),
-        NetworkError::InvalidRequest
+        NetworkError::AddressInUse
     );
     assert_eq!(
         guest.listen(OWNER, 0).unwrap_err(),
