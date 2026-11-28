@@ -20,7 +20,9 @@ use clean_slate_capability::NetTransport;
 use clean_slate_network::addr::Ipv4Addr;
 use clean_slate_service_lifecycle::ServiceId;
 
-use crate::manifest::{Grant, RestartSpec, ServiceImage, ServiceSpec, Start, NETWORK_SERVICE_SPEC};
+use crate::manifest::{
+    Grant, Liveness, RestartSpec, ServiceImage, ServiceSpec, Start, NETWORK_SERVICE_SPEC,
+};
 use crate::network_policy::{AppNetworkPolicy, DestinationRule, Peer};
 use crate::NETWORK_SERVICE_ID;
 
@@ -39,6 +41,7 @@ pub const NET_PROBE_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: 0,
     launch_name: None,
     start: Start::AtBoot,
+    liveness: Liveness::Off,
 };
 
 /// The system network row without its storage dependency: the lane runs no storage service.

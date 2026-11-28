@@ -181,7 +181,7 @@ mod tests {
     use crate::system_init::tests::Harness;
     use clean_slate_native_abi::launcher::{AppName, AppState, StartResult};
     use clean_slate_service_fixtures::manifest::{
-        RestartSpec, ServiceSpec, Start, CONSOLE_SERVICE_SPEC, PLAYGROUND_SERVICE_SPEC,
+        Liveness, RestartSpec, ServiceSpec, Start, CONSOLE_SERVICE_SPEC, PLAYGROUND_SERVICE_SPEC,
         SYSTEM_MANIFEST,
     };
     use clean_slate_service_fixtures::{CONSOLE_SERVICE_ID, PLAYGROUND_SERVICE_ID};
@@ -218,6 +218,7 @@ mod tests {
             grants: &[],
             restart: RestartSpec::Never,
             start: Start::OnRequest,
+            liveness: Liveness::Off,
             ..PLAYGROUND_SERVICE_SPEC
         },
     ];

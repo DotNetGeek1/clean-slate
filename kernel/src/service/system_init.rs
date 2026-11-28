@@ -839,6 +839,7 @@ mod tests {
             "on_service_launched",
             "on_service_ready",
             "on_idle",
+            "health_report_muted",
         ];
         for name in exported {
             assert!(entry_points.contains(name), "no gated call to {name}");

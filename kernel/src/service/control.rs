@@ -132,6 +132,15 @@ pub(crate) enum ServiceReadyRefusal {
     NotStarting,
 }
 
+/// Why a `SERVICE_HEALTH` report was refused. A refusal changes nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ServiceHealthRefusal {
+    /// The caller is not the live instance of a declared service.
+    NotAServiceInstance,
+    /// The caller's instance is not running.
+    NotRunning,
+}
+
 pub(crate) struct ServiceLifecycleController {
     services: [ServiceRecord; SERVICE_REGISTRY_CAPACITY],
     pending: [Option<LifecycleEvent>; SERVICE_PENDING_EVENTS],
@@ -140,6 +149,9 @@ pub(crate) struct ServiceLifecycleController {
     /// `pending` so an accepted report never depends on queue space. A newer instance's
     /// report replaces an older one still unpolled.
     ready_pending: [Option<LifecycleEvent>; SERVICE_REGISTRY_CAPACITY],
+    /// #376: the latest `SERVICE_HEALTH` message per service, indexed like `services` and kept
+    /// out of `pending` like the ready messages. A newer report replaces one still unpolled.
+    health_pending: [Option<LifecycleEvent>; SERVICE_REGISTRY_CAPACITY],
     /// #373 stop notices, indexed like `services`.
     stops: [StopNotice; SERVICE_REGISTRY_CAPACITY],
     next_scheduler_slot: usize,
@@ -157,6 +169,7 @@ impl ServiceLifecycleController {
             pending: [None; SERVICE_PENDING_EVENTS],
             pending_count: 0,
             ready_pending: [None; SERVICE_REGISTRY_CAPACITY],
+            health_pending: [None; SERVICE_REGISTRY_CAPACITY],
             stops: [StopNotice::NONE; SERVICE_REGISTRY_CAPACITY],
             next_scheduler_slot: 0,
             kernel_root_frame: 0,
@@ -173,6 +186,7 @@ impl ServiceLifecycleController {
         self.pending = [None; SERVICE_PENDING_EVENTS];
         self.pending_count = 0;
         self.ready_pending = [None; SERVICE_REGISTRY_CAPACITY];
+        self.health_pending = [None; SERVICE_REGISTRY_CAPACITY];
         self.stops = [StopNotice::NONE; SERVICE_REGISTRY_CAPACITY];
         self.next_scheduler_slot = 0;
     }
@@ -258,9 +272,10 @@ impl ServiceLifecycleController {
         self.push_pending(event)
     }
 
-    /// The next message for `service`: its queued event or its ready message, whichever names
-    /// the older instance. For the same instance the ready message goes first, since an
-    /// instance reports ready before it can exit or fault.
+    /// The next message for `service`: its queued event, its ready message or its health
+    /// message, whichever names the oldest instance. For the same instance the ready message
+    /// goes first and the health message second: an instance reports ready before it may report
+    /// health (only a running instance may), and both before it can exit or fault.
     pub(crate) fn poll_pending_event(
         &mut self,
         service: ServiceId,
@@ -269,27 +284,36 @@ impl ServiceLifecycleController {
             .pending
             .iter()
             .position(|entry| entry.is_some_and(|event| event.instance.service == service));
-        let ready = self
-            .service_index(service)
-            .filter(|&index| self.ready_pending[index].is_some());
-        let take_ready = match (queued, ready) {
-            (_, None) => false,
-            (None, Some(_)) => true,
-            (Some(queued), Some(ready)) => {
-                let queued_generation = self.pending[queued].map(|event| event.instance.generation);
-                let ready_generation =
-                    self.ready_pending[ready].map(|event| event.instance.generation);
-                ready_generation <= queued_generation
+        let index = self.service_index(service);
+        let generation_of =
+            |entry: Option<LifecycleEvent>| entry.map(|event| event.instance.generation);
+        // Lower sorts first: (generation, rank).
+        let mut candidates = [
+            index
+                .and_then(|index| generation_of(self.ready_pending[index]))
+                .map(|generation| (generation, 0u8)),
+            index
+                .and_then(|index| generation_of(self.health_pending[index]))
+                .map(|generation| (generation, 1u8)),
+            queued
+                .and_then(|queued| generation_of(self.pending[queued]))
+                .map(|generation| (generation, 2u8)),
+        ];
+        candidates.sort_unstable_by(|a, b| match (a, b) {
+            (Some(a), Some(b)) => a.cmp(b),
+            (Some(_), None) => core::cmp::Ordering::Less,
+            (None, Some(_)) => core::cmp::Ordering::Greater,
+            (None, None) => core::cmp::Ordering::Equal,
+        });
+        match (candidates[0].map(|(_, rank)| rank), index, queued) {
+            (Some(0), Some(index), _) => Ok(self.ready_pending[index].take()),
+            (Some(1), Some(index), _) => Ok(self.health_pending[index].take()),
+            (Some(2), _, Some(queued)) => {
+                self.pending_count = self.pending_count.saturating_sub(1);
+                Ok(self.pending[queued].take())
             }
-        };
-        if take_ready {
-            return Ok(ready.and_then(|index| self.ready_pending[index].take()));
+            _ => Ok(None),
         }
-        let Some(queued) = queued else {
-            return Ok(None);
-        };
-        self.pending_count = self.pending_count.saturating_sub(1);
-        Ok(self.pending[queued].take())
     }
 
     pub(crate) fn poll_pending_event_authorized(
@@ -322,6 +346,7 @@ impl ServiceLifecycleController {
             .pending
             .iter()
             .chain(self.ready_pending.iter())
+            .chain(self.health_pending.iter())
             .flatten()
             .map(|event| event.instance.service)
             .find(|service| service.0 != 0 && scope.covers(*service)))
@@ -367,6 +392,42 @@ impl ServiceLifecycleController {
             Some(LifecycleEvent::new(instance, LifecycleEventKind::Ready));
         wake_lifecycle_waiters();
         Ok(instance)
+    }
+
+    /// #376 `SERVICE_HEALTH` from `pid`: the live instance it is, when that instance may report.
+    /// Only a running instance may; the check changes nothing.
+    pub(crate) fn health_report_instance(
+        &self,
+        pid: u64,
+    ) -> Result<ServiceInstanceId, ServiceHealthRefusal> {
+        let index = self
+            .live_index_for_pid(pid)
+            .ok_or(ServiceHealthRefusal::NotAServiceInstance)?;
+        let record = self.services[index];
+        let live = record
+            .live
+            .ok_or(ServiceHealthRefusal::NotAServiceInstance)?;
+        if record.state != ServiceLifecycleState::Running {
+            return Err(ServiceHealthRefusal::NotRunning);
+        }
+        Ok(ServiceInstanceId::new(
+            record.service,
+            live.generation,
+            ProcessId(live.pid),
+            DomainId(live.domain_id),
+        ))
+    }
+
+    /// Stores `instance`'s health report, replacing any still unpolled, and wakes lifecycle
+    /// waiters. `instance` comes from [`Self::health_report_instance`].
+    pub(crate) fn store_health_report(&mut self, instance: ServiceInstanceId, status: u32) {
+        let Some(index) = self.service_index(instance.service) else {
+            return;
+        };
+        let mut event = LifecycleEvent::new(instance, LifecycleEventKind::HealthReported);
+        event.status_code = status;
+        self.health_pending[index] = Some(event);
+        wake_lifecycle_waiters();
     }
 
     #[allow(dead_code)]
@@ -1728,7 +1789,9 @@ pub(crate) unsafe fn service_lifecycle_controller_mut() -> &'static mut ServiceL
 mod tests {
     use super::*;
     use crate::mm::frame_allocator::PageAllocator;
-    use clean_slate_service_fixtures::{STORAGE_SERVICE_ID, STORAGE_UNAUTHORIZED_SERVICE_ID};
+    use clean_slate_service_fixtures::{
+        CONSOLE_SERVICE_ID, STORAGE_SERVICE_ID, STORAGE_UNAUTHORIZED_SERVICE_ID,
+    };
 
     fn test_allocator() -> PageAllocator {
         use crate::boot::uefi::normalize_memory_map_boxed;
@@ -2071,7 +2134,7 @@ mod tests {
 
     #[test]
     fn launch_grants_come_from_the_active_manifest() {
-        use clean_slate_service_fixtures::manifest::{RestartSpec, ServiceImage, Start};
+        use clean_slate_service_fixtures::manifest::{Liveness, RestartSpec, ServiceImage, Start};
         static SCENARIO: &[ServiceSpec] = &[ServiceSpec {
             id: STORAGE_SERVICE_ID,
             image: ServiceImage::Storage,
@@ -2083,6 +2146,7 @@ mod tests {
             memory_pages: 0,
             launch_name: None,
             start: Start::AtBoot,
+            liveness: Liveness::Off,
         }];
 
         let mut controller = ServiceLifecycleController::new();
@@ -3051,6 +3115,128 @@ mod tests {
             ]
         );
         assert_eq!(controller.pending_count, 0);
+    }
+
+    /// Report `status` as the live instance `pid`, the way the syscall handler does.
+    fn report_health(
+        controller: &mut ServiceLifecycleController,
+        pid: u64,
+        status: u32,
+    ) -> Result<ServiceInstanceId, ServiceHealthRefusal> {
+        let instance = controller.health_report_instance(pid)?;
+        controller.store_health_report(instance, status);
+        Ok(instance)
+    }
+
+    #[test]
+    fn health_from_a_running_instance_is_held_once_per_service_and_the_newest_wins() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = starting_record(CONSOLE_SERVICE_ID, 70, 1);
+        controller.report_ready_from_pid(70).expect("ready");
+        let full =
+            [Some(event_for(ServiceId(30), 1, LifecycleEventKind::Exited)); SERVICE_PENDING_EVENTS];
+        controller.pending = full;
+        controller.pending_count = SERVICE_PENDING_EVENTS;
+        for status in [1, 2, 1] {
+            assert_eq!(
+                wakes_during(|| {
+                    report_health(&mut controller, 70, status).expect("accepted");
+                }),
+                1
+            );
+        }
+        assert_eq!(controller.pending, full, "the shared queue is not used");
+        assert_eq!(controller.health_pending.iter().flatten().count(), 1);
+        let order: Vec<_> = core::iter::from_fn(|| {
+            controller
+                .poll_pending_event(CONSOLE_SERVICE_ID)
+                .unwrap()
+                .map(|event| (event.kind, event.status_code))
+        })
+        .collect();
+        assert_eq!(
+            order,
+            [
+                (LifecycleEventKind::Ready, 0),
+                (LifecycleEventKind::HealthReported, 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn health_is_refused_inertly_unless_the_caller_is_a_running_instance() {
+        for state in [
+            ServiceLifecycleState::Starting,
+            ServiceLifecycleState::Stopping,
+        ] {
+            let mut controller = ServiceLifecycleController::new();
+            controller.services[0] = ServiceRecord {
+                state,
+                ..starting_record(CONSOLE_SERVICE_ID, 70, 1)
+            };
+            assert_eq!(
+                controller.health_report_instance(70),
+                Err(ServiceHealthRefusal::NotRunning),
+                "{state:?}"
+            );
+        }
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = ServiceRecord {
+            state: ServiceLifecycleState::Running,
+            ..starting_record(CONSOLE_SERVICE_ID, 70, 1)
+        };
+        controller
+            .grant_lifecycle_control_capability(100, &[CONSOLE_SERVICE_ID])
+            .expect("grant capability");
+        for pid in [100, 0, 9999] {
+            assert_eq!(
+                controller.health_report_instance(pid),
+                Err(ServiceHealthRefusal::NotAServiceInstance),
+                "pid {pid}"
+            );
+        }
+        assert!(controller.health_pending.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn health_goes_after_ready_and_before_the_same_instances_exit() {
+        let mut controller = ServiceLifecycleController::new();
+        let capability = controller
+            .grant_lifecycle_control_capability(100, &[CONSOLE_SERVICE_ID])
+            .expect("grant capability");
+        controller.services[0] = starting_record(CONSOLE_SERVICE_ID, 70, 1);
+        controller.report_ready_from_pid(70).expect("ready");
+        report_health(&mut controller, 70, 3).expect("health");
+        assert_eq!(
+            controller.pending_service_authorized(100, capability),
+            Ok(Some(CONSOLE_SERVICE_ID))
+        );
+        controller
+            .notify_faulted_live_process(70, 3)
+            .expect("fault")
+            .expect("event");
+        // The replacement's report goes after the old instance's fault.
+        controller.services[0] = starting_record(CONSOLE_SERVICE_ID, 80, 2);
+        controller.report_ready_from_pid(80).expect("ready gen 2");
+        let order: Vec<_> = core::iter::from_fn(|| {
+            controller
+                .poll_pending_event(CONSOLE_SERVICE_ID)
+                .unwrap()
+                .map(|event| (event.kind, event.instance.generation.0))
+        })
+        .collect();
+        // Gen 1's ready was replaced by gen 2's before anyone polled it.
+        assert_eq!(
+            order,
+            [
+                (LifecycleEventKind::HealthReported, 1),
+                (LifecycleEventKind::Faulted, 1),
+                (LifecycleEventKind::Ready, 2)
+            ]
+        );
+        report_health(&mut controller, 80, 1).expect("health gen 2");
+        controller.clear();
+        assert!(controller.health_pending.iter().all(Option::is_none));
     }
 
     #[test]

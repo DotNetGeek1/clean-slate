@@ -39,6 +39,9 @@ pub enum LifecycleEventKind {
     StopAcknowledged = 4,
     Exited = 5,
     Faulted = 6,
+    /// #376: the instance's health report (syscall 29); `status_code` is its `HealthStatus`.
+    /// It changes no lifecycle state.
+    HealthReported = 7,
 }
 
 impl LifecycleEventKind {
@@ -50,6 +53,7 @@ impl LifecycleEventKind {
             4 => Some(Self::StopAcknowledged),
             5 => Some(Self::Exited),
             6 => Some(Self::Faulted),
+            7 => Some(Self::HealthReported),
             _ => None,
         }
     }

@@ -20,6 +20,7 @@ use clean_slate_capability::{
 use clean_slate_graphics::limits::MAX_REGISTERED_BUFFERS;
 use clean_slate_native_abi::launcher::AppName;
 use clean_slate_native_abi::memory::NATIVE_MEMORY_MAX_BUDGET_PAGES;
+use clean_slate_native_abi::service_health::{HEALTH_REPORT_INTERVAL_NS, MIN_LIVENESS_REPORTS};
 use clean_slate_service_lifecycle::ServiceId;
 
 /// Built-in image a row runs. Every variant names an ELF or payload the kernel already embeds for
@@ -194,6 +195,27 @@ pub enum Start {
     OnRequest,
 }
 
+/// #376: whether init watches a running instance's health reports (syscall 29).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Liveness {
+    /// The row's image does not report health; init only sees it exit or fault.
+    Off,
+    /// From its ready report on, the instance reports at least every
+    /// `HEALTH_REPORT_INTERVAL_NS` from its own loop. One that sends no report for `period_ns`,
+    /// or reports itself unhealthy, is terminated, and the row's restart policy applies.
+    Period { period_ns: u64 },
+}
+
+impl Liveness {
+    /// The period, when init watches the row.
+    pub const fn period_ns(self) -> Option<u64> {
+        match self {
+            Self::Off => None,
+            Self::Period { period_ns } => Some(period_ns),
+        }
+    }
+}
+
 /// What init does when a started service exits or faults. Init counts ticks in monotonic
 /// nanoseconds (`WORK_SET` op `NOW`). Retry `n` waits `initial_delay_ns +
 /// backoff_base_ns * (n - 1)` after the failure; after `max_attempts` retries init stops.
@@ -241,6 +263,10 @@ pub struct ServiceSpec {
     /// unique in the manifest.
     pub launch_name: Option<&'static str>,
     pub start: Start,
+    /// #376: how init watches the instance's health reports. `Off` for images that do not
+    /// report; a period only on native images and at least `MIN_LIVENESS_REPORTS` report
+    /// intervals.
+    pub liveness: Liveness,
 }
 
 impl ServiceSpec {
@@ -311,6 +337,7 @@ pub const STORAGE_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: 0,
     launch_name: None,
     start: Start::AtBoot,
+    liveness: Liveness::Off,
 };
 
 /// `NETWORK_SERVICE_MODE_ACCEPTANCE` is the network image's request-serving loop. Init starts it
@@ -326,6 +353,7 @@ pub const NETWORK_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: 0,
     launch_name: None,
     start: Start::AtBoot,
+    liveness: Liveness::Off,
 };
 
 /// Provisional (#218 S5): a shell that exits (`exit`, Ctrl-D) is started again 0.5 s later. At
@@ -358,6 +386,7 @@ pub const SYSTEM_SHELL_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: 0,
     launch_name: None,
     start: Start::AtBoot,
+    liveness: Liveness::Off,
 };
 
 /// The capability audit log's reader (#219 stages B and D). It is a holder of its own, apart
@@ -375,11 +404,17 @@ pub const AUDIT_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: 0,
     launch_name: None,
     start: Start::AtBoot,
+    liveness: Liveness::Off,
 };
+
+/// #376: the console service's liveness period. It reports every second from its loop; ten
+/// seconds leaves room for a slow emulated machine under load, where a false alarm would
+/// restart the service every lane writes through.
+pub const CONSOLE_LIVENESS_PERIOD_NS: u64 = 10 * NANOS_PER_SECOND;
 
 /// The console service (#310): it owns native console streams and writes them, framed per
 /// writer, to the serial line. It depends on nothing and starts at boot. Ready is its port
-/// bound to its work set, before it serves anything.
+/// bound to its work set, before it serves anything. It reports health from its loop (#376).
 pub const CONSOLE_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     id: CONSOLE_SERVICE_ID,
     image: ServiceImage::Console,
@@ -391,6 +426,9 @@ pub const CONSOLE_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: 0,
     launch_name: None,
     start: Start::AtBoot,
+    liveness: Liveness::Period {
+        period_ns: CONSOLE_LIVENESS_PERIOD_NS,
+    },
 };
 
 pub const SYSTEM_MANIFEST: &[ServiceSpec] = &[
@@ -425,6 +463,7 @@ pub const COMPOSITOR_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: 0,
     launch_name: None,
     start: Start::AtBoot,
+    liveness: Liveness::Off,
 };
 
 /// The compositor's launch grants, one capability record each.
@@ -470,6 +509,7 @@ pub const DESKTOP_SHELL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: DESKTOP_SHELL_MEMORY_PAGES,
     launch_name: None,
     start: Start::AtBoot,
+    liveness: Liveness::Off,
 };
 
 /// The playground app. It depends on the shell so the panel is mapped before the app's first
@@ -490,6 +530,7 @@ pub const PLAYGROUND_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: PLAYGROUND_MEMORY_PAGES,
     launch_name: Some("playground"),
     start: Start::AtBoot,
+    liveness: Liveness::Off,
 };
 
 /// The terminal's shell (#311): the serial shell's image and authority, but its console
@@ -513,6 +554,7 @@ pub const TERMINAL_SHELL_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: 0,
     launch_name: None,
     start: Start::AtBoot,
+    liveness: Liveness::Off,
 };
 
 /// The terminal window (#311), the console session's front end. It starts after the
@@ -538,6 +580,7 @@ pub const TERMINAL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     memory_pages: TERMINAL_MEMORY_PAGES,
     launch_name: Some("terminal"),
     start: Start::AtBoot,
+    liveness: Liveness::Off,
 };
 
 /// The bare desktop profile (`q0-bare`, `q1-bare`): the five system rows followed by the three
@@ -668,6 +711,11 @@ pub enum ManifestError {
     MemoryBudgetOutOfRange {
         row: usize,
     },
+    /// A liveness period on a Linux row, which cannot report health, or one shorter than
+    /// `MIN_LIVENESS_REPORTS` report intervals.
+    LivenessOutOfRange {
+        row: usize,
+    },
     /// `slot_allowance` is not above `HOLDER_SLOT_QUOTA` or is above `MAX_SLOT_ALLOWANCE`.
     SlotAllowanceOutOfRange {
         row: usize,
@@ -700,6 +748,9 @@ const _: () = assert!(MAX_SLOTS / (HOLDER_SLOT_QUOTA + 1) <= MAX_SLOT_ALLOWANCES
 
 /// Checks the invariants the kernel and init rely on. Kernel scenario manifests call this in a
 /// `const` assertion so a malformed row fails the build.
+/// The shortest liveness period a row may declare.
+pub const MIN_LIVENESS_PERIOD_NS: u64 = MIN_LIVENESS_REPORTS * HEALTH_REPORT_INTERVAL_NS;
+
 pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestError> {
     let mut allowance_total = 0;
     let mut row = 0;
@@ -721,6 +772,11 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
             || (spec.memory_pages != 0 && spec.image.is_linux())
         {
             return Err(ManifestError::MemoryBudgetOutOfRange { row });
+        }
+        if let Some(period_ns) = spec.liveness.period_ns() {
+            if spec.image.is_linux() || period_ns < MIN_LIVENESS_PERIOD_NS {
+                return Err(ManifestError::LivenessOutOfRange { row });
+            }
         }
         let mut earlier = 0;
         while earlier < row {
@@ -986,7 +1042,40 @@ mod tests {
             memory_pages: 0,
             launch_name: None,
             start: Start::AtBoot,
+            liveness: Liveness::Off,
         }
+    }
+
+    #[test]
+    fn only_the_console_row_declares_a_liveness_period() {
+        for spec in SYSTEM_TERMINAL_DESKTOP_MANIFEST {
+            let expected = (spec.id == CONSOLE_SERVICE_ID).then_some(CONSOLE_LIVENESS_PERIOD_NS);
+            assert_eq!(spec.liveness.period_ns(), expected, "{:?}", spec.id);
+        }
+    }
+
+    #[test]
+    fn a_liveness_period_must_be_long_enough_and_on_a_native_row() {
+        let mut spec = row(7, ServiceImage::Console, &[]);
+        spec.liveness = Liveness::Period {
+            period_ns: MIN_LIVENESS_PERIOD_NS,
+        };
+        assert_eq!(validate_manifest(&[spec]), Ok(()));
+        spec.liveness = Liveness::Period {
+            period_ns: MIN_LIVENESS_PERIOD_NS - 1,
+        };
+        assert_eq!(
+            validate_manifest(&[spec]),
+            Err(ManifestError::LivenessOutOfRange { row: 0 })
+        );
+        let mut linux = row(7, ServiceImage::LinuxShell, &[]);
+        linux.liveness = Liveness::Period {
+            period_ns: CONSOLE_LIVENESS_PERIOD_NS,
+        };
+        assert_eq!(
+            validate_manifest(&[linux]),
+            Err(ManifestError::LivenessOutOfRange { row: 0 })
+        );
     }
 
     #[test]

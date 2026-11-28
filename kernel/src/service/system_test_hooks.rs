@@ -16,6 +16,13 @@
 //! (fault report, teardown, init's restart policy, the clients' `ServerGone`) is the
 //! production path the default image runs.
 //!
+//! **Hang (#376).** Ctrl-N (`0x0E`) mutes the health reports of the live console service
+//! instance: from then on the kernel still answers its `SERVICE_HEALTH` calls as accepted, so
+//! the service keeps serving as before, but passes nothing on to init. To init that is an
+//! instance whose loop has stopped turning, alive but silent; init must end it once its
+//! liveness period passes and restart it under the row's policy. The mute belongs to that pid,
+//! so the restarted instance reports again.
+//!
 //! **Display mode (#314).** Ctrl-V (`0x16`) asks the display for its smallest settable mode
 //! other than the current one, through the same `SET_MODE` path the presenter's syscall takes,
 //! on behalf of the bound presenter: a mode change the compositor did not start, so a lane can
@@ -46,7 +53,7 @@
 //!   probe record naming the previous compositor generation's port, which must be refused as
 //!   stale by the live port and is then revoked. The terminal is probed like the app.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use clean_slate_capability::{AuditEvent, AuditKind, HolderId, ResourceClass, ResourceRef, Rights};
 use clean_slate_port::PortError;
@@ -54,7 +61,7 @@ use clean_slate_service_fixtures::{
     AUDIT_SERVICE_ID, COMPOSITOR_SERVICE_ID, CONSOLE_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID,
     PLAYGROUND_SERVICE_ID, SYSTEM_SHELL_SERVICE_ID, TERMINAL_SERVICE_ID, TERMINAL_SHELL_SERVICE_ID,
 };
-use clean_slate_service_lifecycle::ServiceId;
+use clean_slate_service_lifecycle::{ServiceId, ServiceInstanceId};
 
 use crate::capability::network::NETWORK_SERVICE_ID;
 use crate::diagnostics::log::kernel_log_fmt;
@@ -127,6 +134,12 @@ const AUDIT_FLOOD_QUEUE_BYTE: u8 = 0x01;
 const AUDIT_FLOOD_COMMIT_BYTE: u8 = 0x02;
 
 const DISPLAY_MODE_BYTE: u8 = 0x16;
+
+/// Ctrl-N: mute the console service's health reports (#376).
+const HEALTH_MUTE_BYTE: u8 = 0x0e;
+static HEALTH_MUTE_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// The pid whose reports are dropped; 0 for none.
+static HEALTH_MUTED_PID: AtomicU64 = AtomicU64::new(0);
 static DISPLAY_MODE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 static AUDIT_FLOOD_QUEUED: AtomicU32 = AtomicU32::new(0);
@@ -135,7 +148,7 @@ static AUDIT_FLOOD_COMMIT: AtomicBool = AtomicBool::new(false);
 /// Printed once COM1 receive is on, so every transcript says which build produced it.
 pub(crate) fn announce() {
     kernel_log_fmt(format_args!(
-        "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service, Ctrl-] the compositor, Ctrl-^ the desktop shell, Ctrl-_ the app, Ctrl-X the console service, Ctrl-Y the audit service, Ctrl-T the terminal, Ctrl-W the terminal's shell; Ctrl-A queues an audit denial, Ctrl-B commits them; Ctrl-V sets the smallest other display mode\n"
+        "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service, Ctrl-] the compositor, Ctrl-^ the desktop shell, Ctrl-_ the app, Ctrl-X the console service, Ctrl-Y the audit service, Ctrl-T the terminal, Ctrl-W the terminal's shell; Ctrl-A queues an audit denial, Ctrl-B commits them; Ctrl-V sets the smallest other display mode; Ctrl-N mutes the console service's health reports\n"
     ));
 }
 
@@ -151,6 +164,7 @@ pub(crate) fn observe_received_byte(byte: u8) {
         }
         AUDIT_FLOOD_COMMIT_BYTE => AUDIT_FLOOD_COMMIT.store(true, Ordering::Relaxed),
         DISPLAY_MODE_BYTE => DISPLAY_MODE_REQUESTED.store(true, Ordering::Relaxed),
+        HEALTH_MUTE_BYTE => HEALTH_MUTE_REQUESTED.store(true, Ordering::Relaxed),
         _ => {}
     }
 }
@@ -171,6 +185,33 @@ pub(crate) fn run_pending() {
     if DISPLAY_MODE_REQUESTED.load(Ordering::Relaxed) {
         set_display_mode();
     }
+    if HEALTH_MUTE_REQUESTED.swap(false, Ordering::Relaxed) {
+        mute_console_health();
+    }
+}
+
+/// Ctrl-N: from now on the live console instance's health reports go nowhere.
+fn mute_console_health() {
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    let Some(instance) = controller.live_service_instance_id(CONSOLE_SERVICE_ID) else {
+        kernel_log_fmt(format_args!(
+            "[HOOK] console health mute requested but no console instance is live; ignored\n"
+        ));
+        return;
+    };
+    HEALTH_MUTED_PID.store(instance.pid.0, Ordering::Relaxed);
+    kernel_log_fmt(format_args!(
+        "[HOOK] console health muted pid={} gen={} at-ms={}\n",
+        instance.pid.0,
+        instance.generation.0,
+        uptime_ms()
+    ));
+}
+
+/// Whether `instance`'s health report is to be dropped (Ctrl-N).
+pub(crate) fn health_report_muted(instance: ServiceInstanceId) -> bool {
+    let muted = HEALTH_MUTED_PID.load(Ordering::Relaxed);
+    muted != 0 && muted == instance.pid.0
 }
 
 /// Ctrl-V: the smallest other settable mode, retried while the display is busy.

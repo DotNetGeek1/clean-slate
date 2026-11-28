@@ -38,7 +38,8 @@ use crate::sync::global_cell::GlobalCell;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 use clean_slate_service_fixtures::manifest::{
-    validate_manifest, Grant, RestartSpec, ServiceImage, ServiceSpec, Start, STORAGE_SERVICE_SPEC,
+    validate_manifest, Grant, Liveness, RestartSpec, ServiceImage, ServiceSpec, Start,
+    STORAGE_SERVICE_SPEC,
 };
 use clean_slate_service_fixtures::object_churn::{
     churn_absent_count, churn_expected_fingerprint, churn_live_count, CHURN_ADDED, CHURN_CREATED,
@@ -165,6 +166,7 @@ const M5_UNAUTHORIZED_ROW: ServiceSpec = ServiceSpec {
     memory_pages: 0,
     launch_name: None,
     start: Start::AtBoot,
+    liveness: Liveness::Off,
 };
 
 const M5_PERSISTENCE_SCENARIO: &[ServiceSpec] = &[m5_storage_row(STORAGE_SERVICE_MODE_PERSISTENCE)];
