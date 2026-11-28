@@ -304,6 +304,8 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-port-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-native-memory-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-clock-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features power-off-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features power-reset-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-storage-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-net-client-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-net-listen-self-test -- -D warnings

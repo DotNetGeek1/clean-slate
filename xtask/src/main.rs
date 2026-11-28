@@ -20,6 +20,7 @@ mod m10_desktop_visual;
 mod m10_framebuffer_validate;
 mod m10_input_lane;
 mod m10_net;
+mod m10_power;
 mod m10_storage;
 mod m10_virtio_gpu;
 mod m5_torn;
@@ -1317,7 +1318,7 @@ const M9_MILESTONE_STEPS: [M9MilestoneStep; 18] = [
 /// boots, display backends, input, compositor and app host suites), then the #118 desktop lane
 /// on both display backends and the system image's desktop (#218 S6e). `[M10 ] PASS` is printed
 /// only after all of them succeed.
-const M10_MILESTONE_STEPS: [M9MilestoneStep; 19] = [
+const M10_MILESTONE_STEPS: [M9MilestoneStep; 20] = [
     ("test-m10-contract", run_m10_contract_acceptance),
     ("clean-slate-ui (host)", run_m10_ui_host_tests),
     ("test-m10-nxe", run_m10_nxe_acceptance),
@@ -1325,6 +1326,7 @@ const M10_MILESTONE_STEPS: [M9MilestoneStep; 19] = [
     ("test-m10-port", run_m10_port_acceptance),
     ("test-m10-native-memory", run_m10_native_memory_acceptance),
     ("test-m10-clock", m10_clock::run),
+    ("test-m10-power", m10_power::run),
     ("test-m10-storage", m10_storage::run),
     ("test-m10-net", m10_net::run),
     ("test-m10-net-listen", m10_net::listen::run),
@@ -1440,6 +1442,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
         ParsedCommand::TestM10NativeMemory => run_m10_native_memory_acceptance(),
         ParsedCommand::TestM10Clock => m10_clock::run(),
+        ParsedCommand::TestM10Power => m10_power::run(),
         ParsedCommand::TestNetAcceptance => net_acceptance::run(),
         ParsedCommand::NetAcceptanceRelay => match trailing_args.as_slice() {
             [port] => net_acceptance::run_relay(&port.to_string_lossy()),
@@ -5755,6 +5758,9 @@ fn print_help() {
         "  test-m10-clock  #308 native clock: clock host tests, then two m10-clock-self-test QEMU boots: monotonic time across a wait and a wall clock within 3 s of the host's (-rtc base=now), and no wall clock from an RTC before the build floor; prints [M10.clock] lane PASS (aliases: m10-clock, m10.308)"
     );
     println!(
+        "  test-m10-power  #372 power-off and reset: FADT/_S5 and POWER syscall host tests, then a power-off-self-test boot that must end with QEMU's own exit status 0 and a power-reset-self-test boot (without -no-reboot) that must reset through the FADT reset register and boot again; prints [M10.power] lane PASS (aliases: m10-power, m10.372)"
+    );
+    println!(
         "  test-m10-net-listen  #359 native TCP listen: listen/accept host tests, then one m10-net-listen-self-test QEMU boot on restricted slirp with a hostfwd to the native probe: it listens on port 7000, is refused port 7001 with the refusal audited, and the host connects in and gets its bytes echoed back; prints [M10.net] listen lane PASS (aliases: m10-net-listen, m10.359)"
     );
     println!(
@@ -5940,6 +5946,7 @@ enum ParsedCommand {
     TestM10Port,
     TestM10NativeMemory,
     TestM10Clock,
+    TestM10Power,
     TestNetAcceptance,
     NetAcceptanceRelay,
     TestM10Storage,
@@ -6112,6 +6119,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-m10-clock" || cmd == "m10-clock" || cmd == "m10.308" => {
             ParsedCommand::TestM10Clock
+        }
+        Some(cmd) if cmd == "test-m10-power" || cmd == "m10-power" || cmd == "m10.372" => {
+            ParsedCommand::TestM10Power
         }
         Some(cmd) if cmd == "test-net-acceptance" || cmd == "net-acceptance" => {
             ParsedCommand::TestNetAcceptance
@@ -6789,6 +6799,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestM10Clock
+            );
+        }
+        for alias in ["test-m10-power", "m10-power", "m10.372"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestM10Power
             );
         }
         for alias in ["test-m10-storage", "m10-storage", "m10.312"] {
@@ -7827,6 +7843,7 @@ mod tests {
             "test-m10-port",
             "test-m10-native-memory",
             "test-m10-clock",
+            "test-m10-power",
             "test-m10-storage",
             "test-m10-net",
             "test-m10-net-listen",

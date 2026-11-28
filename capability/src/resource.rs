@@ -19,6 +19,8 @@ pub enum ResourceClass {
     Console = 12,
     /// The launcher port init serves (#237): ask init to start a manifest row by name.
     Launcher = 13,
+    /// Powering the machine off and resetting it (#372): one resource, held by init alone.
+    Power = 14,
 }
 
 impl ResourceClass {
@@ -41,6 +43,7 @@ impl ResourceClass {
             11 => Some(Self::Input),
             12 => Some(Self::Console),
             13 => Some(Self::Launcher),
+            14 => Some(Self::Power),
             _ => None,
         }
     }
@@ -60,6 +63,7 @@ impl ResourceClass {
             Self::Input => "input",
             Self::Console => "console",
             Self::Launcher => "launcher",
+            Self::Power => "power",
         }
     }
 }
@@ -70,6 +74,9 @@ pub const SERIAL_CONSOLE_DEVICE_ID: u64 = 0;
 
 /// `ResourceClass::Launcher` id of the one launcher port, served by init (#237).
 pub const LAUNCHER_PORT_ID: u64 = 1;
+
+/// `ResourceClass::Power` id of the machine's power control, the only power resource (#372).
+pub const SYSTEM_POWER_ID: u64 = 0;
 
 /// Stable resource key bound by a capability (independent of handle slot/generation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -192,6 +199,16 @@ impl ResourceRef {
         Self {
             class: ResourceClass::Launcher,
             id: LAUNCHER_PORT_ID,
+            instance_generation: 0,
+        }
+    }
+
+    /// The machine's power control (#372): powering off and resetting. The kernel grants it
+    /// to init alone, and it is never delegated.
+    pub const fn system_power() -> Self {
+        Self {
+            class: ResourceClass::Power,
+            id: SYSTEM_POWER_ID,
             instance_generation: 0,
         }
     }

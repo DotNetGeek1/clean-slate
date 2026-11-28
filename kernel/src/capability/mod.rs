@@ -161,6 +161,16 @@ pub(crate) fn authorize_current_class(
         Ok(holder) => holder,
         Err(_) => return Err(CapabilityError::UnauthorizedHolder),
     };
+    authorize_holder_class(holder, raw_handle, class, required)
+}
+
+/// [`authorize_current_class`] for an explicit `holder`, audited the same way.
+pub(crate) fn authorize_holder_class(
+    holder: HolderId,
+    raw_handle: u64,
+    class: ResourceClass,
+    required: Rights,
+) -> Result<CapabilityRecord, CapabilityError> {
     let handle = CapabilityHandle::decode(raw_handle).unwrap_or(CapabilityHandle::INVALID);
     let result = with_capability_space(|table| {
         authorize_decoded_class(table, holder, raw_handle, class, required)

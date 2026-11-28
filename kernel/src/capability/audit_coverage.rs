@@ -116,7 +116,7 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
         NoDecision(COUNT),
     ),
     ("capability/mod.rs", "authorize_current", Records),
-    ("capability/mod.rs", "authorize_current_class", Records),
+    ("capability/mod.rs", "authorize_holder_class", Records),
     ("capability/mod.rs", "grant_root", Records),
     ("capability/mod.rs", "revoke_for_holder", Records),
     (

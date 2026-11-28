@@ -143,6 +143,9 @@ m10-input-self-test = ["m3-entry-self-test", "stack-high-water-check", "m10-time
 # #218 S4: COM1 receive and the canonical line discipline, driven by host-sent bytes in boot
 # context (`cargo xtask test-serial-input`).
 serial-input-self-test = []
+# #372: power the machine off, or reset it, at the end of boot.
+power-off-self-test = []
+power-reset-self-test = []
 # #218 S7b: the default system image plus one test hook, Ctrl-\ on COM1 faulting the live
 # network service (`kernel/src/service/system_test_hooks.rs`). Only `cargo xtask test-system`
 # builds it; no other lane, image or feature enables it.

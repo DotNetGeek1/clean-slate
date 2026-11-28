@@ -335,7 +335,7 @@ fn report_kernel_write_xor_execute(installed: &KernelRootInstall) -> Result<(), 
 #[allow(unreachable_code)]
 fn run_inner() -> Result<(), &'static str> {
     let mut reserved_ranges = collect_reserved_ranges_from_firmware()?;
-    crate::interrupt::acpi::capture_interrupt_topology_from_firmware();
+    crate::interrupt::acpi::capture_acpi_from_firmware();
     let boot_framebuffer = gop::capture_boot_framebuffer();
     // #308: the firmware clock is read once, last before boot services end.
     #[cfg(not(test))]
@@ -347,6 +347,7 @@ fn run_inner() -> Result<(), &'static str> {
     serial_write_line("[BOOT] ExitBootServices OK");
     #[cfg(not(test))]
     crate::time::wall::log_boot_reading(wall_reading);
+    crate::power::log_boot_capture();
     let nxe = enable_and_verify_nxe()?;
     serial_write_fmt(format_args!(
         "[CPU ] NXE enabled nx=1 firmware_nxe={}\n",
@@ -824,6 +825,11 @@ fn run_inner() -> Result<(), &'static str> {
                 );
             }
         }
+        #[cfg(any(
+            clean_slate_power_selftest = "off",
+            clean_slate_power_selftest = "reset"
+        ))]
+        crate::power::run_self_test()?;
         serial_write_line("[KERN] scheduler initialized");
         start_scheduler()
     }
