@@ -307,6 +307,13 @@ where
         let pid = event.instance.pid.0;
         let kind = event.kind;
 
+        // #376: health reports change no lifecycle state. `SystemInit` reads them before they
+        // get here; one drained here while another call waits on the service is dropped, and
+        // the next report a second later stands in for it.
+        if kind == LifecycleEventKind::HealthReported {
+            return Ok(());
+        }
+
         if kind == LifecycleEventKind::Ready {
             self.maybe_emit_acceptance_health(service, generation)?;
         }

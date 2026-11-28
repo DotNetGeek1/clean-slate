@@ -982,6 +982,9 @@ fn dispatch_native(frame: &mut SyscallContext) {
         clean_slate_native_abi::service_stop::SYSCALL_NR_SERVICE_STOP => {
             crate::service::service_stop::handle_syscall(frame)
         }
+        clean_slate_native_abi::service_health::SYSCALL_NR_SERVICE_HEALTH => {
+            crate::service::service_health::handle_syscall(frame)
+        }
         #[cfg(clean_slate_system_init)]
         clean_slate_native_abi::console::SYSCALL_NR_CONSOLE_DEVICE => {
             crate::service::console_device::handle_syscall(frame)
@@ -1205,6 +1208,16 @@ mod tests {
         // An unresolvable caller is not a service instance.
         assert_eq!(
             dispatch_native_zeroed(SYSCALL_NR_SERVICE_READY, 0),
+            SYSCALL_EACCES
+        );
+    }
+
+    #[test]
+    fn dispatch_native_service_health_reaches_its_handler() {
+        use clean_slate_native_abi::service_health::{HEALTH_STATUS_OK, SYSCALL_NR_SERVICE_HEALTH};
+        // An unresolvable caller is not a service instance.
+        assert_eq!(
+            dispatch_native_zeroed(SYSCALL_NR_SERVICE_HEALTH, HEALTH_STATUS_OK),
             SYSCALL_EACCES
         );
     }

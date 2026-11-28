@@ -17,6 +17,14 @@
 //! `timeout` when the kernel (or, as a fallback, init) terminated it at the deadline, `fault`
 //! when it crashed. A crash of any service during the stop is not restarted. After the last row
 //! init logs `[INIT] system stopped` and waits with no deadline; powering off is #372's.
+//!
+//! #376 liveness: a row whose manifest declares a liveness period is watched from the wake that
+//! sees its instance running. Each health report (a `HealthReported` lifecycle message, from
+//! syscall 29) restarts the period. An instance that sends none for a whole period, or that
+//! reports itself unhealthy, is logged `[INIT] unhealthy <name> reason=timeout|self_reported
+//! gen=<g> quiet-ms=<ms>` (`quiet-ms`: since init last heard from it) and terminated, and its
+//! end goes through the row's restart policy like any exit. A system stop suspends liveness for
+//! good: no row is watched and no report is read once it has begun.
 
 use core::fmt::{self, Write};
 
@@ -24,8 +32,10 @@ use clean_slate_native_abi::launcher::{AppEntry, AppName, AppState, StartResult,
 use clean_slate_native_abi::service_stop::{SERVICE_STOP_GRACE_NS, STOP_EXIT_STATUS_DEADLINE};
 use clean_slate_service_fixtures::manifest::{RestartSpec, ServiceSpec, Start};
 use clean_slate_service_lifecycle::{
-    ticks_add, ticks_reached, DependencyEdge, DependencyMetadata, LifecycleEventKind,
-    LivenessConfig, MonotonicTicks, ProcessId, ServiceId, ServiceLifecycleState,
+    ticks_add, ticks_reached, DependencyEdge, DependencyMetadata, HealthFailureReason,
+    HealthReport, HealthReportOutcome, HealthStatus, InstanceGeneration, LifecycleEvent,
+    LifecycleEventKind, LivenessConfig, MonotonicTicks, ProcessId, ServiceHealthRecord, ServiceId,
+    ServiceLifecycleState,
 };
 
 use crate::control::LifecycleControl;
@@ -39,9 +49,10 @@ use crate::runtime::DiagnosticSink;
 /// policy (provisional, #218 S3b open question).
 pub const INIT_READY_TIMEOUT_NS: u64 = 10_000_000_000;
 
-/// No service reports health yet, so liveness is off: with a finite period every instance would
-/// be declared unhealthy, and restarted, once the period passed without a report. `ticks_add`
-/// saturates, so this deadline is never reached.
+/// The converged supervisor's own health tracker stays off: init watches each row's reports
+/// itself, with the row's period (#376), and ends a silent instance through the same terminate
+/// a ready timeout uses. With a finite period here every row would also be timed out from its
+/// spawn. `ticks_add` saturates, so this deadline is never reached.
 const LIVENESS_OFF: LivenessConfig = LivenessConfig::new(u64::MAX);
 
 /// How long after the kernel's stop deadline init terminates a stopping instance itself. The
@@ -96,6 +107,11 @@ struct ServiceSlot {
     /// Generation whose ready deadline is armed, and that deadline.
     ready_deadline: Option<(u32, MonotonicTicks)>,
     announced_ready_generation: u32,
+    /// #376: the row's liveness watch; its active generation is the instance watched.
+    health: ServiceHealthRecord,
+    /// When init last heard from the watched instance: its last report, or the wake that began
+    /// the watch.
+    last_heard: MonotonicTicks,
 }
 
 /// How a stopped row's instance ended.
@@ -204,6 +220,8 @@ where
                 },
                 ready_deadline: None,
                 announced_ready_generation: 0,
+                health: ServiceHealthRecord::new(spec.id),
+                last_heard: 0,
             });
         }
         Ok(init)
@@ -241,9 +259,16 @@ where
         self.announce_settled();
     }
 
-    /// When init must wake without a message: the earliest ready deadline or due retry. `None`
-    /// once every service is running or given up.
+    /// When init must wake without a message: the earliest ready deadline, due retry or (#376)
+    /// liveness deadline. `None` once every service is running or given up and no running row
+    /// is watched for liveness.
     pub fn next_deadline(&self) -> Option<MonotonicTicks> {
+        self.next_deadline_of(true)
+    }
+
+    /// [`Self::next_deadline`], with or without the liveness deadlines. Boot has settled when
+    /// nothing but liveness is left to wake for: watching a running row is not boot work.
+    fn next_deadline_of(&self, liveness: bool) -> Option<MonotonicTicks> {
         if let Some(stop) = self.system_stop {
             return stop
                 .current
@@ -259,6 +284,9 @@ where
                 continue;
             }
             if let Some((_, deadline)) = slot.ready_deadline {
+                consider(deadline);
+            }
+            if let Some(deadline) = self.liveness_deadline(slot).filter(|_| liveness) {
                 consider(deadline);
             }
             let Some(runtime) = self.supervisor.recovery_runtime(slot.spec.id) else {
@@ -284,6 +312,10 @@ where
                     return;
                 }
             };
+            if event.kind == LifecycleEventKind::HealthReported {
+                self.on_health_report(event, now);
+                continue;
+            }
             self.note_stop_outcome(service, event.kind, event.status_code);
             // A message for a service init does not run is consumed so it cannot wake init
             // again; there is nothing to apply it to.
@@ -333,6 +365,7 @@ where
                 }
                 ServiceLifecycleState::Running => {
                     self.set_ready_deadline(index, None);
+                    self.watch_liveness(index, snapshot.generation, now);
                     if snapshot.generation != slot.announced_ready_generation {
                         if let Some(slot) = self.slots[index].as_mut() {
                             slot.announced_ready_generation = snapshot.generation;
@@ -350,6 +383,7 @@ where
                 }
                 ServiceLifecycleState::Faulted | ServiceLifecycleState::Exited => {
                     self.set_ready_deadline(index, None);
+                    self.stop_watching(index);
                     if !self.idle_if_on_request(index, snapshot.state) {
                         self.give_up_if_exhausted(index);
                     }
@@ -372,6 +406,134 @@ where
                     self.give_up_if_exhausted(index);
                 }
             }
+        }
+    }
+
+    /// #376: begins watching row `index`'s running instance `generation`, once, if the row
+    /// declares a liveness period; then ends it if it has been silent for a whole period.
+    fn watch_liveness(&mut self, index: usize, generation: u32, now: MonotonicTicks) {
+        let Some(slot) = self.slots[index] else {
+            return;
+        };
+        let Some(period_ns) = slot.spec.liveness.period_ns() else {
+            return;
+        };
+        if self.system_stop.is_some() {
+            return;
+        }
+        if slot.health.active_generation() != Some(InstanceGeneration(generation)) {
+            if let Some(slot) = self.slots[index].as_mut() {
+                slot.health.begin_instance(
+                    InstanceGeneration(generation),
+                    now,
+                    LivenessConfig::new(period_ns),
+                );
+                slot.last_heard = now;
+            }
+            return;
+        }
+        let timed_out = self.slots[index]
+            .as_mut()
+            .and_then(|slot| slot.health.poll_timeout(now));
+        if let Some(event) = timed_out {
+            self.end_unhealthy(index, event.generation, event.reason, now);
+        }
+    }
+
+    fn stop_watching(&mut self, index: usize) {
+        if let Some(slot) = self.slots[index].as_mut() {
+            slot.health.clear_active_instance();
+        }
+    }
+
+    /// When row `slot`'s watched instance is next due to have reported.
+    fn liveness_deadline(&self, slot: &ServiceSlot) -> Option<MonotonicTicks> {
+        slot.health.active_generation()?;
+        if slot.health.failure_reason().is_some() {
+            return None;
+        }
+        slot.health.deadline_ticks()
+    }
+
+    /// A `HealthReported` message. Read only for a running instance of a row init watches;
+    /// a report from an instance that has gone, or after a system stop began, is dropped.
+    fn on_health_report(&mut self, event: LifecycleEvent, now: MonotonicTicks) {
+        if self.system_stop.is_some() {
+            return;
+        }
+        let service = event.instance.service;
+        let Some(index) = self.slot_index(service) else {
+            return;
+        };
+        let Some(slot) = self.slots[index] else {
+            return;
+        };
+        let Some(period_ns) = slot.spec.liveness.period_ns() else {
+            return;
+        };
+        let running = self
+            .supervisor
+            .registry()
+            .query(service)
+            .is_some_and(|snapshot| {
+                snapshot.state == ServiceLifecycleState::Running
+                    && snapshot.generation == event.instance.generation.0
+            });
+        if slot.progress != Progress::Started || !running {
+            return;
+        }
+        // The ready message and the first report can arrive in one wake, before the watch began.
+        self.watch_liveness(index, event.instance.generation.0, now);
+        let Some(status) = u8::try_from(event.status_code)
+            .ok()
+            .and_then(HealthStatus::from_repr)
+        else {
+            return;
+        };
+        let report = HealthReport::new(service, event.instance.generation, status);
+        let outcome = self.slots[index].as_mut().map(|slot| {
+            let outcome = slot
+                .health
+                .apply_report(report, now, LivenessConfig::new(period_ns));
+            if !matches!(
+                outcome,
+                HealthReportOutcome::IgnoredStale { .. }
+                    | HealthReportOutcome::IgnoredNoActiveInstance
+                    | HealthReportOutcome::IgnoredUnknownService
+            ) {
+                slot.last_heard = now;
+            }
+            outcome
+        });
+        if let Some(HealthReportOutcome::MarkedUnhealthy { generation, reason }) = outcome {
+            self.end_unhealthy(index, generation, reason, now);
+        }
+    }
+
+    /// Logs why row `index`'s instance is unhealthy and terminates it. Its exit is a failure
+    /// like any other, so the row's restart policy decides what comes next.
+    fn end_unhealthy(
+        &mut self,
+        index: usize,
+        generation: InstanceGeneration,
+        reason: HealthFailureReason,
+        now: MonotonicTicks,
+    ) {
+        let Some(slot) = self.slots[index] else {
+            return;
+        };
+        let quiet_ms = now.saturating_sub(slot.last_heard) / 1_000_000;
+        self.stop_watching(index);
+        let service = slot.spec.id;
+        // One console message: the kernel's terminate line names the service id and pid.
+        let _ = self.emit(format_args!(
+            "[INIT] unhealthy {} reason={} gen={} quiet-ms={quiet_ms}",
+            slot.spec.name(),
+            reason.diagnostic_token(),
+            generation.0
+        ));
+        if self.supervisor.terminate(service).is_err() {
+            self.give_up(service, "terminate failed");
         }
     }
 
@@ -488,7 +650,9 @@ where
             }
         }
         let total = self.slots.iter().flatten().count();
-        let settled = running + down + idle == total && self.next_deadline().is_none();
+        // `no deadline` in the line means no boot work: a row watched for liveness still wakes
+        // init once a period.
+        let settled = running + down + idle == total && self.next_deadline_of(false).is_none();
         if settled && !self.settled_announced {
             // `idle=` appears only with on-request rows, so manifests without any keep the line.
             let _ = if idle == 0 {
@@ -674,6 +838,9 @@ where
             return StopResult::AlreadyStopping;
         }
         self.supervisor.suspend_restarts();
+        for index in 0..N {
+            self.stop_watching(index);
+        }
         let live = (0..N).filter(|index| self.stoppable(*index)).count();
         self.system_stop = Some(SystemStop {
             current: None,
@@ -1111,6 +1278,21 @@ pub(crate) mod tests {
     /// Init's `SERVICE_SLOTS`.
     const SLOTS: usize = 12;
 
+    /// `manifest` with every row's liveness off.
+    fn without_liveness(manifest: &'static [ServiceSpec]) -> &'static [ServiceSpec] {
+        use clean_slate_service_fixtures::manifest::Liveness;
+        std::boxed::Box::leak(
+            manifest
+                .iter()
+                .map(|spec| ServiceSpec {
+                    liveness: Liveness::Off,
+                    ..*spec
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )
+    }
+
     pub(crate) struct Harness {
         pub(crate) init: SystemInit<SharedKernel, SharedLog, SLOTS>,
         pub(crate) kernel: SharedKernel,
@@ -1135,6 +1317,19 @@ pub(crate) mod tests {
         }
 
         pub(crate) fn boot_manifest_unready(manifest: &'static [ServiceSpec]) -> Self {
+            Self::boot_watched_unready(without_liveness(manifest))
+        }
+
+        /// [`Self::boot_manifest`] with the manifest's liveness periods kept (#376): the tests
+        /// above leave hours between wakes and no service of theirs reports health.
+        pub(crate) fn boot_watched(manifest: &'static [ServiceSpec]) -> Self {
+            let mut harness = Self::boot_watched_unready(manifest);
+            harness.audit_ready_at_once = true;
+            harness.report(0, CONSOLE_SERVICE_ID, LifecycleEventKind::Ready);
+            harness
+        }
+
+        fn boot_watched_unready(manifest: &'static [ServiceSpec]) -> Self {
             let kernel = SharedKernel::default();
             let log = SharedLog::default();
             let mut init = SystemInit::new(
@@ -2256,6 +2451,248 @@ pub(crate) mod tests {
             assert!(harness
                 .requests_since(from, ControlRequestKind::Terminate)
                 .is_empty());
+        }
+    }
+
+    /// #376: init watches the console row, the one row with a liveness period.
+    mod liveness {
+        use super::*;
+        use clean_slate_service_fixtures::manifest::CONSOLE_LIVENESS_PERIOD_NS;
+        use clean_slate_service_lifecycle::HealthStatus;
+
+        const PERIOD: u64 = CONSOLE_LIVENESS_PERIOD_NS;
+
+        impl Harness {
+            /// The live instance of `service` reports `status` at `now`.
+            fn health(&mut self, now: u64, service: ServiceId, status: HealthStatus) {
+                {
+                    let mut model = self.kernel.0.borrow_mut();
+                    let mut event = LifecycleEvent::new(
+                        model.instance(service),
+                        LifecycleEventKind::HealthReported,
+                    );
+                    event.status_code = u32::from(status as u8);
+                    model.fake.push_pending(event).expect("queue event");
+                }
+                self.init.on_wake(now, Some(service));
+            }
+
+            /// The base system booted with liveness on and settled at 2 s; the console
+            /// service, ready at 0, is watched from then.
+            fn boot_watched_settled() -> Self {
+                let mut harness = Harness::boot_watched(SYSTEM_MANIFEST);
+                harness.report(SECOND, STORAGE_SERVICE_ID, LifecycleEventKind::Ready);
+                harness.report(2 * SECOND, NETWORK_SERVICE_ID, LifecycleEventKind::Ready);
+                harness.report(
+                    2 * SECOND,
+                    SYSTEM_SHELL_SERVICE_ID,
+                    LifecycleEventKind::Ready,
+                );
+                harness
+            }
+
+            fn terminates_of(&self, service: ServiceId) -> usize {
+                self.requests()
+                    .iter()
+                    .filter(|request| **request == (service, ControlRequestKind::Terminate))
+                    .count()
+            }
+
+            fn generation(&self, service: ServiceId) -> u32 {
+                self.init
+                    .supervisor()
+                    .registry()
+                    .query(service)
+                    .expect("registered")
+                    .generation
+            }
+        }
+
+        #[test]
+        fn boot_settles_and_init_wakes_once_a_period_for_a_row_that_keeps_reporting() {
+            let mut harness = Harness::boot_watched_settled();
+            // Watching the console is not boot work: boot still settles.
+            assert_eq!(
+                harness.lines_with("[INIT] boot settled"),
+                ["[INIT] boot settled running=5 down=0; waiting, no deadline"]
+            );
+            assert_eq!(harness.init.next_deadline(), Some(PERIOD));
+            let mut now = 2 * SECOND;
+            for _ in 0..30 {
+                now += SECOND;
+                harness.health(now, CONSOLE_SERVICE_ID, HealthStatus::Ok);
+                assert_eq!(harness.init.next_deadline(), Some(now + PERIOD));
+            }
+            // A report short of the deadline, then a wake at the deadline it set: still fine.
+            harness.init.on_wake(now + PERIOD - 1, None);
+            harness.health(now + PERIOD - 1, CONSOLE_SERVICE_ID, HealthStatus::Degraded);
+            harness.init.on_wake(now + PERIOD, None);
+            assert_eq!(harness.terminates_of(CONSOLE_SERVICE_ID), 0);
+            assert!(harness.lines_with("[INIT] unhealthy").is_empty());
+            assert_eq!(harness.starts_of(CONSOLE_SERVICE_ID), 1);
+        }
+
+        #[test]
+        fn a_row_that_stops_reporting_is_terminated_after_its_period_and_restarted() {
+            let mut harness = Harness::boot_watched_settled();
+            harness.health(3 * SECOND, CONSOLE_SERVICE_ID, HealthStatus::Ok);
+            harness.health(4 * SECOND, CONSOLE_SERVICE_ID, HealthStatus::Ok);
+            // Silent from 4 s: not yet one tick before the period ends.
+            let deadline = harness.init.next_deadline().expect("liveness deadline");
+            assert_eq!(deadline, 4 * SECOND + PERIOD);
+            harness.init.on_wake(deadline - 1, None);
+            assert_eq!(harness.terminates_of(CONSOLE_SERVICE_ID), 0);
+
+            harness.init.on_wake(deadline, None);
+            assert_eq!(
+                harness.lines_with("[INIT] unhealthy"),
+                ["[INIT] unhealthy console reason=timeout gen=1 quiet-ms=10000"]
+            );
+            assert_eq!(harness.terminates_of(CONSOLE_SERVICE_ID), 1);
+            // The terminated instance is a failure like a fault: the row's first retry is due
+            // 2 s later, and nothing else is touched.
+            assert_eq!(harness.init.next_deadline(), Some(deadline + 2 * SECOND));
+            harness.init.on_wake(deadline + 2 * SECOND, None);
+            assert_eq!(harness.starts_of(CONSOLE_SERVICE_ID), 2);
+            assert_eq!(harness.generation(CONSOLE_SERVICE_ID), 2);
+            assert_eq!(
+                harness
+                    .lines_with("[SUP ] restart service=22016 attempt=1")
+                    .len(),
+                1
+            );
+            for service in [STORAGE_SERVICE_ID, NETWORK_SERVICE_ID, AUDIT_SERVICE_ID] {
+                assert_eq!(harness.starts_of(service), 1, "{service:?}");
+                assert_eq!(harness.terminates_of(service), 0, "{service:?}");
+            }
+
+            // Generation 2 is watched from its ready, not from the old instance's reports.
+            let ready_at = deadline + 3 * SECOND;
+            harness.report(ready_at, CONSOLE_SERVICE_ID, LifecycleEventKind::Ready);
+            assert_eq!(harness.init.next_deadline(), Some(ready_at + PERIOD));
+            harness.health(ready_at + SECOND, CONSOLE_SERVICE_ID, HealthStatus::Ok);
+            assert_eq!(
+                harness.init.next_deadline(),
+                Some(ready_at + SECOND + PERIOD)
+            );
+            harness.init.on_wake(ready_at + SECOND + PERIOD - 1, None);
+            assert_eq!(harness.terminates_of(CONSOLE_SERVICE_ID), 1);
+        }
+
+        #[test]
+        fn a_row_silent_from_its_ready_on_is_ended_one_period_after_it() {
+            let mut harness = Harness::boot_watched_settled();
+            harness.init.on_wake(PERIOD, None);
+            assert_eq!(
+                harness.lines_with("[INIT] unhealthy"),
+                ["[INIT] unhealthy console reason=timeout gen=1 quiet-ms=10000"]
+            );
+            assert_eq!(harness.terminates_of(CONSOLE_SERVICE_ID), 1);
+        }
+
+        #[test]
+        fn a_self_reported_unhealthy_instance_is_terminated_at_once() {
+            let mut harness = Harness::boot_watched_settled();
+            harness.health(3 * SECOND, CONSOLE_SERVICE_ID, HealthStatus::Ok);
+            harness.health(5 * SECOND, CONSOLE_SERVICE_ID, HealthStatus::Unhealthy);
+            assert_eq!(
+                harness.lines_with("[INIT] unhealthy"),
+                ["[INIT] unhealthy console reason=self_reported gen=1 quiet-ms=0"]
+            );
+            assert_eq!(harness.terminates_of(CONSOLE_SERVICE_ID), 1);
+            assert_eq!(harness.init.next_deadline(), Some(7 * SECOND));
+        }
+
+        #[test]
+        fn repeated_silence_uses_up_the_restart_policy_and_init_gives_up() {
+            let mut harness = Harness::boot_watched_settled();
+            let mut ready_at = 0;
+            // The console row retries three times; each instance reports ready and then
+            // nothing.
+            for attempt in 1..=4u64 {
+                let silent_until = ready_at + PERIOD;
+                harness.init.on_wake(silent_until, None);
+                assert_eq!(
+                    harness.terminates_of(CONSOLE_SERVICE_ID),
+                    attempt as usize,
+                    "attempt {attempt}"
+                );
+                if attempt == 4 {
+                    break;
+                }
+                let retry = harness.init.next_deadline().expect("a retry is due");
+                harness.init.on_wake(retry, None);
+                ready_at = retry;
+                harness.report(ready_at, CONSOLE_SERVICE_ID, LifecycleEventKind::Ready);
+            }
+            assert_eq!(harness.lines_with("[INIT] unhealthy").len(), 4);
+            assert_eq!(
+                harness.lines_with("[INIT] gave up service=22016 restarts=3"),
+                ["[INIT] gave up service=22016 restarts=3; init carries on"]
+            );
+            assert_eq!(harness.init.next_deadline(), None);
+        }
+
+        #[test]
+        fn stale_and_unwatched_reports_change_nothing() {
+            let mut harness = Harness::boot_watched_settled();
+            // Rows without a period are never watched, whatever they report.
+            harness.health(3 * SECOND, NETWORK_SERVICE_ID, HealthStatus::Unhealthy);
+            assert_eq!(harness.terminates_of(NETWORK_SERVICE_ID), 0);
+            // A report from the console's ended generation 1, read after generation 2 runs.
+            harness.init.on_wake(PERIOD, None);
+            let old = harness.kernel.0.borrow().instance(CONSOLE_SERVICE_ID);
+            let retry = harness.init.next_deadline().expect("retry");
+            harness.init.on_wake(retry, None);
+            harness.report(retry, CONSOLE_SERVICE_ID, LifecycleEventKind::Ready);
+            let mut stale = LifecycleEvent::new(old, LifecycleEventKind::HealthReported);
+            stale.status_code = HealthStatus::Unhealthy as u32;
+            harness
+                .kernel
+                .0
+                .borrow_mut()
+                .fake
+                .push_pending(stale)
+                .expect("queue event");
+            harness
+                .init
+                .on_wake(retry + SECOND, Some(CONSOLE_SERVICE_ID));
+            assert_eq!(harness.terminates_of(CONSOLE_SERVICE_ID), 1);
+            assert_eq!(harness.init.next_deadline(), Some(retry + PERIOD));
+            assert_eq!(harness.lines_with("[INIT] gave up").len(), 0);
+        }
+
+        #[test]
+        fn liveness_is_suspended_during_a_system_stop() {
+            let mut harness = Harness::boot_watched_settled();
+            harness.health(3 * SECOND, CONSOLE_SERVICE_ID, HealthStatus::Ok);
+            let stop_at = 4 * SECOND;
+            assert_eq!(
+                harness.init.request_system_stop(stop_at),
+                StopResult::Accepted
+            );
+            // The audit service, stopped first, takes its whole grace; the console's period
+            // passes meanwhile, and the stop deadline is the only one init waits for.
+            let stop_deadline = stop_at + SERVICE_STOP_GRACE_NS + INIT_STOP_SLACK_NS;
+            assert_eq!(harness.init.next_deadline(), Some(stop_deadline));
+            harness.health(5 * SECOND, CONSOLE_SERVICE_ID, HealthStatus::Unhealthy);
+            harness.init.on_wake(3 * SECOND + PERIOD, None);
+            harness.init.on_wake(3 * SECOND + 3 * PERIOD, None);
+            assert!(harness.lines_with("[INIT] unhealthy").is_empty());
+            assert_eq!(harness.terminates_of(CONSOLE_SERVICE_ID), 0);
+        }
+
+        #[test]
+        fn the_unhealthy_lines_fit_one_console_message() {
+            let mut timeout = Harness::boot_watched_settled();
+            timeout.init.on_wake(PERIOD, None);
+            let mut reported = Harness::boot_watched_settled();
+            reported.health(3 * SECOND, CONSOLE_SERVICE_ID, HealthStatus::Unhealthy);
+            for harness in [timeout, reported] {
+                let lines = harness.lines_with("[INIT] unhealthy");
+                assert_eq!(lines.len(), 1);
+                assert!(lines[0].len() < 64, "{:?}", lines[0]);
+            }
         }
     }
 }

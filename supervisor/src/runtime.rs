@@ -3,7 +3,7 @@
 use core::fmt::Write;
 
 use clean_slate_service_lifecycle::{
-    ControlRequest, ControlRequestKind, LifecycleEvent, ProcessId, ServiceId,
+    ControlRequest, ControlRequestKind, LifecycleEvent, LifecycleEventKind, ProcessId, ServiceId,
 };
 
 use crate::control::{LifecycleControl, LifecycleControlError};
@@ -86,6 +86,11 @@ where
     }
 
     pub fn handle_lifecycle_event(&mut self, event: LifecycleEvent) -> Result<(), SupervisorError> {
+        // #376: a health report changes no lifecycle state; whoever watches liveness reads it
+        // before it gets here.
+        if event.kind == LifecycleEventKind::HealthReported {
+            return Ok(());
+        }
         self.registry
             .apply_event(event)
             .map_err(SupervisorError::Registry)?;

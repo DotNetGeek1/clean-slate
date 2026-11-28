@@ -4,7 +4,9 @@
 //! and its serial device capability (syscall 25 `FIND_HANDLE`), creates its work set and binds
 //! the port's requests and notices to it and the serial line's committed input to a third bit,
 //! then reports ready. From there it sleeps in
-//! `WORK_SET` `WAIT` until a request or notice arrives and drains the port. A startup step that
+//! `WORK_SET` `WAIT` until a request or notice arrives or its next health report is due, and
+//! drains the port. Its row declares a liveness period (#376): the loop reports health once a
+//! second, so a loop that stops turning stops reporting and init ends the instance. A startup step that
 //! fails is a `FAIL` line and `ud2`, which init's restart policy handles like any other fault.
 
 #![no_std]
@@ -22,7 +24,8 @@ use clean_slate_native_abi::service_ready::ServiceReadyResult;
 use clean_slate_native_abi::status::is_status;
 use clean_slate_native_abi::ConnectionId;
 use clean_slate_runtime::console::Console;
-use clean_slate_runtime::port::{Server, Wait, WorkSet};
+use clean_slate_runtime::health::Heartbeat;
+use clean_slate_runtime::port::{self, Server, Wait, WorkSet};
 use clean_slate_runtime::{process, Error, Kernel, Syscalls};
 use clean_slate_service_fixtures::console_service::{
     ConsoleServiceBootstrap, CONSOLE_SERVICE_BOOTSTRAP_ADDRESS,
@@ -161,6 +164,9 @@ pub extern "C" fn _start() -> ! {
         fail(console, b"[CONS] FAIL SERVICE_READY refused");
     }
     let mut input_reported = false;
+    // Without a clock there is nothing to time reports by; init then ends the silent instance
+    // after its period, which is the right answer for a kernel that cannot keep time.
+    let mut heartbeat = port::now(&mut Kernel).ok().map(Heartbeat::new);
     loop {
         loop {
             match server.recv(&mut Kernel) {
@@ -180,11 +186,19 @@ pub extern "C" fn _start() -> ! {
             let _ = console.send(&mut Kernel, b"[CONS] serial input answered a read");
         }
         core.idle(&mut device);
-        if work_set
-            .wait(&mut Kernel, WAKE_MASK, Wait::FOREVER)
-            .is_err()
-        {
-            fail(console, b"[CONS] FAIL WORK_SET WAIT failed");
+        // Only from here, once a turn's work is done: a loop stuck above reports nothing.
+        let wait = match heartbeat.as_mut() {
+            Some(heartbeat) => {
+                if let Ok(now) = port::now(&mut Kernel) {
+                    let _ = heartbeat.beat(&mut Kernel, now);
+                }
+                Wait::Until(heartbeat.deadline())
+            }
+            None => Wait::FOREVER,
+        };
+        match work_set.wait(&mut Kernel, WAKE_MASK, wait) {
+            Ok(_) | Err(Error::TimedOut) => {}
+            Err(_) => fail(console, b"[CONS] FAIL WORK_SET WAIT failed"),
         }
     }
 }

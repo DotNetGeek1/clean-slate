@@ -35,6 +35,7 @@ pub(crate) mod net_resolver;
 pub(crate) mod net_syscall;
 pub(crate) mod port;
 pub(crate) mod port_syscall;
+pub(crate) mod service_health;
 pub(crate) mod service_ready;
 pub(crate) mod service_stop;
 pub(crate) mod spawn;

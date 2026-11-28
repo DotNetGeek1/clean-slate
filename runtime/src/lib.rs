@@ -10,6 +10,8 @@
 //! - [`clock`]: the monotonic clock and the wall clock, when there is one (syscall 24, #308).
 //! - [`compositor`]: a compositor client: connect, register buffers, send requests, read events.
 //! - [`console`]: console lines over the console capability (syscall 3).
+//! - [`health`]: the service health report (syscall 29, #376) and a heartbeat for a service's
+//!   loop.
 //! - [`heap`]: a `GlobalAlloc` over the native memory call (syscall 23, #306).
 //! - [`launcher`]: ask init to start a manifest row by name (#237).
 //! - [`net`]: resolve names, TCP streams, connected UDP sockets and TLS exchanges through the
@@ -29,6 +31,7 @@ pub mod clock;
 pub mod compositor;
 pub mod console;
 pub mod error;
+pub mod health;
 pub mod heap;
 pub mod launcher;
 pub mod net;
