@@ -208,8 +208,8 @@ pub enum Tended {
 ///
 /// A connect the kernel refuses is audited, so while the stream is down a connect is tried
 /// at most once per [`LiveConsoleStream::RETRY_NS`], however often the owner wakes. The dead
-/// connection is closed only once its replacement is open, so the process holds one console
-/// connection throughout, as a client that never reconnects would.
+/// connection is closed once its replacement is open (the kernel's reissue, which revokes the
+/// record it was made with, may have ended it already; closing it again is harmless).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LiveConsoleStream {
     stream: Option<ConsoleStream>,

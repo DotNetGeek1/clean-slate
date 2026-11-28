@@ -370,20 +370,36 @@ fn counts_after_pids(rest: &str) -> Result<String, String> {
     Ok(counts.to_owned())
 }
 
-/// The snapshot after the console service's restart is the baseline with one connection
-/// fewer: the serial shell's stream, which the kernel connects again only at the shell's next
-/// write (the lane's serial step then makes one). Every other count must match.
-fn check_console_residue(segment: &str, rows: Terminal, baseline: &str) -> Result<(), String> {
+/// The snapshot after the console service's restart is the baseline less the streams that
+/// ended with the old service and are not connected again yet: the serial shell's, which the
+/// kernel connects again only at the shell's next write (the lane's serial step then makes
+/// one), and the playground's (`app_pid`) unless its `reopened` line came before the snapshot
+/// (#368: the kernel's reissue revoked the record its dead connection was made with, which
+/// ends that connection, and the playground connects again only when an event wakes it).
+/// Every other count must match.
+fn check_console_residue(
+    segment: &str,
+    rows: Terminal,
+    app_pid: u64,
+    baseline: &str,
+) -> Result<(), String> {
     const SNAPSHOT: &str = "[RSRC] snapshot ";
     let wanted_pids = format!(
         " terminal={} terminal-shell={} ",
         rows.terminal_pid, rows.shell_pid
     );
     let complete = segment.rfind('\n').map_or("", |end| &segment[..=end]);
-    let rest = lines(complete)
-        .filter_map(|line| line.find(SNAPSHOT).map(|at| &line[at + SNAPSHOT.len()..]))
-        .find(|rest| rest.contains(&wanted_pids))
+    let (snapshot_at, rest) = complete
+        .match_indices(SNAPSHOT)
+        .map(|(at, _)| {
+            let rest = &complete[at + SNAPSHOT.len()..];
+            (at, &rest[..rest.find('\n').unwrap_or(rest.len())])
+        })
+        .find(|(_, rest)| rest.contains(&wanted_pids))
         .ok_or_else(|| format!("residue: no snapshot with{wanted_pids}"))?;
+    let reopened = format!("[CON ] pid={app_pid}: {APP_CONSOLE_REOPENED}");
+    let app_back = complete[..snapshot_at].contains(&reopened);
+    let ended: u64 = if app_back { 1 } else { 2 };
     let counts = counts_after_pids(rest)?;
     let fields = |text: &str| -> Vec<(String, String)> {
         text.split_whitespace()
@@ -402,15 +418,16 @@ fn check_console_residue(segment: &str, rows: Terminal, baseline: &str) -> Resul
             base_value
                 .parse::<u64>()
                 .ok()
-                .and_then(|conns| conns.checked_sub(1))
+                .and_then(|conns| conns.checked_sub(ended))
                 .map(|conns| conns.to_string())
         } else {
             Some(base_value.clone())
         };
         if key != base_key || Some(value) != want.as_ref() {
             return Err(format!(
-                "residue after the console restart: {key}={value}, expected {base_key}={} (baseline {baseline:?}, the serial shell's stream not yet connected again)",
-                want.unwrap_or_default()
+                "residue after the console restart: {key}={value}, expected {base_key}={} (baseline {baseline:?}, less {ended} stream(s) not yet connected again: the serial shell's{})",
+                want.unwrap_or_default(),
+                if app_back { "" } else { " and the playground's" }
             ));
         }
     }
@@ -423,6 +440,7 @@ fn check_console_residue(segment: &str, rows: Terminal, baseline: &str) -> Resul
 fn check_console_fault(
     segment: &str,
     before: Terminal,
+    app_pid: u64,
     baseline: &str,
 ) -> Result<Terminal, String> {
     check_faulted(segment, "console", CONSOLE, before.console_pid)?;
@@ -480,7 +498,7 @@ fn check_console_fault(
         shell_pid,
         console_pid,
     };
-    check_console_residue(segment, rows, baseline)?;
+    check_console_residue(segment, rows, app_pid, baseline)?;
     let settled = segment
         .rfind(SETTLED_TERMINAL_DESKTOP)
         .ok_or_else(|| format!("init has not settled again: no {SETTLED_TERMINAL_DESKTOP:?}"))?;
@@ -925,7 +943,7 @@ fn run_on(disk: &std::path::Path, fixture_port: u16) -> Result<(), XtaskError> {
     rows = lane
         .session
         .wait("console fault", STEP_TIMEOUT, &mut |segment| {
-            check_console_fault(segment, before, &baseline)
+            check_console_fault(segment, before, app_pid, &baseline)
         })?;
     origin = lane.created_origin("console fault")?;
     println!(
@@ -1073,36 +1091,37 @@ mod tests {
     }
 
     #[test]
-    fn the_console_residue_is_the_baseline_less_the_serial_shell_stream() {
+    fn the_console_residue_is_the_baseline_less_the_streams_not_back_yet() {
         let rows = Terminal {
             terminal_pid: 21,
             shell_pid: 20,
             console_pid: 19,
         };
+        const APP_PID: u64 = 10;
         let baseline = "procs=11 caps=55 conns=8 qreq=0";
         let snapshot = |counts: &str| {
             format!("[RSRC] snapshot compositor=4 desktop-shell=9 app=10 terminal=21 terminal-shell=20 {counts}\n")
         };
-        assert_eq!(
-            check_console_residue(&snapshot("procs=11 caps=55 conns=7 qreq=0"), rows, baseline),
-            Ok(())
-        );
-        assert!(check_console_residue(
-            &snapshot("procs=11 caps=55 conns=8 qreq=0"),
-            rows,
-            baseline
-        )
-        .is_err());
-        assert!(check_console_residue(
-            &snapshot("procs=11 caps=56 conns=7 qreq=0"),
-            rows,
-            baseline
-        )
-        .unwrap_err()
-        .contains("caps=56"));
+        let reopened = "[CON ] pid=10: playground: console stream reopened\n";
+        let check = |segment: &str| check_console_residue(segment, rows, APP_PID, baseline);
+        // The playground not yet woken: its stream and the serial shell's are both gone.
+        assert_eq!(check(&snapshot("procs=11 caps=55 conns=6 qreq=0")), Ok(()));
+        assert!(check(&snapshot("procs=11 caps=55 conns=7 qreq=0")).is_err());
+        // The playground connected again before the snapshot: only the serial shell's.
+        let back = |counts: &str| format!("{reopened}{}", snapshot(counts));
+        assert_eq!(check(&back("procs=11 caps=55 conns=7 qreq=0")), Ok(()));
+        assert!(check(&back("procs=11 caps=55 conns=6 qreq=0")).is_err());
+        // A reopened line after the snapshot does not count.
+        let late = format!("{}{reopened}", snapshot("procs=11 caps=55 conns=7 qreq=0"));
+        assert!(check(&late).is_err());
+        let other_app = back("procs=11 caps=55 conns=7 qreq=0").replace("pid=10:", "pid=11:");
+        assert!(check(&other_app).is_err());
+        assert!(check(&snapshot("procs=11 caps=56 conns=6 qreq=0"))
+            .unwrap_err()
+            .contains("caps=56"));
         let other =
-            snapshot("procs=11 caps=55 conns=7 qreq=0").replace("terminal=21", "terminal=15");
-        assert!(check_console_residue(&other, rows, baseline).is_err());
+            snapshot("procs=11 caps=55 conns=6 qreq=0").replace("terminal=21", "terminal=15");
+        assert!(check(&other).is_err());
         assert_eq!(
             baseline_counts("[RSRC] baseline compositor=4 desktop-shell=9 app=10 terminal=11 terminal-shell=8 procs=11 conns=8\n"),
             Ok("procs=11 conns=8".to_owned())
