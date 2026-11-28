@@ -24,6 +24,9 @@
 //!    restarts, the terminal exits `console-gone` and its shell hangs up rather than reading the
 //!    serial line; both come back on the new service's port, the new session's output reaches
 //!    the new window, and COM1 still reaches the serial shell, from its own pid.
+//! 9. **Playground console stream** (#368): the playground kept its pid through the console
+//!    restart; the kernel reissued its console record on the new port, and once a rail click
+//!    wakes it the playground connects again and writes through the new service.
 
 use std::time::Duration;
 
@@ -494,6 +497,41 @@ fn check_console_fault(
     Ok(rows)
 }
 
+/// What the playground writes once it has connected its console stream again (#368).
+const APP_CONSOLE_REOPENED: &str = "playground: console stream reopened";
+
+/// Since the console fault: the kernel reissued the playground's console record on the new
+/// service's port (named by its grant line), and then the playground, from its unchanged
+/// pid, wrote a line through a stream on that service, on a line of its own.
+fn check_app_console_reopened(segment: &str, app_pid: u64, console_pid: u64) -> Result<(), String> {
+    let serve = format!("[CONS] authority granted pid={console_pid} port={CONSOLE}:");
+    let (granted_at, rest) = whole_line(segment, &serve).ok_or_else(|| format!("no {serve:?}"))?;
+    let generation = rest
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| format!("console port grant {rest:?}"))?;
+    let reissued = format!("[CONS] client reissued holder={app_pid} port={CONSOLE}:{generation}\n");
+    let reissued_at = segment.find(&reissued).ok_or_else(|| {
+        format!("the playground's console record was not reissued: no {reissued:?}")
+    })?;
+    if reissued_at < granted_at {
+        return Err("the playground's console record was reissued before the new port".to_owned());
+    }
+    let line = format!("[CON ] pid={app_pid}: {APP_CONSOLE_REOPENED}");
+    let written_at = segment
+        .match_indices(&line)
+        .map(|(at, _)| at)
+        .find(|&at| {
+            (at == 0 || segment[..at].ends_with('\n'))
+                && segment[at + line.len()..].starts_with(['\n', '\r'])
+        })
+        .ok_or_else(|| format!("no line {line:?} from the playground's console stream"))?;
+    if written_at < reissued_at {
+        return Err("the playground wrote before its record was reissued".to_owned());
+    }
+    Ok(())
+}
+
 /// Where the compositor last put a new window's content, from its `[WIN ] created` line.
 fn created_origin(segment: &str) -> Option<Point> {
     let complete = segment.rfind('\n').map_or("", |end| &segment[..=end]);
@@ -667,6 +705,24 @@ impl Lane {
         Ok(())
     }
 
+    /// Clicks rail slot `slot` and requires the shell's switch to the `name` window.
+    fn rail_switch(&mut self, slot: usize, name: &str) -> Result<(), XtaskError> {
+        let Some(item) = rail_item(QualityTier::Q1, slot) else {
+            return self.session.fail(format!("the rail has no slot {slot}"));
+        };
+        self.move_to(center(item))?;
+        self.session.mark();
+        let mark = self.session.offset();
+        self.button(true, "surface")?;
+        self.button(false, "surface")?;
+        self.session.mark_at(mark);
+        self.session
+            .wait("rail switch", STEP_TIMEOUT, &mut |segment| {
+                switched(segment, name)
+            })?;
+        Ok(())
+    }
+
     /// Sleeps `wait` on the guest's output without expecting anything.
     fn pace(&mut self, wait: Duration) -> Result<(), XtaskError> {
         let _ = self
@@ -788,11 +844,15 @@ fn run_on(disk: &std::path::Path, fixture_port: u16) -> Result<(), XtaskError> {
     let mut rows = lane
         .session
         .wait("boot", STEP_TIMEOUT * 3, &mut check_boot)?;
-    let (serial_shell, baseline) = {
+    let (serial_shell, app_pid, baseline) = {
         let segment = lane.session.segment();
-        match launched_pid(&segment, SERIAL_SHELL)
-            .and_then(|pid| Ok((pid, baseline_counts(&segment)?)))
-        {
+        match launched_pid(&segment, SERIAL_SHELL).and_then(|pid| {
+            Ok((
+                pid,
+                launched_pid(&segment, APP)?,
+                baseline_counts(&segment)?,
+            ))
+        }) {
             Ok(found) => found,
             Err(reason) => return lane.session.fail(reason),
         }
@@ -815,19 +875,7 @@ fn run_on(disk: &std::path::Path, fixture_port: u16) -> Result<(), XtaskError> {
 
     println!("\n[STT ] step: rail");
     for (slot, name) in RAIL {
-        let Some(item) = rail_item(QualityTier::Q1, slot) else {
-            return lane.session.fail(format!("the rail has no slot {slot}"));
-        };
-        lane.move_to(center(item))?;
-        lane.session.mark();
-        let mark = lane.session.offset();
-        lane.button(true, "surface")?;
-        lane.button(false, "surface")?;
-        lane.session.mark_at(mark);
-        lane.session
-            .wait("rail switch", STEP_TIMEOUT, &mut |segment| {
-                switched(segment, name)
-            })?;
+        lane.rail_switch(slot, name)?;
         println!("\n[STT ] rail slot {slot} focused the {name} window");
     }
 
@@ -871,6 +919,8 @@ fn run_on(disk: &std::path::Path, fixture_port: u16) -> Result<(), XtaskError> {
 
     println!("\n[STT ] step: console fault with the terminal attached");
     let before = rows;
+    lane.session.mark();
+    let console_fault_at = lane.session.offset();
     lane.session.type_serial(CONSOLE_FAULT)?;
     rows = lane
         .session
@@ -884,6 +934,20 @@ fn run_on(disk: &std::path::Path, fixture_port: u16) -> Result<(), XtaskError> {
     );
     lane.type_in_terminal(origin, rows.shell_pid, "console-fault")?;
     lane.serial_shell(serial_shell)?;
+
+    println!("\n[STT ] step: playground console stream after the console restart");
+    // The click wakes the playground; it may have connected again already, on an earlier
+    // event, so the check reads everything since the fault.
+    lane.rail_switch(RAIL[0].0, RAIL[0].1)?;
+    lane.session.mark_at(console_fault_at);
+    lane.session
+        .wait("playground console stream", STEP_TIMEOUT, &mut |segment| {
+            check_app_console_reopened(segment, app_pid, rows.console_pid)
+        })?;
+    println!(
+        "\n[STT ] playground pid={app_pid} wrote through console pid={}",
+        rows.console_pid
+    );
 
     let transcript = lane.session.transcript();
     if let Err(reason) = check_whole(&transcript) {
@@ -1043,6 +1107,34 @@ mod tests {
             baseline_counts("[RSRC] baseline compositor=4 desktop-shell=9 app=10 terminal=11 terminal-shell=8 procs=11 conns=8\n"),
             Ok("procs=11 conns=8".to_owned())
         );
+    }
+
+    #[test]
+    fn the_playground_writes_through_the_new_console_after_its_reissue() {
+        let good = "[CONS] authority granted pid=30 port=22016:31 rights=serve registered=1 device=read|write\n\
+                    [CONS] client reissued holder=10 port=22016:31\n\
+                    [CON ] pid=10: playground: console stream reopened\n";
+        assert_eq!(check_app_console_reopened(good, 10, 30), Ok(()));
+        for (from, to) in [
+            ("holder=10 port=22016:31", "holder=10 port=22016:5"),
+            ("holder=10", "holder=11"),
+            ("pid=10: playground", "pid=11: playground"),
+            ("reopened", "open"),
+            ("granted pid=30", "granted pid=29"),
+        ] {
+            let bad = good.replace(from, to);
+            assert!(
+                check_app_console_reopened(&bad, 10, 30).is_err(),
+                "{from:?}"
+            );
+        }
+        // The line must be one of its own, and come after the reissue.
+        let glued = good.replace("[CON ] pid=10", "x[CON ] pid=10");
+        assert!(check_app_console_reopened(&glued, 10, 30).is_err());
+        let early = "[CON ] pid=10: playground: console stream reopened\n\
+                     [CONS] authority granted pid=30 port=22016:31 rights=serve\n\
+                     [CONS] client reissued holder=10 port=22016:31\n";
+        assert!(check_app_console_reopened(early, 10, 30).is_err());
     }
 
     #[test]

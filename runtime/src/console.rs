@@ -7,6 +7,13 @@
 //!   wait for input. The service frames the stream's output per writer on the serial line.
 //! - [`ConsoleFrontEnd`]: the console session's front end (#311), reading the session's
 //!   output and typing its input.
+//! - [`LiveConsoleStream`]: a [`ConsoleStream`] that connects again after the console service
+//!   restarts (#368).
+//!
+//! A console service restart ends every stream. The kernel then moves each client's
+//! `CONSOLE_CONNECT` record to the new instance's port, so a client that connects again is on
+//! the new service; [`LiveConsoleStream`] is how a native app does that. [`Console`] is not
+//! affected: it goes to the kernel, not to the console service.
 
 use clean_slate_capability::ResourceClass;
 use clean_slate_native_abi::console::{
@@ -15,7 +22,7 @@ use clean_slate_native_abi::console::{
 use clean_slate_native_abi::desktop::{CONSOLE_LINE_BYTES, SYSCALL_NR_IPC_SEND};
 use clean_slate_native_abi::status::STATUS_EINVAL;
 
-use crate::port::{Connection, Deadline, Wait};
+use crate::port::{Connection, Deadline, PortEvent, Wait};
 use crate::{Error, Syscalls};
 
 /// A console capability handle.
@@ -183,6 +190,110 @@ impl ConsoleStream {
     }
 }
 
+/// What [`LiveConsoleStream::tend`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tended {
+    /// The stream is open on a live service, as it was.
+    Open,
+    /// A stream was connected just now: the first one, or one on a restarted service.
+    Connected,
+    /// There is no stream: the service is gone and none could be connected yet.
+    Down,
+}
+
+/// A console stream that outlives console service restarts (#368). Its owner calls
+/// [`Self::tend`] whenever it is awake anyway; that notices, without waiting, that the
+/// service went, and connects again once the kernel has reissued the client's record on the
+/// new port. Nothing written while the stream is down is kept.
+///
+/// A connect the kernel refuses is audited, so while the stream is down a connect is tried
+/// at most once per [`LiveConsoleStream::RETRY_NS`], however often the owner wakes. The dead
+/// connection is closed only once its replacement is open, so the process holds one console
+/// connection throughout, as a client that never reconnects would.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LiveConsoleStream {
+    stream: Option<ConsoleStream>,
+    /// The connection the service ended, until a new one replaces it.
+    dead: Option<Connection>,
+    /// The monotonic time before which no connect is tried.
+    retry_at: u64,
+}
+
+impl LiveConsoleStream {
+    /// The least time between two connects while the stream is down.
+    pub const RETRY_NS: u64 = 250_000_000;
+
+    pub const fn new() -> Self {
+        Self {
+            stream: None,
+            dead: None,
+            retry_at: 0,
+        }
+    }
+
+    /// The open stream, if there is one.
+    pub const fn stream(&self) -> Option<ConsoleStream> {
+        self.stream
+    }
+
+    /// Checks the stream without waiting and connects one when there is none.
+    pub fn tend<S: Syscalls>(&mut self, sys: &mut S) -> Tended {
+        if let Some(stream) = self.stream {
+            if !is_gone(sys, stream.connection) {
+                return Tended::Open;
+            }
+            self.dead = Some(stream.connection);
+            self.stream = None;
+        }
+        let Ok(now) = crate::port::now(sys) else {
+            return Tended::Down;
+        };
+        if now < self.retry_at {
+            return Tended::Down;
+        }
+        match ConsoleStream::connect(sys) {
+            Ok(stream) => {
+                if let Some(dead) = self.dead.take() {
+                    let _ = dead.close(sys, 0);
+                }
+                self.stream = Some(stream);
+                Tended::Connected
+            }
+            Err(_) => {
+                self.retry_at = now.saturating_add(Self::RETRY_NS);
+                Tended::Down
+            }
+        }
+    }
+
+    /// Writes `text` when a stream is open. A stream found gone is dropped, and the next
+    /// [`Self::tend`] connects again.
+    pub fn write_str<S: Syscalls>(&mut self, sys: &mut S, text: &str, deadline: Deadline) {
+        if let Some(stream) = self.stream {
+            if let Err(error) = stream.write_str(sys, text, deadline) {
+                if error.is_gone() {
+                    self.dead = Some(stream.connection);
+                    self.stream = None;
+                }
+            }
+        }
+    }
+}
+
+/// Whether the service behind `connection` has ended it, read without waiting. A client that
+/// never asks for input has nothing else queued; a stray frame is dropped.
+fn is_gone<S: Syscalls>(sys: &mut S, connection: Connection) -> bool {
+    loop {
+        match connection.recv(sys, Wait::No) {
+            Ok(PortEvent::Frame(_)) => continue,
+            Ok(PortEvent::Disconnected { .. } | PortEvent::ServerGone) => return true,
+            Err(Error::WouldBlock) => return false,
+            // Gone, or a connection the kernel no longer knows.
+            Err(_) => return true,
+        }
+    }
+}
+
 /// The console session's front end (#311): a connection that, once attached, reads the
 /// session's output and types its input. Attaching needs `CONSOLE_ATTACH` on the console port.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,7 +384,9 @@ impl ConsoleFrontEnd {
 mod tests {
     use super::*;
     use crate::fake::FakeKernel;
+    use clean_slate_native_abi::port::{PORT_OP_CLOSE, SYSCALL_NR_SERVICE_PORT};
     use clean_slate_native_abi::status::STATUS_EBADF;
+    use clean_slate_native_abi::work_set::SYSCALL_NR_WORK_SET;
 
     fn stream(sys: &mut FakeKernel) -> ConsoleStream {
         let id = sys.resource_id();
@@ -388,6 +501,69 @@ mod tests {
         sys.server_exit();
         let mut out = [0u8; 4];
         assert_eq!(stream.read(&mut sys, &mut out), Err(Error::Gone));
+    }
+
+    #[test]
+    fn a_live_stream_connects_once_and_stays_open() {
+        let mut sys = FakeKernel::new();
+        let mut live = LiveConsoleStream::new();
+        assert_eq!(live.stream(), None);
+        assert_eq!(live.tend(&mut sys), Tended::Connected);
+        assert_eq!(live.tend(&mut sys), Tended::Open);
+        live.write_str(&mut sys, "hi\n", Deadline::NEVER);
+        assert_eq!(
+            ConsoleRequest::decode(&sys.server_recv_frame().unwrap()),
+            Ok(ConsoleRequest::Write(ConsoleBytes::new(b"hi\n").unwrap()))
+        );
+        // A stray frame is not the service going.
+        sys.server_post(&ConsoleEvent::NoInput.encode());
+        assert_eq!(live.tend(&mut sys), Tended::Open);
+    }
+
+    #[test]
+    fn a_live_stream_connects_again_after_the_service_restarts() {
+        let mut sys = FakeKernel::new();
+        let mut live = LiveConsoleStream::new();
+        assert_eq!(live.tend(&mut sys), Tended::Connected);
+        let old = live.stream().unwrap();
+        sys.server_exit();
+        // The new instance's port is not there yet; the dead connection is kept meanwhile.
+        assert_eq!(live.tend(&mut sys), Tended::Down);
+        assert_eq!(live.stream(), None);
+        let closed = |sys: &FakeKernel| {
+            sys.calls().iter().any(|(nr, args)| {
+                *nr == SYSCALL_NR_SERVICE_PORT
+                    && args[0] == PORT_OP_CLOSE
+                    && args[2] == old.connection().raw()
+            })
+        };
+        assert!(!closed(&sys));
+        // Too soon to try again: no connect is made.
+        let calls = sys.calls().len();
+        assert_eq!(live.tend(&mut sys), Tended::Down);
+        assert!(sys.calls()[calls..]
+            .iter()
+            .all(|(nr, _)| *nr != SYSCALL_NR_SERVICE_PORT));
+        // Later, the kernel has reissued the record on the new port: find it and connect.
+        sys.answer_next(SYSCALL_NR_WORK_SET, 1 + LiveConsoleStream::RETRY_NS);
+        sys.answer_next(SYSCALL_NR_SERVICE_PORT, 77);
+        sys.answer_next(SYSCALL_NR_SERVICE_PORT, 0x99);
+        assert_eq!(live.tend(&mut sys), Tended::Connected);
+        assert_eq!(live.stream().unwrap().connection().raw(), 0x99);
+        // Then the dead one is closed.
+        assert!(closed(&sys));
+    }
+
+    #[test]
+    fn a_write_that_finds_the_service_gone_drops_the_stream() {
+        let mut sys = FakeKernel::new();
+        let mut live = LiveConsoleStream::new();
+        assert_eq!(live.tend(&mut sys), Tended::Connected);
+        sys.server_exit();
+        live.write_str(&mut sys, "lost\n", Deadline::NEVER);
+        assert_eq!(live.stream(), None);
+        // Writing with no stream is a no-op.
+        live.write_str(&mut sys, "lost\n", Deadline::NEVER);
     }
 
     #[test]
