@@ -64,6 +64,9 @@ pub struct ConvergedSupervisor<C, D, const N: usize> {
     default_liveness: LivenessConfig,
     now: MonotonicTicks,
     dep_health: DependencyHealthSnapshot<N>,
+    /// #373: set for a system stop. No failure schedules a restart, and none that was
+    /// scheduled runs.
+    restarts_suspended: bool,
 }
 
 impl<C, D, const N: usize> ConvergedSupervisor<C, D, N>
@@ -85,7 +88,18 @@ where
             default_liveness,
             now: 0,
             dep_health: DependencyHealthSnapshot::empty(),
+            restarts_suspended: false,
         }
+    }
+
+    /// #373: from now on no restart policy fires, for failures already seen or to come. There
+    /// is no way back: a system stop ends with the machine off.
+    pub fn suspend_restarts(&mut self) {
+        self.restarts_suspended = true;
+    }
+
+    pub fn restarts_suspended(&self) -> bool {
+        self.restarts_suspended
     }
 
     pub fn registry(&self) -> &ServiceRegistry<N> {
@@ -259,6 +273,15 @@ where
             .map_err(ConvergedSupervisorError::Supervisor)
     }
 
+    /// #373: asks `service`'s live instance to stop. The kernel answers with nothing at once;
+    /// the instance's `Exited` (or `Faulted`) arrives later as a lifecycle message, which the
+    /// caller polls.
+    pub fn stop(&mut self, service: ServiceId) -> Result<(), ConvergedSupervisorError> {
+        self.supervisor
+            .issue_control(ControlRequest::new(service, ControlRequestKind::Stop))
+            .map_err(ConvergedSupervisorError::Supervisor)
+    }
+
     /// Writes one line to the supervisor's diagnostic sink.
     pub fn emit_diagnostic(&mut self, line: &str) -> Result<(), ConvergedSupervisorError> {
         self.emit_line(line)
@@ -358,6 +381,9 @@ where
         if let Some(pid) = failed_pid {
             self.emit_failure(service, pid)?;
         }
+        if self.restarts_suspended {
+            return Ok(());
+        }
         let now = self.now;
         let decision = self
             .recovery_slot_mut(service)?
@@ -374,6 +400,9 @@ where
     }
 
     fn drive_pending_restarts(&mut self) -> Result<(), ConvergedSupervisorError> {
+        if self.restarts_suspended {
+            return Ok(());
+        }
         for index in 0..N {
             let Some(slot) = self.recovery[index].as_ref() else {
                 continue;

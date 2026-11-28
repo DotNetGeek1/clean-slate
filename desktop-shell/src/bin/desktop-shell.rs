@@ -113,7 +113,9 @@ fn drain_launcher(
                     LauncherEvent::StartResult { result, .. } => {
                         console(boot, &diag::launch_result_line(result));
                     }
-                    LauncherEvent::Entry(_) | LauncherEvent::Changed(_) => {}
+                    LauncherEvent::Entry(_)
+                    | LauncherEvent::Changed(_)
+                    | LauncherEvent::StopResult(_) => {}
                 }
                 *outcome = session.handle_launcher(&event, client);
                 if *outcome != Outcome::Continue {

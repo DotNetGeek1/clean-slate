@@ -62,6 +62,9 @@ impl Rights {
     /// `READ` and `WRITE` reach the directory's entry objects too (#312,
     /// `clean_slate_native_abi::directory`).
     pub const DIRECTORY: Self = Self(1 << 26);
+    /// On the launcher port, beside `LAUNCH_CONNECT`: ask init to stop the whole system (#373).
+    /// Root grants only, never delegated. Bit 27 is the power call's right (#372).
+    pub const LAUNCH_POWER: Self = Self(1 << 28);
 
     const ALL_KNOWN: u32 = (1 << 0)
         | (1 << 1)
@@ -89,7 +92,8 @@ impl Rights {
         | (1 << 23)
         | (1 << 24)
         | (1 << 25)
-        | (1 << 26);
+        | (1 << 26)
+        | (1 << 28);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -198,7 +202,11 @@ impl Rights {
             ),
             // Connecting may be delegated as on the other ports; serving is init's alone.
             ResourceClass::Launcher => Self(
-                Self::LAUNCH_CONNECT.0 | Self::LAUNCH_SERVE.0 | Self::DELEGATE.0 | Self::REVOKE.0,
+                Self::LAUNCH_CONNECT.0
+                    | Self::LAUNCH_SERVE.0
+                    | Self::LAUNCH_POWER.0
+                    | Self::DELEGATE.0
+                    | Self::REVOKE.0,
             ),
         }
     }
@@ -221,14 +229,15 @@ impl Rights {
             ResourceClass::Console => {
                 Self(Self::CONSOLE_SERVE.0 | Self::CONSOLE_ATTACH.0 | Self::READ.0 | Self::WRITE.0)
             }
-            ResourceClass::Launcher => Self::LAUNCH_SERVE,
+            // Asking for a system stop comes only from a manifest row, like serving the port.
+            ResourceClass::Launcher => Self(Self::LAUNCH_SERVE.0 | Self::LAUNCH_POWER.0),
             _ => Self::empty(),
         }
     }
 
     /// Lowercase, pipe-separated names in deterministic bit order.
     pub fn write_names(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        const NAMES: [(&str, u32); 27] = [
+        const NAMES: [(&str, u32); 28] = [
             ("read", 1 << 0),
             ("write", 1 << 1),
             ("inspect", 1 << 2),
@@ -256,6 +265,7 @@ impl Rights {
             ("launch_connect", 1 << 24),
             ("launch_serve", 1 << 25),
             ("directory", 1 << 26),
+            ("launch_power", 1 << 28),
         ];
         let mut first = true;
         for (name, bit) in NAMES {

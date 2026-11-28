@@ -619,7 +619,7 @@ fn stop_storage_service(lifecycle_capability: u64) -> Result<(), &'static str> {
             lifecycle_capability,
             &LifecycleMessage::ControlRequest(ControlRequest::new(
                 STORAGE_SERVICE_ID,
-                ControlRequestKind::Stop,
+                ControlRequestKind::Terminate,
             ))
             .encode(),
         )

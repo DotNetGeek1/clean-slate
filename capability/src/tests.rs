@@ -457,12 +457,14 @@ fn launcher_rights_keep_serving_at_the_root() {
         Rights::valid_for(ResourceClass::Launcher),
         Rights::LAUNCH_CONNECT
             .union(Rights::LAUNCH_SERVE)
+            .union(Rights::LAUNCH_POWER)
             .union(Rights::DELEGATE)
             .union(Rights::REVOKE)
     );
+    // #373: asking init for a system stop is never delegated.
     assert_eq!(
         Rights::root_only_for(ResourceClass::Launcher),
-        Rights::LAUNCH_SERVE
+        Rights::LAUNCH_SERVE.union(Rights::LAUNCH_POWER)
     );
     assert_eq!(ResourceClass::Launcher.name(), "launcher");
     assert_eq!(ResourceClass::from_u8(13), Some(ResourceClass::Launcher));
@@ -480,6 +482,13 @@ fn launcher_rights_keep_serving_at_the_root() {
         .write_names(&mut names)
         .unwrap();
     assert_eq!(names, "launch_connect|launch_serve");
+    let mut names = alloc::string::String::new();
+    Rights::LAUNCH_CONNECT
+        .union(Rights::LAUNCH_POWER)
+        .write_names(&mut names)
+        .unwrap();
+    assert_eq!(names, "launch_connect|launch_power");
+    assert_eq!(Rights::from_bits(1 << 28), Some(Rights::LAUNCH_POWER));
 }
 
 #[test]
