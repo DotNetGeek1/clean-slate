@@ -11,7 +11,7 @@
 //! | 0 | `self_pid` | init's pid |
 //! | 8 | `console_capability` | IPC send handle for init's console lines |
 //! | 16 | `lifecycle_capability` | `LIFECYCLE_CONTROL` (4), `LIFECYCLE_POLL` (5), `LIFECYCLE_WAIT` (21) |
-//! | 24 | `desktop_mode` | [`DESKTOP_MODE_OFF`], [`DESKTOP_MODE_FRAMEBUFFER`] (`q0`) or [`DESKTOP_MODE_VIRTIO_GPU`] (`q1`), with [`DESKTOP_MODE_TERMINAL`] unless the value is `q0-bare` or `q1-bare` |
+//! | 24 | `desktop_mode` | [`DESKTOP_MODE_OFF`], [`DESKTOP_MODE_FRAMEBUFFER`] (`q0`) or [`DESKTOP_MODE_VIRTIO_GPU`] (`q1`), with [`DESKTOP_MODE_TERMINAL`] unless the value is `q0-bare` or `q1-bare`, and [`DESKTOP_MODE_NATIVE_SHELL`] for `q0-native-shell` or `q1-native-shell` |
 //! | 32 | `launcher_capability` | `LAUNCH_SERVE` on `ResourceRef::launcher_port()` (#237) |
 
 /// Where the kernel maps init's bootstrap page (the same slot as the storage service's).
@@ -27,10 +27,20 @@ pub const DESKTOP_MODE_VIRTIO_GPU: u64 = 2;
 /// default desktop also declares the terminal window and its shell (#311). Never set on
 /// [`DESKTOP_MODE_OFF`].
 pub const DESKTOP_MODE_TERMINAL: u64 = 1 << 8;
+/// Set with [`DESKTOP_MODE_TERMINAL`] for `q0-native-shell` and `q1-native-shell` (#388): the
+/// terminal's shell row runs the native shell instead of BusyBox `ash`. Never set without the
+/// terminal flag.
+pub const DESKTOP_MODE_NATIVE_SHELL: u64 = 1 << 9;
 
 /// The tier part of a `desktop_mode` word: off, `q0` or `q1`.
 pub const fn desktop_tier(desktop_mode: u64) -> u64 {
-    desktop_mode & !DESKTOP_MODE_TERMINAL
+    desktop_mode & !(DESKTOP_MODE_TERMINAL | DESKTOP_MODE_NATIVE_SHELL)
+}
+
+/// Whether a `desktop_mode` word asks for the native shell in the terminal (#388). Only with
+/// the terminal rows.
+pub const fn desktop_native_shell(desktop_mode: u64) -> bool {
+    desktop_terminal(desktop_mode) && desktop_mode & DESKTOP_MODE_NATIVE_SHELL != 0
 }
 
 /// Whether a `desktop_mode` word asks for the terminal rows.

@@ -218,6 +218,34 @@ struct RunOptions {
     framebuffer: bool,
     /// `--bare`: the desktop without the terminal window and its shell (`q0-bare`, `q1-bare`).
     bare: bool,
+    /// `--native-shell`: the terminal runs the native shell (`q0-native-shell`,
+    /// `q1-native-shell`, #388).
+    native_shell: bool,
+}
+
+/// Which rows the desktop declares beyond its own three.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DesktopProfile {
+    /// No terminal (`q0-bare`, `q1-bare`).
+    Bare,
+    /// The terminal window and BusyBox in its shell row (`q0`, `q1`): the default.
+    Terminal,
+    /// The terminal window and the native shell in its shell row (#388).
+    NativeShell,
+}
+
+impl DesktopProfile {
+    /// The `opt/clean-slate/desktop` value.
+    pub(crate) const fn value(self, framebuffer: bool) -> &'static str {
+        match (framebuffer, self) {
+            (true, Self::Terminal) => "q0",
+            (false, Self::Terminal) => "q1",
+            (true, Self::Bare) => "q0-bare",
+            (false, Self::Bare) => "q1-bare",
+            (true, Self::NativeShell) => "q0-native-shell",
+            (false, Self::NativeShell) => "q1-native-shell",
+        }
+    }
 }
 
 /// #313: QEMU ids of the virtio keyboard and tablet that `run --desktop` and
@@ -246,12 +274,19 @@ pub(crate) fn desktop_qemu_args(framebuffer: bool) -> Vec<String> {
 /// [`desktop_qemu_args`] for the default desktop (`q0`, `q1`) when `terminal`, which also declares
 /// the terminal window and its shell (#311).
 pub(crate) fn desktop_qemu_args_with(framebuffer: bool, terminal: bool) -> Vec<String> {
-    let value = match (framebuffer, terminal) {
-        (true, true) => "q0",
-        (false, true) => "q1",
-        (true, false) => "q0-bare",
-        (false, false) => "q1-bare",
-    };
+    desktop_qemu_args_for(
+        framebuffer,
+        if terminal {
+            DesktopProfile::Terminal
+        } else {
+            DesktopProfile::Bare
+        },
+    )
+}
+
+/// [`desktop_qemu_args`] for any [`DesktopProfile`].
+pub(crate) fn desktop_qemu_args_for(framebuffer: bool, profile: DesktopProfile) -> Vec<String> {
+    let value = profile.value(framebuffer);
     let mut args = vec![
         "-fw_cfg".to_owned(),
         format!("name=opt/clean-slate/desktop,string={value}"),
@@ -260,6 +295,18 @@ pub(crate) fn desktop_qemu_args_with(framebuffer: bool, terminal: bool) -> Vec<S
         args.extend(crate::m10_virtio_gpu::qemu_args());
     }
     args
+}
+
+impl RunOptions {
+    const fn profile(self) -> DesktopProfile {
+        if self.bare {
+            DesktopProfile::Bare
+        } else if self.native_shell {
+            DesktopProfile::NativeShell
+        } else {
+            DesktopProfile::Terminal
+        }
+    }
 }
 
 fn parse_run_options(args: &[OsString]) -> Result<RunOptions, XtaskError> {
@@ -281,13 +328,20 @@ fn parse_run_options(args: &[OsString]) -> Result<RunOptions, XtaskError> {
             options.bare = true;
             continue;
         }
+        if arg == OsStr::new("--native-shell") {
+            options.native_shell = true;
+            continue;
+        }
         return Err(XtaskError::InvalidOption(
             arg.to_string_lossy().into_owned(),
         ));
     }
-    if (options.framebuffer || options.bare) && !options.desktop {
+    if (options.framebuffer || options.bare || options.native_shell) && !options.desktop
+        || (options.bare && options.native_shell)
+    {
         return Err(XtaskError::InvalidCommand(
-            "usage: cargo xtask run [--net] [--desktop] [--framebuffer] [--bare]".to_owned(),
+            "usage: cargo xtask run [--net] [--desktop] [--framebuffer] [--bare | --native-shell]"
+                .to_owned(),
         ));
     }
     Ok(options)
@@ -308,7 +362,7 @@ fn launch_config(options: RunOptions, disk: PathBuf, fixture_port: Option<u16>) 
         if options.framebuffer {
             config.vga = Some("std");
         }
-        config.extra_args = desktop_qemu_args_with(options.framebuffer, !options.bare);
+        config.extra_args = desktop_qemu_args_for(options.framebuffer, options.profile());
         config.extra_args.extend(virtio_input_qemu_args());
     }
     config
@@ -344,7 +398,7 @@ fn start_peer(m9_profile: bool) -> Result<M7FixturePeer, XtaskError> {
     .map_err(XtaskError::Io)
 }
 
-/// `cargo xtask run [--net] [--desktop] [--framebuffer] [--bare]`. `run-gdb` and `run-gdb-entry` take
+/// `cargo xtask run [--net] [--desktop] [--framebuffer] [--bare | --native-shell]`. `run-gdb` and `run-gdb-entry` take
 /// `--net` only; `--desktop` is refused there.
 pub(crate) fn run(
     args: &[OsString],
@@ -375,12 +429,7 @@ pub(crate) fn run(
     if options.desktop {
         println!(
             "[XTSK] desktop boot option opt/clean-slate/desktop={} ({})",
-            match (options.framebuffer, options.bare) {
-                (true, false) => "q0",
-                (false, false) => "q1",
-                (true, true) => "q0-bare",
-                (false, true) => "q1-bare",
-            },
+            options.profile().value(options.framebuffer),
             if options.framebuffer {
                 "-vga std"
             } else {
@@ -1386,6 +1435,7 @@ mod tests {
                 desktop: true,
                 framebuffer: true,
                 bare: false,
+                native_shell: false,
             }
         );
         assert!(parse_run_options(&["--disk".into()]).is_err());
@@ -1450,6 +1500,21 @@ mod tests {
             .extra_args
             .iter()
             .any(|arg| arg == "name=opt/clean-slate/desktop,string=q1-bare"));
+        assert!(parse_run_options(&["--native-shell".into()]).is_err());
+        assert!(
+            parse_run_options(&["--desktop".into(), "--bare".into(), "--native-shell".into()])
+                .is_err()
+        );
+        let native = launch_config(
+            parse_run_options(&["--desktop".into(), "--native-shell".into()]).unwrap(),
+            PathBuf::from("DISK.img"),
+            None,
+        );
+        assert!(native
+            .extra_args
+            .iter()
+            .any(|arg| arg == "name=opt/clean-slate/desktop,string=q1-native-shell"));
+        assert_eq!(DesktopProfile::NativeShell.value(true), "q0-native-shell");
     }
 
     #[test]

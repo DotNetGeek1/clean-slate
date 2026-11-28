@@ -215,6 +215,8 @@ mod tests {
             "spc" => 0x2C,
             "minus" => 0x2D,
             "4" => 0x21,
+            "ctrl" => 0xE0,
+            "d" => 0x07,
             other => panic!("no usage for qcode `{other}`"),
         }
     }

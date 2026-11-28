@@ -24,12 +24,14 @@ use clean_slate_runtime::console::Console;
 use clean_slate_runtime::port::{Deadline, Server, Wait, WorkSet};
 use clean_slate_runtime::{port, process, Error, Kernel, Syscalls};
 use clean_slate_service_fixtures::init_bootstrap::{
-    InitBootstrap, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_TERMINAL,
-    DESKTOP_MODE_VIRTIO_GPU, INIT_BOOTSTRAP_ADDRESS,
+    InitBootstrap, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_NATIVE_SHELL, DESKTOP_MODE_OFF,
+    DESKTOP_MODE_TERMINAL, DESKTOP_MODE_VIRTIO_GPU, INIT_BOOTSTRAP_ADDRESS,
 };
 
 const TERMINAL_FRAMEBUFFER: u64 = DESKTOP_MODE_FRAMEBUFFER | DESKTOP_MODE_TERMINAL;
 const TERMINAL_VIRTIO_GPU: u64 = DESKTOP_MODE_VIRTIO_GPU | DESKTOP_MODE_TERMINAL;
+const NATIVE_SHELL_FRAMEBUFFER: u64 = TERMINAL_FRAMEBUFFER | DESKTOP_MODE_NATIVE_SHELL;
+const NATIVE_SHELL_VIRTIO_GPU: u64 = TERMINAL_VIRTIO_GPU | DESKTOP_MODE_NATIVE_SHELL;
 use clean_slate_service_fixtures::manifest::{manifest_for, SYSTEM_TERMINAL_DESKTOP_MANIFEST};
 use clean_slate_service_lifecycle::ServiceId;
 use clean_slate_supervisor::launcher::{Launcher, LauncherPort, PostRefused};
@@ -273,6 +275,18 @@ fn log_boot_profile(console: Console, mode: u64) {
             let _ = console.send(
                 &mut Kernel,
                 b"[INIT] boot profile=desktop tier=Q1 terminal=on\n",
+            );
+        }
+        NATIVE_SHELL_FRAMEBUFFER => {
+            let _ = console.send(
+                &mut Kernel,
+                b"[INIT] boot profile=desktop tier=Q0 terminal=on shell=native\n",
+            );
+        }
+        NATIVE_SHELL_VIRTIO_GPU => {
+            let _ = console.send(
+                &mut Kernel,
+                b"[INIT] boot profile=desktop tier=Q1 terminal=on shell=native\n",
             );
         }
         other => {

@@ -16,6 +16,7 @@ on:
       - "network/**"
       - "playground/**"
       - "terminal/**"
+      - "nsh/**"
       - "storage-probe/**"
       - "net-probe/**"
       - "console/**"
@@ -53,6 +54,7 @@ on:
       - "network/**"
       - "playground/**"
       - "terminal/**"
+      - "nsh/**"
       - "storage-probe/**"
       - "net-probe/**"
       - "console/**"
@@ -156,6 +158,9 @@ jobs:
       - name: Clippy (terminal)
         run: cargo clippy -p clean-slate-terminal --all-targets -- -D warnings
 
+      - name: Clippy (nsh)
+        run: cargo clippy -p clean-slate-nsh --all-targets -- -D warnings
+
       - name: Clippy (console)
         run: cargo clippy -p clean-slate-console --all-targets -- -D warnings
 
@@ -197,6 +202,7 @@ jobs:
           done
           cargo clippy -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-terminal --bin clean-slate-terminal-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
+          cargo clippy -p clean-slate-nsh --bin clean-slate-nsh-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-console --bin clean-slate-console-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-storage-probe --bin clean-slate-storage-probe-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-net-probe --bin clean-slate-net-probe-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
@@ -204,7 +210,7 @@ jobs:
           cargo clippy -p clean-slate-store --bin clean-slate-storage-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-net-service --bin clean-slate-network-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
 
-      # The default image (and the system-test-hooks build) embeds these four ELFs for init's
+      # The default image (and the system-test-hooks build) embeds these five ELFs for init's
       # desktop rows (kernel/build.rs).
       - name: Build M10 desktop userspace images
         env:
@@ -214,6 +220,7 @@ jobs:
           cargo build -p clean-slate-desktop-shell --bin clean-slate-desktop-shell-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release
           cargo build -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release
           cargo build -p clean-slate-terminal --bin clean-slate-terminal-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release
+          cargo build -p clean-slate-nsh --bin clean-slate-nsh-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release
 
       # Every kernel build embeds the storage and network ELFs (kernel/build.rs), including
       # clippy, the bare kernel build, and host tests below; the featureless build (the default
@@ -360,6 +367,7 @@ jobs:
           cargo test -p clean-slate-compositor
           cargo test -p clean-slate-playground
           cargo test -p clean-slate-terminal
+          cargo test -p clean-slate-nsh
           cargo test -p clean-slate-console
           cargo test -p clean-slate-storage-probe
           cargo test -p clean-slate-net-probe

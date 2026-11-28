@@ -10,7 +10,8 @@
 
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use clean_slate_service_fixtures::init_bootstrap::{
-    DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_TERMINAL, DESKTOP_MODE_VIRTIO_GPU,
+    DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_NATIVE_SHELL, DESKTOP_MODE_OFF, DESKTOP_MODE_TERMINAL,
+    DESKTOP_MODE_VIRTIO_GPU,
 };
 
 #[cfg(not(test))]
@@ -86,6 +87,9 @@ pub(crate) struct BootOption {
     /// The desktop also declares the terminal rows (#311): `q0`, `q1` and their `-terminal`
     /// spellings. Only `q0-bare` and `q1-bare` leave them out.
     pub(crate) terminal: bool,
+    /// The terminal's shell is the native shell (#388): `q0-native-shell`, `q1-native-shell`.
+    /// Only with `terminal`.
+    pub(crate) native_shell: bool,
     detail: Detail,
 }
 
@@ -94,6 +98,7 @@ impl BootOption {
         Self {
             mode: DesktopMode::Off,
             terminal: false,
+            native_shell: false,
             detail: Detail::Quiet,
         }
     }
@@ -102,6 +107,9 @@ impl BootOption {
     pub(crate) const fn word(&self) -> u64 {
         match self.mode {
             DesktopMode::Off => DESKTOP_MODE_OFF,
+            DesktopMode::On(_) if self.terminal && self.native_shell => {
+                self.mode.word() | DESKTOP_MODE_TERMINAL | DESKTOP_MODE_NATIVE_SHELL
+            }
             DesktopMode::On(_) if self.terminal => self.mode.word() | DESKTOP_MODE_TERMINAL,
             DesktopMode::On(_) => self.mode.word(),
         }
@@ -154,6 +162,11 @@ pub(crate) fn log_boot_option(option: &BootOption) {
     kernel_log_line(option.mode.profile_line());
     if option.terminal && option.mode != DesktopMode::Off {
         kernel_log_line("[KERN] boot option terminal=on: the desktop declares the terminal rows");
+        if option.native_shell {
+            kernel_log_line(
+                "[KERN] boot option shell=native: the terminal's shell is the native shell",
+            );
+        }
     }
 }
 
@@ -186,13 +199,17 @@ fn log_not_understood(bytes: &[u8]) {
 /// `q0` or `q1`, optionally with `-terminal` or `-bare`, and nothing else: no whitespace, no
 /// trailing NUL. The terminal is on the default desktop (#311), so plain `q0`/`q1` include it
 /// and `-terminal` is the same profile; `-bare` is the desktop without its rows, which the
-/// lanes that count the desktop's own rows boot.
-fn parse_desktop_value(bytes: &[u8]) -> Option<(DesktopBackend, bool)> {
+/// lanes that count the desktop's own rows boot. `-native-shell` is the default desktop with
+/// the native shell in the terminal (#388). Returns the backend, the terminal flag and the
+/// native-shell flag.
+fn parse_desktop_value(bytes: &[u8]) -> Option<(DesktopBackend, bool, bool)> {
     match bytes {
-        b"q0" | b"q0-terminal" => Some((DesktopBackend::Framebuffer, true)),
-        b"q1" | b"q1-terminal" => Some((DesktopBackend::VirtioGpu, true)),
-        b"q0-bare" => Some((DesktopBackend::Framebuffer, false)),
-        b"q1-bare" => Some((DesktopBackend::VirtioGpu, false)),
+        b"q0" | b"q0-terminal" => Some((DesktopBackend::Framebuffer, true, false)),
+        b"q1" | b"q1-terminal" => Some((DesktopBackend::VirtioGpu, true, false)),
+        b"q0-bare" => Some((DesktopBackend::Framebuffer, false, false)),
+        b"q1-bare" => Some((DesktopBackend::VirtioGpu, false, false)),
+        b"q0-native-shell" => Some((DesktopBackend::Framebuffer, true, true)),
+        b"q1-native-shell" => Some((DesktopBackend::VirtioGpu, true, true)),
         _ => None,
     }
 }
@@ -234,6 +251,7 @@ fn read_from_io(io: &mut impl FwCfgIo) -> BootOption {
         return BootOption {
             mode: DesktopMode::Off,
             terminal: false,
+            native_shell: false,
             detail: Detail::Overlong { len: size },
         };
     }
@@ -244,14 +262,16 @@ fn read_from_io(io: &mut impl FwCfgIo) -> BootOption {
         return unreadable();
     }
     match parse_desktop_value(&payload[..len]) {
-        Some((backend, terminal)) => BootOption {
+        Some((backend, terminal, native_shell)) => BootOption {
             mode: DesktopMode::On(backend),
             terminal,
+            native_shell,
             detail: Detail::Quiet,
         },
         None => BootOption {
             mode: DesktopMode::Off,
             terminal: false,
+            native_shell: false,
             detail: Detail::NotUnderstood {
                 bytes: payload,
                 len,
@@ -264,6 +284,7 @@ fn unreadable() -> BootOption {
     BootOption {
         mode: DesktopMode::Off,
         terminal: false,
+        native_shell: false,
         detail: Detail::DirectoryUnreadable,
     }
 }
@@ -579,6 +600,7 @@ mod tests {
                 BootOption {
                     mode: DesktopMode::On(backend),
                     terminal: false,
+                    native_shell: false,
                     detail: Detail::Quiet,
                 }
             );
@@ -622,6 +644,33 @@ mod tests {
     }
 
     #[test]
+    fn native_shell_values_set_both_flags() {
+        for (payload, backend, word) in [
+            (
+                b"q0-native-shell".as_slice(),
+                DesktopBackend::Framebuffer,
+                DESKTOP_MODE_FRAMEBUFFER,
+            ),
+            (
+                b"q1-native-shell",
+                DesktopBackend::VirtioGpu,
+                DESKTOP_MODE_VIRTIO_GPU,
+            ),
+        ] {
+            assert!(payload.len() <= MAX_OPTION_BYTES);
+            let file = entry(payload.len() as u32, 0x21, "opt/clean-slate/desktop");
+            let mut io = device(&[file], &[(0x21, payload)]);
+            let option = read_from_io(&mut io);
+            assert_eq!(option.mode, DesktopMode::On(backend));
+            assert!(option.terminal && option.native_shell);
+            assert_eq!(
+                option.word(),
+                word | DESKTOP_MODE_TERMINAL | DESKTOP_MODE_NATIVE_SHELL
+            );
+        }
+    }
+
+    #[test]
     fn unknown_empty_and_padded_values_stay_off() {
         for payload in [
             b"".as_slice(),
@@ -634,6 +683,9 @@ mod tests {
             b"terminal",
             b"q1-bare\0",
             b"bare",
+            b"q1-native",
+            b"native-shell",
+            b"q1-native-shell\0",
         ] {
             let file = entry(payload.len() as u32, 0x22, "opt/clean-slate/desktop");
             let mut io = device(&[file], &[(0x22, payload)]);
@@ -654,6 +706,7 @@ mod tests {
             BootOption {
                 mode: DesktopMode::Off,
                 terminal: false,
+                native_shell: false,
                 detail: Detail::Overlong { len: 1_000 },
             }
         );

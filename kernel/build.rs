@@ -766,6 +766,7 @@ fn main() {
                 "clean-slate-playground-userspace",
             ),
             ("terminal_userspace.bin", "clean-slate-terminal-userspace"),
+            ("nsh_userspace.bin", "clean-slate-nsh-userspace"),
         ] {
             embed_userspace_image(raw_name, bin_name, true);
         }
@@ -981,7 +982,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 
 /// Package and `-Z build-std` set for an embedded userspace bin.
 /// Storage and network are not the supervisor package, and they need `alloc`, as do the
-/// desktop shell, playground and terminal, which run on the runtime heap (#356).
+/// desktop shell, playground, terminal and native shell, which run on the runtime heap (#356).
 fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
     match bin_name {
         "clean-slate-supervisor-userspace"
@@ -1010,6 +1011,7 @@ fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
         "clean-slate-terminal-userspace" => {
             ("clean-slate-terminal", "core,alloc,compiler_builtins")
         }
+        "clean-slate-nsh-userspace" => ("clean-slate-nsh", "core,alloc,compiler_builtins"),
         _ => panic!("unexpected userspace bin {bin_name}"),
     }
 }
@@ -1095,6 +1097,7 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
             ),
             "playground_userspace.bin" => ("playground_userspace_entry.rs", "PLAYGROUND_USERSPACE"),
             "terminal_userspace.bin" => ("terminal_userspace_entry.rs", "TERMINAL_USERSPACE"),
+            "nsh_userspace.bin" => ("nsh_userspace_entry.rs", "NSH_USERSPACE"),
             _ => panic!("unexpected userspace image {raw_name}"),
         };
         let generated = out_dir.join(generated_file);
@@ -1128,6 +1131,7 @@ fn emits_image_base(prefix: &str) -> bool {
             | "DESKTOP_SHELL_USERSPACE"
             | "PLAYGROUND_USERSPACE"
             | "TERMINAL_USERSPACE"
+            | "NSH_USERSPACE"
     )
 }
 
@@ -1199,7 +1203,8 @@ fn userspace_map_base(raw_name: &str) -> u64 {
         "compositor_userspace.bin"
         | "desktop_shell_userspace.bin"
         | "playground_userspace.bin"
-        | "terminal_userspace.bin" => clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE,
+        | "terminal_userspace.bin"
+        | "nsh_userspace.bin" => clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE,
         _ => USERSPACE_IMAGE_LOAD_BASE,
     }
 }

@@ -18,7 +18,7 @@ use clean_slate_service_fixtures::init_bootstrap::DESKTOP_MODE_FRAMEBUFFER;
 use clean_slate_service_fixtures::manifest::{Grant, ServiceSpec};
 pub(crate) use clean_slate_service_fixtures::{
     COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID as SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
-    TERMINAL_SERVICE_ID,
+    TERMINAL_SERVICE_ID, TERMINAL_SHELL_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::ServiceId;
 
@@ -40,6 +40,10 @@ pub(crate) enum DesktopRole {
     App,
     /// The #311 terminal window: a desktop app too.
     Terminal,
+    /// The #388 native shell. It reads the same launch page but draws nothing. Its row is the
+    /// terminal's shell row, which runs BusyBox unless the row says
+    /// `ServiceImage::NativeShell`, so [`Self::for_spec`] picks it from the row, not the id.
+    NativeShell,
 }
 
 impl DesktopRole {
@@ -49,7 +53,17 @@ impl DesktopRole {
             Self::Shell => SHELL_SERVICE_ID,
             Self::App => PLAYGROUND_SERVICE_ID,
             Self::Terminal => TERMINAL_SERVICE_ID,
+            Self::NativeShell => TERMINAL_SHELL_SERVICE_ID,
         }
+    }
+
+    /// The role for a row that names its image: the native shell (#388), whatever its id.
+    pub(crate) fn for_spec(spec: &ServiceSpec) -> Option<Self> {
+        matches!(
+            spec.image,
+            clean_slate_service_fixtures::manifest::ServiceImage::NativeShell
+        )
+        .then_some(Self::NativeShell)
     }
 
     pub(crate) const fn for_service(service: ServiceId) -> Option<Self> {
@@ -66,7 +80,7 @@ impl DesktopRole {
     pub(crate) const fn stack_pages(self) -> u64 {
         match self {
             Self::Compositor => 64,
-            Self::Shell | Self::App | Self::Terminal => 32,
+            Self::Shell | Self::App | Self::Terminal | Self::NativeShell => 32,
         }
     }
 }
@@ -147,6 +161,20 @@ mod tests {
             assert_eq!(DesktopRole::for_service(role.service()), Some(role));
         }
         assert_eq!(DesktopRole::for_service(ServiceId(0x5400)), None);
+        // The terminal's shell row is BusyBox by id; only its row makes it the native shell.
+        assert_eq!(DesktopRole::for_service(TERMINAL_SHELL_SERVICE_ID), None);
+        use clean_slate_service_fixtures::manifest::{
+            NATIVE_TERMINAL_SHELL_SPEC, TERMINAL_SHELL_SPEC,
+        };
+        assert_eq!(
+            DesktopRole::for_spec(&NATIVE_TERMINAL_SHELL_SPEC),
+            Some(DesktopRole::NativeShell)
+        );
+        assert_eq!(
+            DesktopRole::NativeShell.service(),
+            TERMINAL_SHELL_SERVICE_ID
+        );
+        assert_eq!(DesktopRole::for_spec(&TERMINAL_SHELL_SPEC), None);
         assert_eq!(COMPOSITOR_SERVICE_ID, ServiceId(0x5300));
         assert_eq!(SHELL_SERVICE_ID, ServiceId(0x5301));
         assert_eq!(PLAYGROUND_SERVICE_ID, ServiceId(0x5302));
