@@ -19,6 +19,7 @@ mod m10_desktop_lane;
 mod m10_desktop_visual;
 mod m10_framebuffer_validate;
 mod m10_input_lane;
+mod m10_net;
 mod m10_storage;
 mod m10_virtio_gpu;
 mod m5_torn;
@@ -1316,7 +1317,7 @@ const M9_MILESTONE_STEPS: [M9MilestoneStep; 18] = [
 /// boots, display backends, input, compositor and app host suites), then the #118 desktop lane
 /// on both display backends and the system image's desktop (#218 S6e). `[M10 ] PASS` is printed
 /// only after all of them succeed.
-const M10_MILESTONE_STEPS: [M9MilestoneStep; 17] = [
+const M10_MILESTONE_STEPS: [M9MilestoneStep; 18] = [
     ("test-m10-contract", run_m10_contract_acceptance),
     ("clean-slate-ui (host)", run_m10_ui_host_tests),
     ("test-m10-nxe", run_m10_nxe_acceptance),
@@ -1325,6 +1326,7 @@ const M10_MILESTONE_STEPS: [M9MilestoneStep; 17] = [
     ("test-m10-native-memory", run_m10_native_memory_acceptance),
     ("test-m10-clock", m10_clock::run),
     ("test-m10-storage", m10_storage::run),
+    ("test-m10-net", m10_net::run),
     ("test-qmp-smoke", run_qmp_smoke_acceptance),
     ("test-m10-virtio-modern", run_m10_virtio_modern_acceptance),
     ("test-m10-framebuffer", run_m10_framebuffer_acceptance),
@@ -1445,6 +1447,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
             )),
         },
         ParsedCommand::TestM10Storage => m10_storage::run(),
+        ParsedCommand::TestM10Net => m10_net::run(),
         ParsedCommand::TestQmpSmoke => run_qmp_smoke_acceptance(),
         ParsedCommand::TestM10Desktop => m10_desktop_lane::run(),
         ParsedCommand::RunM10Desktop => run_m10_desktop_interactive(&trailing_args),
@@ -5750,6 +5753,9 @@ fn print_help() {
         "  test-m10-clock  #308 native clock: clock host tests, then two m10-clock-self-test QEMU boots: monotonic time across a wait and a wall clock within 3 s of the host's (-rtc base=now), and no wall clock from an RTC before the build floor; prints [M10.clock] lane PASS (aliases: m10-clock, m10.308)"
     );
     println!(
+        "  test-m10-net  #353 native network client: network client host tests, then one m10-net-client-self-test QEMU boot against the M7 fixture peer: a native app with only the NativeNetworkClient grant resolves a name, fetches a page over TCP and over TLS, makes a UDP round trip, and is refused a destination its policy does not name, with the refusal in the audit log; prints [M10.net] lane PASS (aliases: m10-net, m10.353)"
+    );
+    println!(
         "  test-net-acceptance  #355 network acceptance: the M7.8 converged lane on QEMU slirp (restrict=on, DHCP) with a lane-generated CA as the only trust anchor; DNS over TCP and two HTTPS fetches through loopback guestfwd, wall-clock certificate time, no M7 test CA in the image, no network::fixture in the net service; prints [NET ] test-net-acceptance PASS (alias: net-acceptance)"
     );
     println!(
@@ -5932,6 +5938,7 @@ enum ParsedCommand {
     TestNetAcceptance,
     NetAcceptanceRelay,
     TestM10Storage,
+    TestM10Net,
     TestQmpSmoke,
     TestM10VirtioModern,
     TestM10VirtioGpu,
@@ -6106,6 +6113,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == net_acceptance::RELAY_COMMAND => ParsedCommand::NetAcceptanceRelay,
         Some(cmd) if cmd == "test-m10-storage" || cmd == "m10-storage" || cmd == "m10.312" => {
             ParsedCommand::TestM10Storage
+        }
+        Some(cmd) if cmd == "test-m10-net" || cmd == "m10-net" || cmd == "m10.353" => {
+            ParsedCommand::TestM10Net
         }
         Some(cmd) if cmd == "test-qmp-smoke" || cmd == "qmp-smoke" => ParsedCommand::TestQmpSmoke,
         Some(cmd) if cmd == "test-m10-virtio-modern" || cmd == "m10-virtio-modern" => {
@@ -6774,6 +6784,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestM10Storage
+            );
+        }
+        for alias in ["test-m10-net", "m10-net", "m10.353"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestM10Net
             );
         }
         assert_eq!(
@@ -7795,6 +7811,7 @@ mod tests {
             "test-m10-native-memory",
             "test-m10-clock",
             "test-m10-storage",
+            "test-m10-net",
             "test-qmp-smoke",
             "test-m10-virtio-modern",
             "test-m10-framebuffer",

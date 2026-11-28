@@ -92,7 +92,8 @@ fn build_embedded_userspace() -> Result<(), XtaskError> {
     build_native_userspace_bin(
         "clean-slate-storage-probe",
         "clean-slate-storage-probe-userspace",
-    )
+    )?;
+    build_native_userspace_bin("clean-slate-net-probe", "clean-slate-net-probe-userspace")
 }
 
 pub(crate) fn run(args: &[OsString]) -> Result<(), XtaskError> {

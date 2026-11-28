@@ -17,11 +17,11 @@ use clean_slate_service_fixtures::{
     NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
     NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_NEXT_METADATA_BYTES,
     NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT,
-    NET_SUBOP_AUDIT_REFUSAL, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT,
-    NET_SUBOP_PUBLISH_RESOLVER, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
-    NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
-    NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_MASK, NET_WAIT_WORK_REQUESTS,
-    NET_WAIT_WORK_RX,
+    NET_SUBOP_AUDIT_REFUSAL, NET_SUBOP_DISCARD, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
+    NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_PUBLISH_RESOLVER, NET_SUBOP_RAW_GEOMETRY,
+    NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
+    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT,
+    NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_MASK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
 };
 
 use crate::arch::x86_64::cpu::without_interrupts;
@@ -41,6 +41,7 @@ use crate::service::net_request_wake::{
     net_bridge_request_wait_key, net_service_work_wait_key, net_tx_space_wait_key,
     wake_net_service_work,
 };
+use clean_slate_native_abi::status::STATUS_ETIMEDOUT;
 use clean_slate_network::device::NetworkDeviceError;
 
 /// How long `RAW_TRANSMIT` waits for the NIC to retire a frame when its TX
@@ -80,7 +81,12 @@ fn find_network_handle(holder: HolderId, raw_device: bool) -> Option<u64> {
             if raw_device && !record.rights.contains(Rights::NET_RAW_DEVICE) {
                 continue;
             }
-            if !raw_device && record.rights.contains(Rights::NET_RAW_DEVICE) {
+            if !raw_device
+                && (record.rights.contains(Rights::NET_RAW_DEVICE)
+                    || crate::capability::network::is_network_client_entitlement(record))
+            {
+                // The entitlement authorises nothing; the client capability derived from it
+                // is the handle a client uses.
                 continue;
             }
             let handle = table.handle_at(slot)?;
@@ -208,6 +214,8 @@ pub(crate) fn handle_syscall_network_request(frame: &mut SyscallContext) {
         NET_SUBOP_MONOTONIC_TICKS => handle_monotonic_ticks(frame),
         NET_SUBOP_TICK_PERIOD_NS => handle_tick_period_ns(frame),
         NET_SUBOP_WAIT_WORK => handle_wait_work(frame),
+        NET_SUBOP_WAIT => handle_wait(frame),
+        NET_SUBOP_DISCARD => handle_discard(frame),
         _ => frame.rax = SYSCALL_EINVAL,
     }
 }
@@ -356,6 +364,63 @@ fn handle_poll(frame: &mut SyscallContext) {
         ),
         Err(error) => frame.rax = bridge_error_status(error),
     }
+}
+
+/// The client side of a request the caller submitted, for `WAIT` and `DISCARD` (#353): the
+/// caller, its live generation, after the same capability check `POLL` makes.
+fn client_request_caller(frame: &SyscallContext) -> Result<(HolderId, u64), u64> {
+    let holder = current_holder()?;
+    authorize_network_op(holder, frame.rsi, NetworkOp::Receive, None).map_err(denial_status)?;
+    Ok((holder, caller_instance_generation(holder)?))
+}
+
+/// `NET_SUBOP_WAIT` (#353): `rdx` = request id, `r10` = absolute deadline in monotonic ns (0 for
+/// none). Returns 0 once the request has completed (`POLL` then answers at once), `ETIMEDOUT`
+/// at the deadline or when the wait is cancelled, `EINVAL` for a request the caller does not
+/// have or a deadline without a calibrated clock. Never consumes the request. The deadline is
+/// absolute, so a restarted wait keeps it.
+fn handle_wait(frame: &mut SyscallContext) {
+    let (holder, generation) = match client_request_caller(frame) {
+        Ok(caller) => caller,
+        Err(status) => {
+            frame.rax = status;
+            return;
+        }
+    };
+    let request_id = frame.rdx;
+    let deadline_ns = frame.r10;
+    if deadline_ns != 0 && tsc_hz().is_none() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    match net_bridge_mut().request_done(holder.0, holder.0, generation, request_id) {
+        Ok(true) => frame.rax = 0,
+        Ok(false) if deadline_ns != 0 && monotonic_ns() >= deadline_ns => {
+            frame.rax = STATUS_ETIMEDOUT;
+        }
+        Ok(false) => block_net_syscall_restart(
+            frame,
+            net_bridge_request_wait_key(request_id),
+            (deadline_ns != 0).then_some(Deadline::MonotonicNs(deadline_ns)),
+            STATUS_ETIMEDOUT,
+            handle_wait,
+        ),
+        Err(error) => frame.rax = bridge_error_status(error),
+    }
+}
+
+/// `NET_SUBOP_DISCARD` (#353): `rdx` = request id. A completed request is freed now; one still
+/// outstanding is still served and freed when it completes.
+fn handle_discard(frame: &mut SyscallContext) {
+    frame.rax = match client_request_caller(frame) {
+        Ok((holder, generation)) => {
+            match net_bridge_mut().discard_result(holder.0, holder.0, generation, frame.rdx) {
+                Ok(()) => 0,
+                Err(error) => bridge_error_status(error),
+            }
+        }
+        Err(status) => status,
+    };
 }
 
 fn handle_service_next(frame: &mut SyscallContext) {

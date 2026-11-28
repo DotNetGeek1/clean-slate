@@ -1,0 +1,32 @@
+[package]
+name = "clean-slate-net-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "#353 native network probe: resolves a name, fetches over TCP and TLS, makes a UDP round trip, and is refused a destination its policy does not name"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "clean-slate-net-probe-userspace"
+path = "src/bin/net_probe.rs"
+required-features = ["userspace"]
+
+[features]
+default = []
+userspace = []
+
+[dependencies]
+clean-slate-capability = { path = "../capability" }
+clean-slate-native-abi = { path = "../native-abi" }
+clean-slate-runtime = { path = "../runtime" }
+clean-slate-service-fixtures = { path = "../service-fixtures" }
+
+[dev-dependencies]
+clean-slate-runtime = { path = "../runtime", features = ["fake"] }
+
+[lints]
+workspace = true

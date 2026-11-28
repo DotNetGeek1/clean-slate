@@ -117,6 +117,10 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     if crate::selftest::m10_port::handle_harness_subop(frame) {
         return;
     }
+    #[cfg(clean_slate_userspace_selftest = "m10-net")]
+    if crate::selftest::m10_net::handle_harness_subop(frame) {
+        return;
+    }
     #[cfg(any(
         feature = "m6-object-self-test",
         feature = "m6-process-control-self-test",

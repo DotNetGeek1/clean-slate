@@ -12,6 +12,8 @@
 //! - [`console`]: console lines over the console capability (syscall 3).
 //! - [`heap`]: a `GlobalAlloc` over the native memory call (syscall 23, #306).
 //! - [`launcher`]: ask init to start a manifest row by name (#237).
+//! - [`net`]: resolve names, TCP streams, connected UDP sockets and TLS exchanges through the
+//!   network service (syscalls 14 and 15, #353).
 //! - [`process`]: exit, abort and the service ready report (syscall 22).
 //! - [`storage`]: offset reads, writes, truncates and commits on a persistent object (syscall 8,
 //!   #312).
@@ -29,6 +31,7 @@ pub mod console;
 pub mod error;
 pub mod heap;
 pub mod launcher;
+pub mod net;
 pub mod port;
 pub mod process;
 pub mod storage;
@@ -36,6 +39,8 @@ pub mod sys;
 
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+#[cfg(any(test, feature = "fake"))]
+mod fake_net;
 
 pub use error::Error;
 pub use sys::{Kernel, Syscalls};

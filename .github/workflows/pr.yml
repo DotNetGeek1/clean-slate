@@ -17,6 +17,7 @@ on:
       - "playground/**"
       - "terminal/**"
       - "storage-probe/**"
+      - "net-probe/**"
       - "console/**"
       - "port/**"
       - "runtime/**"
@@ -53,6 +54,7 @@ on:
       - "playground/**"
       - "terminal/**"
       - "storage-probe/**"
+      - "net-probe/**"
       - "console/**"
       - "port/**"
       - "runtime/**"
@@ -160,6 +162,9 @@ jobs:
       - name: Clippy (storage-probe)
         run: cargo clippy -p clean-slate-storage-probe --all-targets -- -D warnings
 
+      - name: Clippy (net-probe)
+        run: cargo clippy -p clean-slate-net-probe --all-targets -- -D warnings
+
       - name: Clippy (desktop-shell)
         run: cargo clippy -p clean-slate-desktop-shell --all-targets -- -D warnings
 
@@ -194,6 +199,7 @@ jobs:
           cargo clippy -p clean-slate-terminal --bin clean-slate-terminal-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-console --bin clean-slate-console-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-storage-probe --bin clean-slate-storage-probe-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
+          cargo clippy -p clean-slate-net-probe --bin clean-slate-net-probe-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-desktop-shell --bin clean-slate-desktop-shell-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-store --bin clean-slate-storage-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-net-service --bin clean-slate-network-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
@@ -225,6 +231,7 @@ jobs:
           done
           cargo build -p clean-slate-console --bin clean-slate-console-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
           cargo build -p clean-slate-storage-probe --bin clean-slate-storage-probe-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
+          cargo build -p clean-slate-net-probe --bin clean-slate-net-probe-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
 
       # Every kernel feature set xtask builds needs a line here: `cargo test -p xtask` fails
       # (ci_coverage) when one is missing.
@@ -298,6 +305,7 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-native-memory-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-clock-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-storage-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-net-client-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-virtio-modern-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-virtio-gpu-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-framebuffer-self-test -- -D warnings
@@ -353,6 +361,7 @@ jobs:
           cargo test -p clean-slate-terminal
           cargo test -p clean-slate-console
           cargo test -p clean-slate-storage-probe
+          cargo test -p clean-slate-net-probe
           cargo test -p clean-slate-desktop-shell
           cargo test -p clean-slate-linux-abi
           cargo test -p clean-slate-elf

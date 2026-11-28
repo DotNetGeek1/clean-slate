@@ -209,6 +209,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "clean-slate-net-probe"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-capability",
+ "clean-slate-native-abi",
+ "clean-slate-runtime",
+ "clean-slate-service-fixtures",
+]
+
+[[package]]
 name = "clean-slate-net-service"
 version = "0.0.1"
 dependencies = [
