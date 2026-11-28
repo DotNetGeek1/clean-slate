@@ -80,6 +80,7 @@ pub const fn exit_reason(outcome: Outcome) -> &'static str {
         Outcome::Continue | Outcome::Exit(ExitReason::HostFailed(HostError::Gone)) => {
             "compositor-gone"
         }
+        Outcome::Exit(ExitReason::Stopped) => "stopped",
         Outcome::Exit(_) => "setup-failed",
     }
 }
@@ -144,6 +145,7 @@ mod tests {
     #[test]
     fn a_compositor_that_ended_mid_send_is_compositor_gone() {
         assert_eq!(exit_reason(Outcome::Continue), "compositor-gone");
+        assert_eq!(exit_reason(Outcome::Exit(ExitReason::Stopped)), "stopped");
         assert_eq!(
             exit_reason(Outcome::Exit(ExitReason::HostFailed(HostError::Gone))),
             "compositor-gone"

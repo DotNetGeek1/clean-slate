@@ -2,8 +2,9 @@
 //!
 //! Thin adapter over [`clean_slate_playground::Session`]: connects to the compositor port named
 //! on the launch page through the runtime's compositor client, allocates and maps two shared
-//! pixel buffers, then blocks in `RECV_EVENT` and hands each event to the session. It never
-//! wakes on its own; every frame is the result of an event that changed what the panel shows.
+//! pixel buffers, then sleeps on its work set until the compositor has an event, and hands each
+//! event to the session. It never wakes on its own; every frame is the result of an event that
+//! changed what the panel shows. The stop notice (#374) ends it.
 //!
 //! Authority is exactly the `Graphics{GFX_CONNECT}` and `Console{CONSOLE_CONNECT}`
 //! capabilities its manifest row grants plus the buffers this process allocates. There is no framebuffer, display or input access.
@@ -20,6 +21,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use clean_slate_graphics::abi::display::{DISPLAY_ABI_VERSION, DISPLAY_SUBOP_FIND_HANDLE};
 use clean_slate_graphics::abi::input::{INPUT_ABI_VERSION, INPUT_SUBOP_FIND_HANDLE};
+use clean_slate_graphics::protocol::Event;
 use clean_slate_native_abi::desktop::{ConsoleLine, NO_CONSOLE};
 use clean_slate_native_abi::is_status;
 use clean_slate_playground::host::{allocate_buffers, Client};
@@ -27,9 +29,13 @@ use clean_slate_playground::launch::{PlaygroundBootstrap, BOOTSTRAP_ADDRESS};
 use clean_slate_playground::{diag, ExitReason, Outcome, Session};
 use clean_slate_runtime::console::{Console, LiveConsoleStream, Tended};
 use clean_slate_runtime::heap::{exit_out_of_memory, RuntimeHeap};
-use clean_slate_runtime::port::{Deadline, Wait};
+use clean_slate_runtime::port::{Deadline, Wait, WorkSet};
 use clean_slate_runtime::{process, Error, Kernel, Syscalls};
 use clean_slate_ui::QualityTier;
+
+/// Work-set bits: compositor events, and the stop notice (#374).
+const WAKE_COMPOSITOR_BIT: u32 = 0;
+const WAKE_STOP_BIT: u32 = 1;
 
 const SYSCALL_NR_DISPLAY: u64 = 18;
 const SYSCALL_NR_INPUT: u64 = 19;
@@ -101,11 +107,69 @@ fn probe_authority() -> ConsoleLine {
     diag::authority_line(is_status(display), is_status(input))
 }
 
+/// How the app sleeps between events: on its work set, with the compositor's events and the
+/// stop notice bound to it (#374), or, when the work set could not be set up, in the
+/// connection's own receive as before.
+struct Waker {
+    work_set: Option<WorkSet>,
+    stop: process::StopNotice,
+}
+
+impl Waker {
+    fn new(client: &Client<Kernel>) -> Self {
+        let Ok(work_set) = WorkSet::create(&mut Kernel) else {
+            return Self {
+                work_set: None,
+                stop: process::StopNotice::NONE,
+            };
+        };
+        if client
+            .connection()
+            .bind_events(&mut Kernel, work_set, WAKE_COMPOSITOR_BIT)
+            .is_err()
+        {
+            let _ = work_set.destroy(&mut Kernel);
+            return Self {
+                work_set: None,
+                stop: process::StopNotice::NONE,
+            };
+        }
+        Self {
+            work_set: Some(work_set),
+            stop: process::StopNotice::bind(&mut Kernel, work_set, WAKE_STOP_BIT),
+        }
+    }
+
+    /// The next event, or `Stopped` once init has asked the app to stop.
+    fn next_event(&self, client: &mut Client<Kernel>) -> Result<Event, Outcome> {
+        let host_failed = |error| Outcome::Exit(ExitReason::HostFailed(error));
+        let Some(work_set) = self.work_set else {
+            return client.next_event(Wait::FOREVER).map_err(host_failed);
+        };
+        loop {
+            match client.next_event(Wait::No) {
+                Ok(event) => return Ok(event),
+                Err(Error::WouldBlock) => {}
+                Err(error) => return Err(host_failed(error)),
+            }
+            let mask = (1 << WAKE_COMPOSITOR_BIT) | self.stop.mask();
+            match work_set.wait(&mut Kernel, mask, Wait::FOREVER) {
+                Ok(ready) if self.stop.asked(ready) => {
+                    return Err(Outcome::Exit(ExitReason::Stopped))
+                }
+                Ok(_) => {}
+                Err(error) => return Err(host_failed(error)),
+            }
+        }
+    }
+}
+
 fn run(boot: &PlaygroundBootstrap, session: &mut Session, tier: QualityTier) {
     let Ok(mut client) = Client::connect(Kernel, boot.graphics_resource_id) else {
         console(boot, &diag::exit_line("connect"));
         return;
     };
+    let waker = Waker::new(&client);
     let mut outcome = Outcome::Exit(ExitReason::NoPixels);
     if allocate_buffers(&mut client).is_ok() {
         outcome = session.start(&mut client);
@@ -116,10 +180,10 @@ fn run(boot: &PlaygroundBootstrap, session: &mut Session, tier: QualityTier) {
         while outcome == Outcome::Continue {
             let event = match queued.take() {
                 Some(event) => event,
-                None => match client.next_event(Wait::FOREVER) {
+                None => match waker.next_event(&mut client) {
                     Ok(event) => event,
-                    Err(error) => {
-                        outcome = Outcome::Exit(ExitReason::HostFailed(error));
+                    Err(ended) => {
+                        outcome = ended;
                         break;
                     }
                 },
@@ -160,6 +224,9 @@ fn run(boot: &PlaygroundBootstrap, session: &mut Session, tier: QualityTier) {
         }
     }
     client.shut_down();
+    if let Some(work_set) = waker.work_set {
+        let _ = work_set.destroy(&mut Kernel);
+    }
     console(boot, &diag::exit_line(diag::exit_reason(outcome)));
 }
 

@@ -136,6 +136,30 @@ pub fn serve<D: BlockDevice>(
     (status, None)
 }
 
+/// What stopping did to the store (#374).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopFlush {
+    /// Nothing was staged: every completed request was already durable.
+    Clean,
+    /// Staged offset writes and truncates were committed.
+    Committed,
+    /// The last commit failed; what was staged is lost with the instance, as in a crash.
+    Failed(StoreError),
+}
+
+/// The storage service's answer to the stop notice: it commits whatever is staged, so data a
+/// client wrote with `WRITE_AT` or `TRUNCATE` but never committed survives an orderly
+/// shutdown as it would a commit, and returns how that went. The service then exits.
+pub fn flush_on_stop<D: BlockDevice>(store: &mut ObjectStore<D>) -> StopFlush {
+    if !store.has_uncommitted() {
+        return StopFlush::Clean;
+    }
+    match store.commit() {
+        Ok(()) => StopFlush::Committed,
+        Err(error) => StopFlush::Failed(error),
+    }
+}
+
 /// The store name of the object the service keeps for `id`: its id in hex, so every id has
 /// its own name.
 pub fn object_name(id: u64) -> String {
@@ -218,6 +242,47 @@ mod tests {
                 BUDGET
             ),
             (OBJECT_STATUS_OK, Some(b"after".to_vec()))
+        );
+    }
+
+    /// #374: a stop commits what clients staged and never committed, and a store with nothing
+    /// staged is left as it is.
+    #[test]
+    fn a_stop_commits_staged_writes_and_leaves_a_clean_store_alone() {
+        let mut store = store();
+        assert_eq!(flush_on_stop(&mut store), StopFlush::Clean);
+        assert_eq!(store.committed_generation(), 0);
+
+        assert_eq!(
+            run(&mut store, OBJECT_OP_WRITE, 3, 0, 0, b"whole").0,
+            OBJECT_STATUS_OK
+        );
+        let generation = store.committed_generation();
+        assert!(!store.has_uncommitted(), "a whole write commits at once");
+        assert_eq!(flush_on_stop(&mut store), StopFlush::Clean);
+        assert_eq!(store.committed_generation(), generation);
+
+        assert_eq!(
+            run(&mut store, OBJECT_OP_WRITE_AT, 4, 0, 0, b"staged").0,
+            OBJECT_STATUS_OK
+        );
+        assert_eq!(
+            run(&mut store, OBJECT_OP_TRUNCATE, 3, 0, 2, &[]).0,
+            OBJECT_STATUS_OK
+        );
+        assert!(store.has_uncommitted());
+        assert_eq!(flush_on_stop(&mut store), StopFlush::Committed);
+        assert_eq!(store.committed_generation(), generation + 1);
+        assert!(!store.has_uncommitted());
+
+        let mut rebooted = reboot(store);
+        assert_eq!(
+            run(&mut rebooted, OBJECT_OP_READ, 4, 0, 0, &[]),
+            (OBJECT_STATUS_OK, Some(b"staged".to_vec()))
+        );
+        assert_eq!(
+            run(&mut rebooted, OBJECT_OP_READ, 3, 0, 0, &[]),
+            (OBJECT_STATUS_OK, Some(b"wh".to_vec()))
         );
     }
 

@@ -77,6 +77,44 @@ pub fn bind_stop_wake<S: Syscalls>(sys: &mut S, work_set: WorkSet, bit: u32) -> 
     .map(|_| ())
 }
 
+/// A service's stop notice on one bit of its work set (#374): bind it once, add [`Self::mask`]
+/// to every wait, and stop when [`Self::asked`] says so.
+///
+/// Binding fails for a process that is no declared service instance (a lane's fixture, an
+/// app run by hand); its mask is then empty and it is never asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StopNotice {
+    mask: u32,
+}
+
+impl StopNotice {
+    /// A notice that is never given, for a process that has nothing to bind.
+    pub const NONE: Self = Self { mask: 0 };
+
+    /// Binds `bit` of `work_set` to the stop notice. The bit is set at once if a stop was
+    /// already asked for.
+    pub fn bind<S: Syscalls>(sys: &mut S, work_set: WorkSet, bit: u32) -> Self {
+        let Some(mask) = 1u32.checked_shl(bit) else {
+            return Self::NONE;
+        };
+        match bind_stop_wake(sys, work_set, bit) {
+            Ok(()) => Self { mask },
+            Err(_) => Self::NONE,
+        }
+    }
+
+    /// The bit to add to every wait mask; 0 when nothing is bound.
+    pub const fn mask(self) -> u32 {
+        self.mask
+    }
+
+    /// Whether the ready bits a wait returned include the stop notice. Only the kernel's stop
+    /// notice sets the bound bit, so the bit alone answers.
+    pub const fn asked(self, ready: u32) -> bool {
+        ready & self.mask != 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +138,32 @@ mod tests {
             stop_requested(&mut kernel),
             Err(Error::Failed(STATUS_ENOSYS))
         );
+    }
+
+    #[test]
+    fn a_bound_notice_names_its_bit_and_a_refused_one_is_never_asked() {
+        let mut kernel = FakeKernel::new();
+        let work_set = WorkSet::create(&mut kernel).unwrap();
+        kernel.answer_next(SYSCALL_NR_SERVICE_STOP, 0);
+        let notice = StopNotice::bind(&mut kernel, work_set, 3);
+        assert_eq!(notice.mask(), 1 << 3);
+        assert!(notice.asked(1 << 3 | 1));
+        assert!(!notice.asked(1));
+
+        // Not a service instance: the kernel refuses the bind.
+        kernel.answer_next(SYSCALL_NR_SERVICE_STOP, STATUS_EACCES);
+        let refused = StopNotice::bind(&mut kernel, work_set, 3);
+        assert_eq!(refused, StopNotice::NONE);
+        assert_eq!(refused.mask(), 0);
+        assert!(!refused.asked(u32::MAX));
+
+        // A bit past the work set's 32 is never bound.
+        let calls = kernel.calls().len();
+        assert_eq!(
+            StopNotice::bind(&mut kernel, work_set, 32),
+            StopNotice::NONE
+        );
+        assert_eq!(kernel.calls().len(), calls);
     }
 
     #[test]

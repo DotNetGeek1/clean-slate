@@ -4,7 +4,8 @@
 //! and its serial device capability (syscall 25 `FIND_HANDLE`), creates its work set and binds
 //! the port's requests and notices to it and the serial line's committed input to a third bit,
 //! then reports ready. From there it sleeps in
-//! `WORK_SET` `WAIT` until a request or notice arrives and drains the port. A startup step that
+//! `WORK_SET` `WAIT` until a request or notice arrives and drains the port. On the stop notice
+//! (#374) it drains once more, writes out partial lines and exits. A startup step that
 //! fails is a `FAIL` line and `ud2`, which init's restart policy handles like any other fault.
 
 #![no_std]
@@ -32,6 +33,8 @@ const REQUEST_BIT: u32 = 0;
 const NOTICE_BIT: u32 = 1;
 /// Set by the kernel when the serial line's discipline commits input.
 const INPUT_BIT: u32 = 2;
+/// The stop notice (#374).
+const STOP_BIT: u32 = 3;
 const WAKE_MASK: u32 = (1 << REQUEST_BIT) | (1 << NOTICE_BIT) | (1 << INPUT_BIT);
 
 static mut CORE: ConsoleCore = ConsoleCore::new();
@@ -153,6 +156,7 @@ pub extern "C" fn _start() -> ! {
     {
         fail(console, b"[CONS] FAIL serial input BIND_INPUT refused");
     }
+    let stop = process::StopNotice::bind(&mut Kernel, work_set, STOP_BIT);
     let mut input = KernelInput { handle: device };
     let mut device = KernelDevice { handle: device };
     let mut port = KernelPort { server };
@@ -161,6 +165,7 @@ pub extern "C" fn _start() -> ! {
         fail(console, b"[CONS] FAIL SERVICE_READY refused");
     }
     let mut input_reported = false;
+    let mut stopping = false;
     loop {
         loop {
             match server.recv(&mut Kernel) {
@@ -180,11 +185,15 @@ pub extern "C" fn _start() -> ! {
             let _ = console.send(&mut Kernel, b"[CONS] serial input answered a read");
         }
         core.idle(&mut device);
-        if work_set
-            .wait(&mut Kernel, WAKE_MASK, Wait::FOREVER)
-            .is_err()
-        {
-            fail(console, b"[CONS] FAIL WORK_SET WAIT failed");
+        if stopping {
+            // #374: the drain above wrote every line it was handed, and `idle` the partial
+            // ones, so nothing a writer sent is lost.
+            let _ = console.send(&mut Kernel, b"[CONS] stopped");
+            process::exit();
+        }
+        match work_set.wait(&mut Kernel, WAKE_MASK | stop.mask(), Wait::FOREVER) {
+            Ok(ready) => stopping = stop.asked(ready),
+            Err(_) => fail(console, b"[CONS] FAIL WORK_SET WAIT failed"),
         }
     }
 }

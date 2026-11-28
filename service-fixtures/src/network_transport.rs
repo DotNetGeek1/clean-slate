@@ -98,6 +98,8 @@ pub enum NetLeaseEvent {
     Renewed = 2,
     /// The lease ended; the service is unconfigured until the next one.
     Expired = 3,
+    /// The service gave the lease back with DHCPRELEASE as it stopped (#374).
+    Released = 4,
 }
 
 impl NetLeaseEvent {
@@ -106,6 +108,7 @@ impl NetLeaseEvent {
             Self::Bound => "bound",
             Self::Renewed => "renewed",
             Self::Expired => "expired",
+            Self::Released => "released",
         }
     }
 }
@@ -123,6 +126,7 @@ impl NetLeaseReport {
             1 => NetLeaseEvent::Bound,
             2 => NetLeaseEvent::Renewed,
             3 => NetLeaseEvent::Expired,
+            4 => NetLeaseEvent::Released,
             _ => return None,
         };
         let prefix_len = (raw >> 32) as u8;
@@ -140,7 +144,10 @@ impl NetLeaseReport {
 pub const NET_WAIT_WORK_REQUESTS: u64 = 1 << 0;
 /// Wake when `NET_SUBOP_RAW_RECEIVE` would return a frame.
 pub const NET_WAIT_WORK_RX: u64 = 1 << 1;
-pub const NET_WAIT_WORK_MASK: u64 = NET_WAIT_WORK_REQUESTS | NET_WAIT_WORK_RX;
+/// Return at once once init has asked the instance to stop (#374, `SERVICE_STOP`), and wake
+/// when it does. The service leaves it out while it flushes its last frames.
+pub const NET_WAIT_WORK_STOP: u64 = 1 << 2;
+pub const NET_WAIT_WORK_MASK: u64 = NET_WAIT_WORK_REQUESTS | NET_WAIT_WORK_RX | NET_WAIT_WORK_STOP;
 
 pub const NET_SERVICE_ROLE_ID: u64 = 1;
 
@@ -373,6 +380,7 @@ mod lease_report_tests {
             NetLeaseEvent::Bound,
             NetLeaseEvent::Renewed,
             NetLeaseEvent::Expired,
+            NetLeaseEvent::Released,
         ] {
             let report = NetLeaseReport {
                 event,
@@ -382,7 +390,7 @@ mod lease_report_tests {
             assert_eq!(NetLeaseReport::decode(report.encode()), Some(report));
         }
         assert_eq!(NetLeaseReport::decode(0), None);
-        assert_eq!(NetLeaseReport::decode(4 << 40), None);
+        assert_eq!(NetLeaseReport::decode(5 << 40), None);
         assert_eq!(NetLeaseReport::decode(1 << 40 | 33 << 32), None);
         assert_eq!(NetLeaseReport::decode(1 << 48 | 1 << 40), None);
     }

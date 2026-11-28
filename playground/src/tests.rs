@@ -654,6 +654,7 @@ fn a_compositor_that_ended_mid_send_is_compositor_gone() {
         "failed"
     );
     assert_eq!(exit_reason(Outcome::Exit(ExitReason::NoPixels)), "failed");
+    assert_eq!(exit_reason(Outcome::Exit(ExitReason::Stopped)), "stopped");
 }
 
 #[test]

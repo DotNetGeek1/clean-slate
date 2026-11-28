@@ -22,6 +22,7 @@ use clean_slate_service_fixtures::{
     NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
     NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT,
     NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_MASK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
+    NET_WAIT_WORK_STOP,
 };
 
 use crate::arch::x86_64::cpu::without_interrupts;
@@ -883,7 +884,11 @@ fn handle_wait_work(frame: &mut SyscallContext) {
             monotonic_ns().saturating_add(timeout_ns),
         ))
     };
-    if without_interrupts(|| net_work_ready(mask)) {
+    // #374: with `NET_WAIT_WORK_STOP`, a stop notice ends the wait at once, so the service can
+    // release its lease and exit inside its grace period. Init's `Stop` wakes a blocked wait.
+    if without_interrupts(|| net_work_ready(mask))
+        || (mask & NET_WAIT_WORK_STOP != 0 && stop_requested_for(holder.0))
+    {
         frame.rax = 0;
         return;
     }
@@ -895,6 +900,12 @@ fn handle_wait_work(frame: &mut SyscallContext) {
         Ok(outcome) => frame.rax = encode_wait_outcome(outcome),
         Err(message) => crate::diagnostics::qemu::fatal_kernel_error(message),
     }
+}
+
+/// Whether init has asked the network service instance `pid` to stop (#374).
+fn stop_requested_for(pid: u64) -> bool {
+    let controller = unsafe { crate::service::service_lifecycle_controller_mut() };
+    matches!(controller.stop_deadline_for_pid(pid), Ok(Some(_)))
 }
 
 fn handle_monotonic_ticks(frame: &mut SyscallContext) {

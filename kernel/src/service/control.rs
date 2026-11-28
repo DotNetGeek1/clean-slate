@@ -1112,7 +1112,7 @@ impl ServiceLifecycleController {
                 self.services[service_index].state = next_state;
                 Ok(result)
             }
-            ControlRequestKind::Stop if now_ns.is_some() => {
+            ControlRequestKind::Stop if now_ns.is_some() && self.hears_stop_notice(service_id) => {
                 let now_ns = now_ns.unwrap_or(0);
                 self.request_stop(service_index, now_ns)?;
                 self.services[service_index].state = next_state;
@@ -1155,6 +1155,14 @@ impl ServiceLifecycleController {
         }
     }
 
+    /// Whether an instance of `service_id` can hear the stop notice (#374). A Linux-personality
+    /// image has no call for it (BusyBox has no signals here), so its `Stop` ends it at once, as
+    /// without a clock, instead of holding the ordered stop for the whole grace period. A row
+    /// outside the active manifest (a self-test's) is assumed to hear it.
+    fn hears_stop_notice(&self, service_id: ServiceId) -> bool {
+        find_service(self.manifest, service_id).is_none_or(|spec| !spec.image.is_linux())
+    }
+
     /// #373 graceful stop: records the deadline and sets the instance's bound bit. The
     /// instance keeps running until it exits or [`Self::terminate_overdue_stops`] ends it.
     fn request_stop(
@@ -1178,6 +1186,10 @@ impl ServiceLifecycleController {
         if let Some((binding, bit)) = wake {
             work_set::signal(binding, bit);
         }
+        // #374: the storage and network services block in their own service calls, not a work
+        // set. Waking those waiters lets the call see the notice and return; any other waiter
+        // just blocks again.
+        wake_service_calls_for_stop();
         Ok(())
     }
 
@@ -1722,6 +1734,14 @@ static SERVICE_LIFECYCLE_CONTROLLER: GlobalCell<ServiceLifecycleController> =
 /// returned borrow.
 pub(crate) unsafe fn service_lifecycle_controller_mut() -> &'static mut ServiceLifecycleController {
     unsafe { &mut *SERVICE_LIFECYCLE_CONTROLLER.get() }
+}
+
+/// #374: wakes the service calls that block outside a work set, the storage service's
+/// `OBJECT_SUBOP_SERVICE_NEXT` and the network service's `NET_SUBOP_WAIT_WORK`, so the one
+/// being stopped sees its notice. Each checks for its own notice and otherwise waits again.
+fn wake_service_calls_for_stop() {
+    crate::capability::object::wake_object_service();
+    crate::service::net_request_wake::wake_net_service_work();
 }
 
 #[cfg(test)]
@@ -2482,6 +2502,36 @@ mod tests {
                 0,
                 ControlRequest::new(ServiceId(41), ControlRequestKind::Stop),
                 None,
+            )
+            .unwrap_err();
+        assert!(matches!(error, LifecycleControlError::TeardownFailed(_)));
+        assert_eq!(controller.stop_deadline_for_pid(0), Ok(None));
+    }
+
+    /// #374: BusyBox cannot hear the notice, so a Linux row's `Stop` ends it at once even with
+    /// a clock, rather than holding the ordered stop for the whole grace period.
+    #[test]
+    fn a_linux_row_is_stopped_at_once_and_a_native_row_gets_the_notice() {
+        use clean_slate_service_fixtures::manifest::SYSTEM_SHELL_SPEC;
+        use clean_slate_service_fixtures::STORAGE_SERVICE_ID;
+
+        let mut controller = ServiceLifecycleController::new();
+        assert!(SYSTEM_MANIFEST.contains(&SYSTEM_SHELL_SPEC));
+        assert!(!controller.hears_stop_notice(SYSTEM_SHELL_SPEC.id));
+        assert!(controller.hears_stop_notice(STORAGE_SERVICE_ID));
+        assert!(
+            controller.hears_stop_notice(ServiceId(40)),
+            "a row outside the manifest hears it"
+        );
+        // pid 0 cannot be torn down on the host, which shows the terminate was attempted.
+        controller.services[0] = live_record(SYSTEM_SHELL_SPEC.id, 0);
+        let mut allocator = test_allocator();
+        let error = controller
+            .handle_control_request_at(
+                &mut allocator,
+                0,
+                ControlRequest::new(SYSTEM_SHELL_SPEC.id, ControlRequestKind::Stop),
+                Some(1_000),
             )
             .unwrap_err();
         assert!(matches!(error, LifecycleControlError::TeardownFailed(_)));
