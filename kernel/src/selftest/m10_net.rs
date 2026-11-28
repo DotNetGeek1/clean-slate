@@ -9,6 +9,12 @@
 //! connect must be refused; the kernel then checks that the refusal is in the audit log, naming
 //! the probe and the destination. The probe reports each step through lane checks, and the
 //! kernel ends the boot at its last report.
+//!
+//! With `m10-net-listen-self-test` (#359, `cargo xtask test-m10-net-listen`) the kernel answers
+//! the probe's mode check with the listen mode: the probe listens on its policy's port, is
+//! refused another port (the kernel checks that audit record too), and echoes the connection
+//! the host makes in through QEMU's `hostfwd`. That kernel runs on QEMU's user network, with
+//! the static address the lane builds it with, not on the fixture network.
 
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
@@ -31,8 +37,10 @@ use clean_slate_capability::{HolderId, NetDestination, NetTransport};
 use clean_slate_native_abi::status::STATUS_EINVAL;
 use clean_slate_service_fixtures::net_probe::{
     NetProbeFailure, NetProbeStep, NET_PROBE_CHECK_DONE, NET_PROBE_CHECK_FAILED,
-    NET_PROBE_CHECK_REFUSED, NET_PROBE_CHECK_STEP, NET_PROBE_DENIED, NET_PROBE_MANIFEST,
-    NET_PROBE_SERVICE_ID, NET_PROBE_SUBOP_LANE_CHECK, NET_PROBE_WRONG_ANSWER,
+    NET_PROBE_CHECK_LISTENING, NET_PROBE_CHECK_LISTEN_REFUSED, NET_PROBE_CHECK_MODE,
+    NET_PROBE_CHECK_REFUSED, NET_PROBE_CHECK_STEP, NET_PROBE_DENIED, NET_PROBE_LISTEN_DENIED_PORT,
+    NET_PROBE_MANIFEST, NET_PROBE_MODE_LISTEN, NET_PROBE_SERVICE_ID, NET_PROBE_SUBOP_LANE_CHECK,
+    NET_PROBE_WRONG_ANSWER,
 };
 use clean_slate_service_fixtures::NETWORK_SERVICE_ID;
 use clean_slate_service_lifecycle::{
@@ -61,13 +69,47 @@ fn lane_check(pid: u64, check: u64, arg: u64) -> u64 {
         return STATUS_EINVAL;
     }
     match check {
+        NET_PROBE_CHECK_MODE => {
+            if cfg!(feature = "m10-net-listen-self-test") {
+                kernel_log_fmt(format_args!("[M10.net] mode listen\n"));
+                NET_PROBE_MODE_LISTEN
+            } else {
+                0
+            }
+        }
+        NET_PROBE_CHECK_LISTEN_REFUSED => {
+            let port = NET_PROBE_LISTEN_DENIED_PORT;
+            let denied = NetDestination {
+                transport: NetTransport::TcpListen,
+                addr: [0; 4],
+                port,
+            };
+            if arg != u64::from(port) || !refusal_is_audited(pid, denied) {
+                fatal_kernel_error("[M10.net] the refused listen has no audit record");
+            }
+            REFUSAL_AUDITED.store(true, Ordering::Relaxed);
+            kernel_log_fmt(format_args!(
+                "[M10.net] listen refusal audited actor={pid} dest=0.0.0.0:{port}/tcp-listen\n"
+            ));
+            0
+        }
+        NET_PROBE_CHECK_LISTENING => {
+            kernel_log_fmt(format_args!("[M10.net] listening port={arg}\n"));
+            0
+        }
         NET_PROBE_CHECK_STEP => {
             let name = NetProbeStep::from_code(arg).map_or("?", NetProbeStep::name);
             kernel_log_fmt(format_args!("[M10.net] step {name}\n"));
             0
         }
         NET_PROBE_CHECK_REFUSED => {
-            if !refusal_is_audited(pid) {
+            let (ip, port) = NET_PROBE_DENIED;
+            let denied = NetDestination {
+                transport: NetTransport::Tcp,
+                addr: ip,
+                port,
+            };
+            if !refusal_is_audited(pid, denied) {
                 fatal_kernel_error("[M10.net] the refused connect has no audit record");
             }
             REFUSAL_AUDITED.store(true, Ordering::Relaxed);
@@ -105,13 +147,7 @@ fn lane_check(pid: u64, check: u64, arg: u64) -> u64 {
 
 /// Whether the audit log holds a refused-destination record with the probe as actor and the
 /// denied destination.
-fn refusal_is_audited(pid: u64) -> bool {
-    let (ip, port) = NET_PROBE_DENIED;
-    let denied = NetDestination {
-        transport: NetTransport::Tcp,
-        addr: ip,
-        port,
-    };
+fn refusal_is_audited(pid: u64, denied: NetDestination) -> bool {
     with_audit_log(|log| {
         let (Some(oldest), Some(newest)) = (log.oldest_sequence(), log.newest_sequence()) else {
             return false;

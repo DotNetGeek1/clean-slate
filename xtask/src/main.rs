@@ -1317,7 +1317,7 @@ const M9_MILESTONE_STEPS: [M9MilestoneStep; 18] = [
 /// boots, display backends, input, compositor and app host suites), then the #118 desktop lane
 /// on both display backends and the system image's desktop (#218 S6e). `[M10 ] PASS` is printed
 /// only after all of them succeed.
-const M10_MILESTONE_STEPS: [M9MilestoneStep; 18] = [
+const M10_MILESTONE_STEPS: [M9MilestoneStep; 19] = [
     ("test-m10-contract", run_m10_contract_acceptance),
     ("clean-slate-ui (host)", run_m10_ui_host_tests),
     ("test-m10-nxe", run_m10_nxe_acceptance),
@@ -1327,6 +1327,7 @@ const M10_MILESTONE_STEPS: [M9MilestoneStep; 18] = [
     ("test-m10-clock", m10_clock::run),
     ("test-m10-storage", m10_storage::run),
     ("test-m10-net", m10_net::run),
+    ("test-m10-net-listen", m10_net::listen::run),
     ("test-qmp-smoke", run_qmp_smoke_acceptance),
     ("test-m10-virtio-modern", run_m10_virtio_modern_acceptance),
     ("test-m10-framebuffer", run_m10_framebuffer_acceptance),
@@ -1448,6 +1449,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         },
         ParsedCommand::TestM10Storage => m10_storage::run(),
         ParsedCommand::TestM10Net => m10_net::run(),
+        ParsedCommand::TestM10NetListen => m10_net::listen::run(),
         ParsedCommand::TestQmpSmoke => run_qmp_smoke_acceptance(),
         ParsedCommand::TestM10Desktop => m10_desktop_lane::run(),
         ParsedCommand::RunM10Desktop => run_m10_desktop_interactive(&trailing_args),
@@ -5753,6 +5755,9 @@ fn print_help() {
         "  test-m10-clock  #308 native clock: clock host tests, then two m10-clock-self-test QEMU boots: monotonic time across a wait and a wall clock within 3 s of the host's (-rtc base=now), and no wall clock from an RTC before the build floor; prints [M10.clock] lane PASS (aliases: m10-clock, m10.308)"
     );
     println!(
+        "  test-m10-net-listen  #359 native TCP listen: listen/accept host tests, then one m10-net-listen-self-test QEMU boot on restricted slirp with a hostfwd to the native probe: it listens on port 7000, is refused port 7001 with the refusal audited, and the host connects in and gets its bytes echoed back; prints [M10.net] listen lane PASS (aliases: m10-net-listen, m10.359)"
+    );
+    println!(
         "  test-m10-net  #353 native network client: network client host tests, then one m10-net-client-self-test QEMU boot against the M7 fixture peer: a native app with only the NativeNetworkClient grant resolves a name, fetches a page over TCP and over TLS, makes a UDP round trip, and is refused a destination its policy does not name, with the refusal in the audit log; prints [M10.net] lane PASS (aliases: m10-net, m10.353)"
     );
     println!(
@@ -5939,6 +5944,7 @@ enum ParsedCommand {
     NetAcceptanceRelay,
     TestM10Storage,
     TestM10Net,
+    TestM10NetListen,
     TestQmpSmoke,
     TestM10VirtioModern,
     TestM10VirtioGpu,
@@ -6116,6 +6122,11 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-m10-net" || cmd == "m10-net" || cmd == "m10.353" => {
             ParsedCommand::TestM10Net
+        }
+        Some(cmd)
+            if cmd == "test-m10-net-listen" || cmd == "m10-net-listen" || cmd == "m10.359" =>
+        {
+            ParsedCommand::TestM10NetListen
         }
         Some(cmd) if cmd == "test-qmp-smoke" || cmd == "qmp-smoke" => ParsedCommand::TestQmpSmoke,
         Some(cmd) if cmd == "test-m10-virtio-modern" || cmd == "m10-virtio-modern" => {
@@ -6790,6 +6801,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestM10Net
+            );
+        }
+        for alias in ["test-m10-net-listen", "m10-net-listen", "m10.359"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestM10NetListen
             );
         }
         assert_eq!(
@@ -7812,6 +7829,7 @@ mod tests {
             "test-m10-clock",
             "test-m10-storage",
             "test-m10-net",
+            "test-m10-net-listen",
             "test-qmp-smoke",
             "test-m10-virtio-modern",
             "test-m10-framebuffer",

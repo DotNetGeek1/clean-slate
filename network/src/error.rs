@@ -29,6 +29,8 @@ pub enum NetworkError {
     SessionExhausted,
     NotFound,
     Closed,
+    /// A listen on a port that is already listened on or in use (#359).
+    AddressInUse,
 }
 
 impl NetworkError {
@@ -50,6 +52,7 @@ impl NetworkError {
             Self::NotFound => 13,
             Self::Closed => 14,
             Self::Denied(DenialReason::Destination) => 15,
+            Self::AddressInUse => 16,
         }
     }
 }

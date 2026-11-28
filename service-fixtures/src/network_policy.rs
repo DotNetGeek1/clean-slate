@@ -3,8 +3,8 @@
 //! The kernel attests which app a network client belongs to: [`TrustedCaller::domain`] is the
 //! manifest row the caller was launched for (a fork inherits its parent's), [`APP_SELF_TEST`]
 //! for a self-test kernel's own clients, and [`APP_UNATTRIBUTED`] otherwise. The network
-//! service looks the app up in [`NETWORK_POLICIES`] and lets it resolve names and reach only the
-//! destinations its entry names. An app without an entry may not open, resolve or connect at
+//! service looks the app up in [`NETWORK_POLICIES`] and lets it resolve names, reach only the
+//! destinations its entry names, and listen only on the ports it names (#359). An app without an entry may not open, resolve or connect at
 //! all, so a row that gains `Grant::NetworkClient` or `Grant::NativeNetworkClient` without a
 //! policy gets nothing.
 //!
@@ -88,6 +88,18 @@ pub struct AppNetworkPolicy {
     /// Whether the app may ask the service to resolve names.
     pub resolve: bool,
     pub destinations: &'static [DestinationRule],
+    /// Inclusive local port ranges the app may listen on for inbound TCP (#359). A listen on
+    /// any other port is refused and audited as a `tcp-listen` destination.
+    pub listen_ports: &'static [(u16, u16)],
+}
+
+impl AppNetworkPolicy {
+    /// Whether the app may listen on `port`.
+    pub fn may_listen(&self, port: u16) -> bool {
+        self.listen_ports
+            .iter()
+            .any(|&(low, high)| (low..=high).contains(&port))
+    }
 }
 
 /// The shells (#218, #311): TCP anywhere, and DNS only through the system resolver, so no
@@ -125,17 +137,21 @@ pub const NETWORK_POLICIES: &[AppNetworkPolicy] = &[
         app: SYSTEM_SHELL_SERVICE_ID.0 as u64,
         resolve: true,
         destinations: SHELL_DESTINATIONS,
+        // Linux `bind`/`listen` stay with the Linux personality (#222): no inbound yet.
+        listen_ports: &[],
     },
     AppNetworkPolicy {
         app: TERMINAL_SHELL_SERVICE_ID.0 as u64,
         resolve: true,
         destinations: SHELL_DESTINATIONS,
+        listen_ports: &[],
     },
     crate::net_probe::NET_PROBE_POLICY,
     AppNetworkPolicy {
         app: APP_SELF_TEST,
         resolve: true,
         destinations: SELF_TEST_DESTINATIONS,
+        listen_ports: &[(1, u16::MAX)],
     },
 ];
 
@@ -184,12 +200,12 @@ impl NetworkAuthorizer for AppPolicyAuthorizer {
     /// (none, then) and `Close` stay with the session checks.
     fn authorize(&self, caller: &TrustedCaller, op: NetworkOp) -> Result<(), DenialReason> {
         match op {
-            NetworkOp::Resolve | NetworkOp::Open | NetworkOp::Connect => self
+            NetworkOp::Resolve | NetworkOp::Open | NetworkOp::Connect | NetworkOp::Listen => self
                 .policy(caller)
                 .map(|_| ())
                 .ok_or(DenialReason::Destination),
             NetworkOp::RawDevice => Err(DenialReason::NoCapability),
-            NetworkOp::Send | NetworkOp::Receive | NetworkOp::Close => Ok(()),
+            NetworkOp::Send | NetworkOp::Receive | NetworkOp::Close | NetworkOp::Accept => Ok(()),
         }
     }
 
@@ -205,6 +221,7 @@ impl NetworkAuthorizer for AppPolicyAuthorizer {
                 .destinations
                 .iter()
                 .any(|rule| rule.covers(transport, dest, self.resolver)),
+            NetworkTarget::Listen { port } => policy.may_listen(port),
         };
         if allowed {
             Ok(())
@@ -222,6 +239,11 @@ pub fn audit_destination(target: NetworkTarget) -> NetDestination {
             transport,
             addr: dest.addr.octets(),
             port: dest.port,
+        },
+        NetworkTarget::Listen { port } => NetDestination {
+            transport: NetTransport::TcpListen,
+            addr: [0; 4],
+            port,
         },
     }
 }
@@ -337,6 +359,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_shell_listens_nowhere_and_a_self_test_client_anywhere() {
+        let auth = authorizer();
+        let shell = caller(u64::from(SYSTEM_SHELL_SERVICE_ID.0));
+        assert_eq!(auth.authorize(&shell, NetworkOp::Listen), Ok(()));
+        assert_eq!(
+            auth.authorize_target(&shell, NetworkTarget::Listen { port: 8080 }),
+            Err(DenialReason::Destination)
+        );
+        let probe = caller(APP_SELF_TEST);
+        assert_eq!(
+            auth.authorize_target(&probe, NetworkTarget::Listen { port: 8080 }),
+            Ok(())
+        );
+        let nobody = caller(APP_UNATTRIBUTED);
+        assert_eq!(
+            auth.authorize(&nobody, NetworkOp::Listen),
+            Err(DenialReason::Destination)
+        );
+        assert_eq!(auth.authorize(&nobody, NetworkOp::Accept), Ok(()));
+        assert_eq!(
+            NetDestination::decode(
+                audit_destination(NetworkTarget::Listen { port: 8080 }).encode()
+            ),
+            Some(NetDestination {
+                transport: NetTransport::TcpListen,
+                addr: [0; 4],
+                port: 8080
+            })
+        );
     }
 
     #[test]

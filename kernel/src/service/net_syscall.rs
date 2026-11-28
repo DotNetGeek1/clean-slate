@@ -12,7 +12,7 @@ use clean_slate_network::error::DenialReason;
 use clean_slate_network::protocol::{
     NetworkRequest, NetworkResponse, NETWORK_REQUEST_BYTES, NETWORK_RESPONSE_BYTES,
 };
-use clean_slate_network::session::SessionGeneration;
+use clean_slate_network::session::{SessionGeneration, SessionId};
 use clean_slate_service_fixtures::{
     NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
     NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_NEXT_METADATA_BYTES,
@@ -143,17 +143,14 @@ fn network_op_for_request(request: &NetworkRequest) -> NetworkOp {
         NetworkRequest::Send { .. } => NetworkOp::Send,
         NetworkRequest::Receive { .. } => NetworkOp::Receive,
         NetworkRequest::Close { .. } => NetworkOp::Receive,
+        // #359: a listen starts an endpoint as a connect does; an accept takes what arrived.
+        NetworkRequest::Listen { .. } => NetworkOp::Connect,
+        NetworkRequest::Accept { .. } => NetworkOp::Receive,
     }
 }
 
 fn session_generation_for_request(request: &NetworkRequest) -> Option<SessionGeneration> {
-    match request {
-        NetworkRequest::Resolve { .. } | NetworkRequest::Open { .. } => None,
-        NetworkRequest::Connect { session, .. }
-        | NetworkRequest::Send { session, .. }
-        | NetworkRequest::Receive { session, .. }
-        | NetworkRequest::Close { session } => Some(session.generation()),
-    }
+    request.session().map(SessionId::generation)
 }
 
 pub(crate) fn live_network_service_pid() -> Option<u64> {

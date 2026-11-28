@@ -185,10 +185,10 @@ fn probe_spec() -> String {
 
 /// Sets (or, for `None`, removes) process environment variables for the kernel build, and puts
 /// the old values back on drop.
-struct BuildEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+pub(crate) struct BuildEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
 impl BuildEnv {
-    fn set(vars: &[(&'static str, Option<String>)]) -> Self {
+    pub(crate) fn set(vars: &[(&'static str, Option<String>)]) -> Self {
         let saved = vars
             .iter()
             .map(|(name, value)| {

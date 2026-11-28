@@ -156,6 +156,19 @@ impl FakeKernel {
         self.net.push(addr, bytes);
     }
 
+    /// The client's policy may not listen on `port` (#359).
+    pub fn net_forbid_listen(&mut self, port: u16) {
+        self.net.forbid_listen(port);
+    }
+
+    /// A peer at `peer` connects to local `port` (#359) and sends `bytes`; when `close`, it
+    /// closes its side once the client has sent it as many bytes, as an echo client does (at once
+    /// when `bytes` is empty). A
+    /// listener on `port` takes it on its next accept.
+    pub fn net_connect_in(&mut self, port: u16, peer: NetAddr, bytes: &[u8], close: bool) {
+        self.net.connect_in(port, peer, bytes, close);
+    }
+
     /// The network service restarts: its sessions go stale and the client capability becomes
     /// `new_handle`.
     pub fn net_restart(&mut self, new_handle: u64) {

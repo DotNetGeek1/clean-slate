@@ -238,8 +238,22 @@ mod tests {
             NetworkRequest::Close {
                 session: SessionId::new(SessionGeneration::new(9), 1),
             },
+            NetworkRequest::Listen {
+                session: SessionId::new(SessionGeneration::new(9), 2),
+                port: 7000,
+            },
+            NetworkRequest::Accept {
+                session: SessionId::new(SessionGeneration::new(9), 2),
+            },
         ];
         for request in requests {
+            assert_eq!(
+                request.session().is_some(),
+                !matches!(
+                    request,
+                    NetworkRequest::Resolve { .. } | NetworkRequest::Open { .. }
+                )
+            );
             let encoded = request.encode();
             let decoded = NetworkRequest::decode(&encoded).unwrap();
             assert_eq!(decoded, request);
@@ -261,6 +275,11 @@ mod tests {
                 payload_len: APP_RESPONSE_BYTES.len() as u32,
             },
             NetworkResponse::Close,
+            NetworkResponse::Listen,
+            NetworkResponse::Accept {
+                session: SessionId::new(SessionGeneration::new(3), 8),
+                peer: SocketAddrV4::new(PEER_IPV4, 51_000),
+            },
             NetworkResponse::Error {
                 code: NetworkError::Protocol.code(),
             },

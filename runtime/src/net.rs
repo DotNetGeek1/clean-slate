@@ -1,10 +1,10 @@
-//! The network client (#353): name resolution, TCP streams, connected UDP sockets and TLS
-//! exchanges through the network service, over syscalls 14 and 15
+//! The network client (#353): name resolution, TCP streams, TCP listeners (#359), connected UDP
+//! sockets and TLS exchanges through the network service, over syscalls 14 and 15
 //! (`clean_slate_native_abi::net`).
 //!
 //! A program needs `Grant::NativeNetworkClient` on its manifest row, and what it may reach is
-//! its row's network policy: a destination the policy refuses fails with
-//! [`Error::Failed`]`(STATUS_EACCES)`, and the refusal is in the audit log. When the network
+//! its row's network policy: a destination, or a port to listen on, that the policy refuses
+//! fails with [`Error::Failed`]`(STATUS_EACCES)`, and the refusal is in the audit log. When the network
 //! service restarts, every open socket fails with [`Error::Gone`] (or `Failed(STATUS_EACCES)`
 //! while no instance is running); open new ones. Each call asks the kernel for the current
 //! client capability, which a restart replaces, so nothing here holds a stale handle.
@@ -362,6 +362,96 @@ impl TcpStream {
     pub fn close<S: Syscalls>(mut self, sys: &mut S) {
         if let Ok(client) = Client::get(sys) {
             self.inbox.abandon(sys, client);
+            client.close(sys, self.session);
+        }
+    }
+}
+
+/// A TCP listener on a local port of the service's address (#359). Peers that connect wait in a
+/// small backlog until [`Self::accept`] takes them; past it they are refused with a reset.
+pub struct TcpListener {
+    session: u64,
+    port: u16,
+    /// An accept the service holds, left by one that reached its deadline.
+    pending: Option<u64>,
+}
+
+impl TcpListener {
+    /// Listens on `port`. A port the row's policy does not name fails with
+    /// `Failed(STATUS_EACCES)` (and is audited); one already in use with
+    /// `Failed(STATUS_EADDRINUSE)`.
+    pub fn bind<S: Syscalls>(sys: &mut S, port: u16) -> Result<Self, Error> {
+        let client = Client::get(sys)?;
+        let session = client.open(sys, NET_SOCKET_STREAM)?;
+        let listened = client.exchange(
+            sys,
+            NetRequest::Listen { session, port },
+            &[],
+            &mut [],
+            Deadline::NEVER,
+        );
+        match listened {
+            Ok(NetResponse::Listen) => Ok(Self {
+                session,
+                port,
+                pending: None,
+            }),
+            Ok(_) => {
+                client.close(sys, session);
+                Err(Error::Failed(STATUS_EINVAL))
+            }
+            Err(error) => {
+                client.close(sys, session);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// The oldest connection the backlog holds, and its peer; waits for one until `deadline`.
+    /// An accept that timed out stays with the service, so a peer that connects later is
+    /// returned by the next call rather than left unaccepted.
+    pub fn accept<S: Syscalls>(
+        &mut self,
+        sys: &mut S,
+        deadline: Deadline,
+    ) -> Result<(TcpStream, NetAddr), Error> {
+        let client = Client::get(sys)?;
+        let id = match self.pending {
+            Some(id) => id,
+            None => {
+                let request = NetRequest::Accept {
+                    session: self.session,
+                };
+                let id = client.submit(sys, request, &[])?;
+                self.pending = Some(id);
+                id
+            }
+        };
+        client.wait(sys, id, deadline)?;
+        self.pending = None;
+        match client.poll(sys, id, &mut [])? {
+            NetResponse::Accept { session, peer } => Ok((
+                TcpStream {
+                    session,
+                    inbox: Inbox::new(),
+                    eof: false,
+                },
+                peer,
+            )),
+            _ => Err(Error::Failed(STATUS_EINVAL)),
+        }
+    }
+
+    /// Stops listening. Peers in the backlog are reset; streams already accepted stay open.
+    pub fn close<S: Syscalls>(mut self, sys: &mut S) {
+        if let Ok(client) = Client::get(sys) {
+            if let Some(id) = self.pending.take() {
+                client.discard(sys, id);
+            }
             client.close(sys, self.session);
         }
     }

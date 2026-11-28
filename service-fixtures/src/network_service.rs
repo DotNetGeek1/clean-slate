@@ -21,6 +21,10 @@ pub enum NetworkOp {
     Send,
     Receive,
     Close,
+    /// Listen on a local port with a stream session (#359).
+    Listen,
+    /// Take a connection from a session that listens (#359).
+    Accept,
     RawDevice,
 }
 
@@ -34,6 +38,8 @@ pub enum NetworkTarget {
         transport: NetTransport,
         dest: SocketAddrV4,
     },
+    /// A TCP listen on the service's address, `port` (#359).
+    Listen { port: u16 },
 }
 
 pub trait NetworkAuthorizer {
@@ -223,6 +229,8 @@ where
             NetworkRequest::Send { .. } => NetworkOp::Send,
             NetworkRequest::Receive { .. } => NetworkOp::Receive,
             NetworkRequest::Close { .. } => NetworkOp::Close,
+            NetworkRequest::Listen { .. } => NetworkOp::Listen,
+            NetworkRequest::Accept { .. } => NetworkOp::Accept,
         }
     }
 
@@ -357,6 +365,18 @@ where
         Ok(self.sessions[index].connected_dest)
     }
 
+    /// A new stream session of `caller`'s, connected to `peer`: a connection a listener of
+    /// theirs accepted (#359).
+    pub fn open_accepted(
+        &mut self,
+        caller: TrustedCaller,
+        peer: SocketAddrV4,
+    ) -> Result<SessionId, NetworkResponse> {
+        let session = self.alloc_session(caller, SocketKind::LinuxTcp)?;
+        self.sessions[session.index() as usize].connected_dest = Some(peer);
+        Ok(session)
+    }
+
     pub fn attach_connected_dest(
         &mut self,
         caller: TrustedCaller,
@@ -424,6 +444,12 @@ where
                     SocketKind::Tcp | SocketKind::LinuxTcp => NetTransport::Tcp,
                 };
                 NetworkTarget::Destination { transport, dest }
+            }
+            NetworkRequest::Listen { session, port } => {
+                if self.validate_session(caller, session).is_err() {
+                    return Ok(());
+                }
+                NetworkTarget::Listen { port }
             }
             _ => return Ok(()),
         };
@@ -503,6 +529,13 @@ where
                         },
                         0,
                     ),
+                    Err(response) => (response, 0),
+                }
+            }
+            // Only stream sessions listen; the network image serves them (#359).
+            NetworkRequest::Listen { session, .. } | NetworkRequest::Accept { session } => {
+                match self.validate_session(&caller, session) {
+                    Ok(_) => (Self::error_response(NetworkError::InvalidRequest), 0),
                     Err(response) => (response, 0),
                 }
             }

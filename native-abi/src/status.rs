@@ -32,6 +32,7 @@ pub const STATUS_EPROTO: u64 = u64::MAX - 70;
 pub const STATUS_ECONNRESET: u64 = u64::MAX - 103;
 pub const STATUS_ENOBUFS: u64 = u64::MAX - 104;
 pub const STATUS_EHOSTUNREACH: u64 = u64::MAX - 112;
+pub const STATUS_EADDRINUSE: u64 = u64::MAX - 97;
 
 pub const STATUS_RANGE_START: u64 = u64::MAX - 4095;
 
@@ -72,6 +73,7 @@ mod tests {
             (STATUS_ECONNRESET, 104),
             (STATUS_ENOBUFS, 105),
             (STATUS_EHOSTUNREACH, 113),
+            (STATUS_EADDRINUSE, 98),
         ];
         for (status, errno) in cases {
             assert_eq!(status, u64::MAX - (errno - 1));
@@ -106,6 +108,7 @@ mod tests {
             STATUS_ECONNRESET,
             STATUS_ENOBUFS,
             STATUS_EHOSTUNREACH,
+            STATUS_EADDRINUSE,
         ];
         for i in 0..statuses.len() {
             assert!(is_status(statuses[i]));

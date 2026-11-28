@@ -824,7 +824,16 @@ fn a_refused_network_destination_round_trips_and_prints_its_address() {
         NetDestination::decode(NetDestination::RESOLVE.encode()),
         Some(NetDestination::RESOLVE)
     );
-    assert_eq!(NetDestination::decode(3 << 48), None, "unknown transport");
+    assert_eq!(NetDestination::decode(4 << 48), None, "unknown transport");
+    let listen = NetDestination {
+        transport: NetTransport::TcpListen,
+        addr: [0; 4],
+        port: 7001,
+    };
+    assert_eq!(NetDestination::decode(listen.encode()), Some(listen));
+    let mut text = std::string::String::new();
+    listen.write_to(&mut text).unwrap();
+    assert_eq!(text, "0.0.0.0:7001/tcp-listen");
     assert_eq!(
         NetDestination::decode(1 << 56),
         None,

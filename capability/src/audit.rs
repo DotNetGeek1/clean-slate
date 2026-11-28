@@ -126,6 +126,8 @@ pub enum NetTransport {
     Resolve = 0,
     Tcp = 1,
     Udp = 2,
+    /// A TCP listen on a local port (#359): the address is 0, the port the one asked for.
+    TcpListen = 3,
 }
 
 impl NetTransport {
@@ -134,6 +136,7 @@ impl NetTransport {
             0 => Some(Self::Resolve),
             1 => Some(Self::Tcp),
             2 => Some(Self::Udp),
+            3 => Some(Self::TcpListen),
             _ => None,
         }
     }
@@ -143,6 +146,7 @@ impl NetTransport {
             Self::Resolve => "resolve",
             Self::Tcp => "tcp",
             Self::Udp => "udp",
+            Self::TcpListen => "tcp-listen",
         }
     }
 }
@@ -175,7 +179,7 @@ impl NetDestination {
         })
     }
 
-    /// `a.b.c.d:port/tcp`, `a.b.c.d:port/udp`, or `resolve`.
+    /// `a.b.c.d:port/tcp`, `a.b.c.d:port/udp`, `a.b.c.d:port/tcp-listen`, or `resolve`.
     pub fn write_to(self, f: &mut impl core::fmt::Write) -> core::fmt::Result {
         if self.transport == NetTransport::Resolve {
             return f.write_str("resolve");
