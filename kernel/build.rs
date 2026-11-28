@@ -396,9 +396,10 @@ const FIXTURE_NETWORK_FEATURES: &[&str] = &[
 ///   (default `kernel/trust-anchors`), in name order, as `PRODUCTION_TRUST_ANCHORS`.
 /// - `production_network.rs`: `CLEAN_SLATE_NET_STATIC` as `PRODUCTION_NETWORK`, a static
 ///   configuration `local/prefix[,gw=a.b.c.d][,gw_mac=xx:..][,dns=a.b.c.d[:port]][,tls_name=n]`,
-///   or `CLEAN_SLATE_NET_DHCP` as a DHCP configuration `on[,dns=a.b.c.d[:port]][,tls_name=n]`
-///   (a `dns` here is used instead of the leased resolver). `dns=tcp:a.b.c.d[:port]` sends the
-///   queries over TCP. Setting both is an error; neither
+///   or `CLEAN_SLATE_NET_DHCP` as a DHCP configuration
+///   `on[,dns=a.b.c.d[:port]][,tls_name=n][,max_lease=secs]` (a `dns` here is used instead of
+///   the leased resolver; `max_lease` caps every lease, so it renews sooner, #360).
+///   `dns=tcp:a.b.c.d[:port]` sends the queries over TCP. Setting both is an error; neither
 ///   is an unconfigured network.
 fn emit_network_launch_inputs() {
     println!("cargo::rustc-check-cfg=cfg(clean_slate_fixture_network)");
@@ -592,7 +593,7 @@ fn dhcp_network_code(spec: &str) -> Result<String, String> {
         Some("on" | "1") => {}
         _ => return Err("must start with `on`".to_string()),
     }
-    let (mut dns, mut tls_name) = (None, String::new());
+    let (mut dns, mut tls_name, mut max_lease) = (None, String::new(), 0u16);
     for field in fields {
         let (key, value) = field
             .split_once('=')
@@ -600,11 +601,18 @@ fn dhcp_network_code(spec: &str) -> Result<String, String> {
         match key {
             "dns" => dns = Some(parse_dns(value)?),
             "tls_name" => tls_name = value.to_string(),
+            "max_lease" => {
+                max_lease = value
+                    .parse()
+                    .ok()
+                    .filter(|&secs| secs >= 4)
+                    .ok_or("max_lease must be 4..=65535 seconds")?
+            }
             other => return Err(format!("unknown field {other:?}")),
         }
     }
     Ok(format!(
-        "NetworkConfig::new_dhcp({}, {tls_name:?}){}",
+        "NetworkConfig::new_dhcp({}, {tls_name:?}){}.with_dhcp_max_lease_secs({max_lease})",
         dns_code(dns.map(|(addr, _)| addr)),
         dns_tcp_suffix(dns)
     ))

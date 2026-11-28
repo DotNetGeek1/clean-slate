@@ -76,8 +76,66 @@ pub const NET_SUBOP_AUDIT_REFUSAL: u64 = 13;
 /// `r10` = its IPv4 address (big-endian octets in the low 32 bits), `r8` = its port. The
 /// service sends it once its network is up (after a DHCP lease, when there is one) and again
 /// whenever the resolver changes. The kernel keeps it while that service instance is live.
-/// Returns 0, or `EINVAL` / `EACCES` / `ESTALE`.
+/// `r9` is a [`NetLeaseReport`] word when the call follows a DHCP lease change (#360), which
+/// the kernel logs on serial, or 0. Returns 0, or `EINVAL` / `EACCES` / `ESTALE`.
 pub const NET_SUBOP_PUBLISH_RESOLVER: u64 = 14;
+
+/// What happened to the network service's DHCP lease (#360), as `NET_SUBOP_PUBLISH_RESOLVER`
+/// carries it in `r9`: the event in bits 40..48, the prefix length in bits 32..40, and the
+/// address (big-endian octets) in bits 0..32.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetLeaseReport {
+    pub event: NetLeaseEvent,
+    pub address: [u8; 4],
+    pub prefix_len: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetLeaseEvent {
+    /// A lease is held where none was.
+    Bound = 1,
+    /// The held lease was extended, at the same address.
+    Renewed = 2,
+    /// The lease ended; the service is unconfigured until the next one.
+    Expired = 3,
+}
+
+impl NetLeaseEvent {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bound => "bound",
+            Self::Renewed => "renewed",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+impl NetLeaseReport {
+    pub const fn encode(self) -> u64 {
+        (self.event as u64) << 40
+            | (self.prefix_len as u64) << 32
+            | u32::from_be_bytes(self.address) as u64
+    }
+
+    /// `None` for 0 (no report) and for any word [`Self::encode`] does not make.
+    pub const fn decode(raw: u64) -> Option<Self> {
+        let event = match raw >> 40 {
+            1 => NetLeaseEvent::Bound,
+            2 => NetLeaseEvent::Renewed,
+            3 => NetLeaseEvent::Expired,
+            _ => return None,
+        };
+        let prefix_len = (raw >> 32) as u8;
+        if prefix_len > 32 {
+            return None;
+        }
+        Some(Self {
+            event,
+            address: (raw as u32).to_be_bytes(),
+            prefix_len,
+        })
+    }
+}
 /// Wake for a queued client request or a pending holder-exit notification.
 pub const NET_WAIT_WORK_REQUESTS: u64 = 1 << 0;
 /// Wake when `NET_SUBOP_RAW_RECEIVE` would return a frame.
@@ -303,6 +361,31 @@ pub fn encode_request(request: &NetworkRequest) -> [u8; NETWORK_REQUEST_BYTES] {
 
 pub fn encode_response(response: &NetworkResponse) -> [u8; NETWORK_RESPONSE_BYTES] {
     response.encode()
+}
+
+#[cfg(test)]
+mod lease_report_tests {
+    use super::*;
+
+    #[test]
+    fn lease_reports_round_trip_and_junk_is_refused() {
+        for event in [
+            NetLeaseEvent::Bound,
+            NetLeaseEvent::Renewed,
+            NetLeaseEvent::Expired,
+        ] {
+            let report = NetLeaseReport {
+                event,
+                address: [10, 0, 2, 15],
+                prefix_len: 24,
+            };
+            assert_eq!(NetLeaseReport::decode(report.encode()), Some(report));
+        }
+        assert_eq!(NetLeaseReport::decode(0), None);
+        assert_eq!(NetLeaseReport::decode(4 << 40), None);
+        assert_eq!(NetLeaseReport::decode(1 << 40 | 33 << 32), None);
+        assert_eq!(NetLeaseReport::decode(1 << 48 | 1 << 40), None);
+    }
 }
 
 /// The native network ABI (#353) restates the service's frames for clients that do not link

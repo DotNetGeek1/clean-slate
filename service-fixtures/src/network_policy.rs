@@ -165,6 +165,15 @@ impl AppPolicyAuthorizer {
         Self { policies, resolver }
     }
 
+    /// The resolver policies are judged against: a renewed DHCP lease may change it (#360).
+    pub fn set_resolver(&mut self, resolver: Option<SocketAddrV4>) {
+        self.resolver = resolver;
+    }
+
+    pub fn resolver(&self) -> Option<SocketAddrV4> {
+        self.resolver
+    }
+
     fn policy(&self, caller: &TrustedCaller) -> Option<&'static AppNetworkPolicy> {
         policy_for(self.policies, caller.domain)
     }
@@ -337,6 +346,26 @@ mod tests {
         let dns = dest([10, 77, 0, 1], 53, NetTransport::Udp);
         assert_eq!(
             auth.authorize_target(&shell, dns),
+            Err(DenialReason::Destination)
+        );
+    }
+
+    #[test]
+    fn a_changed_resolver_moves_the_system_resolver_rule() {
+        let mut auth = authorizer();
+        let shell = caller(u64::from(SYSTEM_SHELL_SERVICE_ID.0));
+        let old = dest([10, 77, 0, 1], 53, NetTransport::Udp);
+        let new = dest([10, 77, 0, 53], 53, NetTransport::Udp);
+        assert_eq!(
+            auth.authorize_target(&shell, new),
+            Err(DenialReason::Destination)
+        );
+        let moved = SocketAddrV4::new(Ipv4Addr::new([10, 77, 0, 53]), 53);
+        auth.set_resolver(Some(moved));
+        assert_eq!(auth.resolver(), Some(moved));
+        assert_eq!(auth.authorize_target(&shell, new), Ok(()));
+        assert_eq!(
+            auth.authorize_target(&shell, old),
             Err(DenialReason::Destination)
         );
     }

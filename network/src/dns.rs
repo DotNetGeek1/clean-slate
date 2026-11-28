@@ -964,6 +964,17 @@ impl<L: NetworkLink> DnsResolver<L> {
         }
     }
 
+    /// The server queries go to.
+    pub fn server(&self) -> SocketAddrV4 {
+        self.server
+    }
+
+    /// Sends later queries to `server` (a lease named another DNS server, #360). Cached
+    /// answers stay; a query already sent to the old server finishes, or times out, there.
+    pub fn set_server(&mut self, server: SocketAddrV4) {
+        self.server = server;
+    }
+
     pub fn stats(&self) -> DnsResolverStats {
         self.stats
     }

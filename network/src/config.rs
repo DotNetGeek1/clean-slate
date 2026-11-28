@@ -110,7 +110,11 @@ pub struct NetworkConfig {
     pub tls_peer_name: [u8; MAX_REQUEST_HOSTNAME_LEN],
     /// [`CONFIG_FLAG_DHCP`], [`CONFIG_FLAG_DNS_TCP`]; other bits are reserved (zero).
     pub flags: u8,
-    pub _reserved: [u8; 6],
+    /// DHCP only: the longest lease, in seconds (big-endian), the service keeps before
+    /// renewing as if the server had granted that (#360); all zero takes leases as granted.
+    /// Zero on a static configuration.
+    pub dhcp_max_lease_secs: [u8; 2],
+    pub _reserved: [u8; 4],
 }
 
 /// [`NetworkConfig::flags`]: lease the address, prefix, gateway and (unless the config names
@@ -227,7 +231,8 @@ impl NetworkConfig {
         tls_peer_name_len: 0,
         tls_peer_name: [0; MAX_REQUEST_HOSTNAME_LEN],
         flags: 0,
-        _reserved: [0; 6],
+        dhcp_max_lease_secs: [0; 2],
+        _reserved: [0; 4],
     };
 
     /// A DHCP configuration: the route is leased at launch. `resolver`, when given, is used
@@ -236,6 +241,21 @@ impl NetworkConfig {
         let mut config = Self::new_static(Ipv4Route::UNCONFIGURED, None, resolver, tls_peer_name);
         config.flags = CONFIG_FLAG_DHCP;
         config
+    }
+
+    /// This DHCP configuration with leases capped at `secs` seconds
+    /// ([`Self::dhcp_max_lease_secs`]); `0` takes leases as granted.
+    pub const fn with_dhcp_max_lease_secs(mut self, secs: u16) -> Self {
+        self.dhcp_max_lease_secs = secs.to_be_bytes();
+        self
+    }
+
+    /// The lease cap a DHCP configuration names, if any.
+    pub const fn dhcp_max_lease_secs(&self) -> Option<u16> {
+        match u16::from_be_bytes(self.dhcp_max_lease_secs) {
+            0 => None,
+            secs => Some(secs),
+        }
     }
 
     /// This configuration with DNS over TCP ([`CONFIG_FLAG_DNS_TCP`]).
@@ -279,7 +299,7 @@ impl NetworkConfig {
 
     /// Checks the configuration. An unconfigured one gives [`ServiceNetwork::UNCONFIGURED`].
     pub fn parse(&self) -> Result<ServiceNetwork, ConfigError> {
-        if self._reserved != [0; 6] || self.flags & !CONFIG_FLAGS_KNOWN != 0 {
+        if self._reserved != [0; 4] || self.flags & !CONFIG_FLAGS_KNOWN != 0 {
             return Err(ConfigError::Reserved);
         }
         if self.version == 0 && *self == Self::UNCONFIGURED {
@@ -290,6 +310,9 @@ impl NetworkConfig {
         }
         if self.flags & CONFIG_FLAG_DHCP != 0 {
             return self.parse_dhcp();
+        }
+        if self.dhcp_max_lease_secs != [0; 2] {
+            return Err(ConfigError::Reserved);
         }
         if self.prefix_len == 0 || self.prefix_len > 32 {
             return Err(ConfigError::BadPrefix);
@@ -763,6 +786,8 @@ mod tests {
             dns: Some(DNS.addr),
             server: GATEWAY,
             lease_secs: 3_600,
+            renew_secs: 1_800,
+            rebind_secs: 3_150,
         };
         let leased = network.with_lease(&lease).unwrap();
         assert!(!leased.dhcp);
@@ -805,6 +830,20 @@ mod tests {
     }
 
     #[test]
+    fn a_lease_cap_is_dhcp_only() {
+        let capped = NetworkConfig::new_dhcp(None, "").with_dhcp_max_lease_secs(30);
+        assert_eq!(capped.dhcp_max_lease_secs(), Some(30));
+        assert!(capped.parse().unwrap().dhcp);
+        assert_eq!(
+            NetworkConfig::new_dhcp(None, "").dhcp_max_lease_secs(),
+            None
+        );
+        let static_capped =
+            NetworkConfig::new_static(route(), None, None, "").with_dhcp_max_lease_secs(30);
+        assert_eq!(static_capped.parse(), Err(ConfigError::Reserved));
+    }
+
+    #[test]
     fn dns_over_tcp_is_a_flag_that_survives_the_lease() {
         let resolver = SocketAddrV4::new(Ipv4Addr::new([10, 0, 2, 100]), 53);
         let udp = NetworkConfig::new_dhcp(Some(resolver), "").parse().unwrap();
@@ -821,6 +860,8 @@ mod tests {
             dns: Some(Ipv4Addr::new([10, 0, 2, 3])),
             server: Ipv4Addr::new([10, 0, 2, 2]),
             lease_secs: 86_400,
+            renew_secs: 43_200,
+            rebind_secs: 75_600,
         };
         let leased = tcp.with_lease(&lease).unwrap();
         assert!(leased.resolver_tcp);

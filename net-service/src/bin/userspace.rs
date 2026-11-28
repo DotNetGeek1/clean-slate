@@ -19,7 +19,7 @@ use clean_slate_network::addr::{
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::config::{ServiceNetwork, TrustAnchorSet, TrustAnchors};
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
-use clean_slate_network::dhcp::{DhcpClient, DhcpEvent};
+use clean_slate_network::dhcp::{is_dhcp_reply, DhcpClient, DhcpEvent, DhcpLease};
 use clean_slate_network::dns::{
     tcp_message_len, DnsError, DnsResolver, DnsTcpQuery, ResolveOutcome, DNS_TCP_MAX_MESSAGE,
 };
@@ -59,6 +59,7 @@ use clean_slate_service_fixtures::{
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
     NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
 };
+use clean_slate_service_fixtures::{NetLeaseEvent, NetLeaseReport};
 use core::alloc::{GlobalAlloc, Layout};
 use core::future::Future;
 use core::mem::{size_of, MaybeUninit};
@@ -308,7 +309,10 @@ fn wait_for_service_work(
     now: u64,
     deadline: Option<u64>,
 ) {
-    if nic_ingress_stashed(StackConsumer::Udp) > 0 || nic_ingress_stashed(StackConsumer::Tcp) > 0 {
+    if nic_ingress_stashed(StackConsumer::Udp) > 0
+        || nic_ingress_stashed(StackConsumer::Tcp) > 0
+        || unsafe { (*core::ptr::addr_of!(NIC_INGRESS)).pending_dhcp.len } > 0
+    {
         return;
     }
     publish_occupancy(parked, tls_active);
@@ -420,7 +424,11 @@ fn net_request(args: [u64; 6]) -> u64 {
 /// Tells the kernel the resolver this service uses (`NET_SUBOP_PUBLISH_RESOLVER`, #354), so
 /// Linux programs read the same one from `/etc/resolv.conf`. A failed report leaves the file
 /// empty (or on the launch configuration's resolver); the service itself is unaffected.
-fn publish_resolver(raw_handle: u64, resolver: Option<SocketAddrV4>) {
+fn publish_resolver(
+    raw_handle: u64,
+    resolver: Option<SocketAddrV4>,
+    lease: Option<NetLeaseReport>,
+) {
     let (present, addr, port) = match resolver {
         Some(resolver) => (
             1,
@@ -435,7 +443,7 @@ fn publish_resolver(raw_handle: u64, resolver: Option<SocketAddrV4>) {
         present,
         addr,
         port,
-        0,
+        lease.map_or(0, NetLeaseReport::encode),
     ]);
 }
 
@@ -532,6 +540,8 @@ struct NicIngress {
     raw_handle: u64,
     pending_udp: PendingFrames,
     pending_tcp: PendingFrames,
+    /// DHCP replies (UDP 67 -> 68) for the lease client, not the UDP stack (#360).
+    pending_dhcp: PendingFrames,
 }
 
 static INGRESS_DROP_FULL: AtomicUsize = AtomicUsize::new(0);
@@ -543,6 +553,7 @@ static mut NIC_INGRESS: NicIngress = NicIngress {
     raw_handle: 0,
     pending_udp: PendingFrames::empty(),
     pending_tcp: PendingFrames::empty(),
+    pending_dhcp: PendingFrames::empty(),
 };
 
 fn frame_ipv4_protocol(frame: &FrameBuf) -> Option<IpProtocol> {
@@ -563,6 +574,7 @@ fn nic_ingress_init(raw_handle: u64) {
         NIC_INGRESS.raw_handle = raw_handle;
         NIC_INGRESS.pending_udp = PendingFrames::empty();
         NIC_INGRESS.pending_tcp = PendingFrames::empty();
+        NIC_INGRESS.pending_dhcp = PendingFrames::empty();
     }
 }
 
@@ -608,6 +620,15 @@ fn nic_ingress_enqueue(frame: FrameBuf) {
         // ARP is L2: both stacks may consume it; one frame is enough per queue slot budget.
         nic_ingress_stash_udp(frame.clone());
         nic_ingress_stash_tcp(frame);
+        return;
+    }
+    if is_dhcp_reply(frame.as_slice()) {
+        // SAFETY: the service is single-threaded; only the loop touches the ingress queues.
+        unsafe {
+            (*core::ptr::addr_of_mut!(NIC_INGRESS))
+                .pending_dhcp
+                .push(frame)
+        };
         return;
     }
     match frame_ipv4_protocol(&frame) {
@@ -1051,21 +1072,34 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     let raw_mac = raw_link.mac;
     // A DHCP launch leases its route before either stack exists; without a lease the service
     // still comes up, unconfigured (every send unreachable).
-    let (network, leased) = if network.dhcp {
-        let network = lease_network(&network, raw_mac, &mut rng);
+    let (network, leased, lease_report) = if network.dhcp {
+        let max_lease_secs = launch.network.dhcp_max_lease_secs().map(u32::from);
+        let (leased_network, client) = lease_network(&network, raw_mac, max_lease_secs, &mut rng);
+        let lease = client
+            .lease()
+            .filter(|_| leased_network.route.is_configured());
         unsafe {
-            *core::ptr::addr_of_mut!(SERVICE_NETWORK) = network;
+            *core::ptr::addr_of_mut!(SERVICE_NETWORK) = leased_network;
+            // #360: the client keeps running in the service loop (`pump_dhcp`), renewing the
+            // lease, or still looking for one when none came in time.
+            *core::ptr::addr_of_mut!(DHCP) = Some(DhcpRuntime {
+                client,
+                launch: network,
+            });
         }
-        let leased = network.route.is_configured();
-        (network, leased.then_some(network.route.local.octets()))
+        (
+            leased_network,
+            lease.map(|lease| lease.address.octets()),
+            lease.map(|lease| lease_report_for(NetLeaseEvent::Bound, &lease)),
+        )
     } else {
-        (network, None)
+        (network, None, None)
     };
-    publish_resolver(raw_handle, network.resolver);
+    publish_resolver(raw_handle, network.resolver, lease_report);
     unsafe {
         // #221 stage E: each caller reaches what its app's policy names, judged against the
         // resolver in use: the launch configuration's, or for a DHCP launch without one, the
-        // lease's (`with_lease` above). Leases are taken once at start, so it cannot change.
+        // lease's (`with_lease` above). A later lease may change it (`apply_network`, #360).
         let authorizer = AppPolicyAuthorizer::new(NETWORK_POLICIES, network.resolver);
         NetworkService::init_in_place(service_state_ptr(), generation, authorizer);
         (*service_state_ptr()).attach_backend(DemuxLink::for_udp());
@@ -1153,7 +1187,8 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         let Ok(now) = monotonic_ticks() else {
             finish();
         };
-        let progressed = pump_dns_over_tcp(ctx.service_generation, now)
+        let progressed = pump_dhcp(&mut ctx, now)
+            | pump_dns_over_tcp(ctx.service_generation, now)
             | pump_parked_requests(&mut ctx, now)
             | pump_tls_job(&mut ctx, &mut tls, now);
         let Ok(found) = service_next(raw_handle, request_buf, payload_buf) else {
@@ -1192,48 +1227,168 @@ const DHCP_LAUNCH_BUDGET_MS: u64 = 6_000;
 
 /// Leases `network`'s route with DHCP over the raw NIC (no stack exists yet). Frames that
 /// are not a reply for this client are dropped. Gives `network` unconfigured, no longer
-/// marked DHCP, when no usable lease arrives within [`DHCP_LAUNCH_BUDGET_MS`].
-fn lease_network(network: &ServiceNetwork, mac: MacAddr, rng: &mut NetRng) -> ServiceNetwork {
-    let unconfigured = ServiceNetwork {
-        dhcp: false,
-        ..*network
+/// marked DHCP, when no usable lease arrives within [`DHCP_LAUNCH_BUDGET_MS`], and the client
+/// either way, for the service loop to keep running.
+fn lease_network(
+    network: &ServiceNetwork,
+    mac: MacAddr,
+    max_lease_secs: Option<u32>,
+    rng: &mut NetRng,
+) -> (ServiceNetwork, DhcpClient) {
+    let unconfigured = unconfigured(network);
+    let mut client = DhcpClient::new(mac, rng.next_u32()).with_max_lease_secs(max_lease_secs);
+    let Ok(started) = monotonic_ms() else {
+        return (unconfigured, client);
     };
-    let Ok(started) = monotonic_ticks() else {
-        return unconfigured;
-    };
-    let give_up = started.saturating_add(ms_to_irq_ticks(DHCP_LAUNCH_BUDGET_MS));
-    let mut client = DhcpClient::new(mac, rng.next_u32());
+    let give_up = started.saturating_add(DHCP_LAUNCH_BUDGET_MS);
     let mut link = DemuxLink::for_udp();
-    'send: while let Some(frame) = client.frame() {
-        let _ = link.transmit(frame);
-        let Ok(sent_at) = monotonic_ticks() else {
-            return unconfigured;
+    loop {
+        let Ok(now) = monotonic_ms() else {
+            break;
         };
-        let deadline = sent_at
-            .saturating_add(ms_to_irq_ticks(client.retransmit_delay_ms()))
-            .min(give_up);
-        loop {
-            while let Ok(Some(frame)) = nic_ingress_read_raw() {
-                match client.handle_frame(frame.as_slice()) {
-                    DhcpEvent::Bound(lease) => {
-                        return network.with_lease(&lease).unwrap_or(unconfigured);
-                    }
-                    DhcpEvent::Offered | DhcpEvent::Restarted => continue 'send,
-                    DhcpEvent::Ignored => {}
-                }
-            }
-            let Ok(now) = monotonic_ticks() else {
-                return unconfigured;
+        if let Some(frame) = client.transmit(now) {
+            let _ = link.transmit(frame);
+        }
+        while let Ok(Some(frame)) = nic_ingress_read_raw() {
+            let Ok(now) = monotonic_ms() else {
+                break;
             };
-            if now >= give_up {
-                return unconfigured;
-            }
-            if now >= deadline || wait_net_work(NET_WAIT_WORK_RX, now, Some(deadline)).is_err() {
-                continue 'send;
+            if let DhcpEvent::Bound(lease) = client.handle_frame(frame.as_slice(), now) {
+                return (network.with_lease(&lease).unwrap_or(unconfigured), client);
             }
         }
+        let Ok(now_ticks) = monotonic_ticks() else {
+            break;
+        };
+        if ticks_to_ms(now_ticks) >= give_up {
+            break;
+        }
+        let deadline = client.next_deadline_ms().unwrap_or(give_up).min(give_up);
+        if wait_net_work(NET_WAIT_WORK_RX, now_ticks, Some(ms_to_irq_ticks(deadline))).is_err() {
+            break;
+        }
     }
-    unconfigured
+    (unconfigured, client)
+}
+
+/// `network` with nothing leased: every send unreachable, the resolver only if the launch
+/// configuration names one.
+fn unconfigured(network: &ServiceNetwork) -> ServiceNetwork {
+    ServiceNetwork {
+        dhcp: false,
+        ..*network
+    }
+}
+
+/// The DHCP client after launch (#360), and the launch configuration each lease applies to.
+struct DhcpRuntime {
+    client: DhcpClient,
+    launch: ServiceNetwork,
+}
+
+static mut DHCP: Option<DhcpRuntime> = None;
+
+fn dhcp_runtime() -> Option<&'static mut DhcpRuntime> {
+    // SAFETY: single-threaded service; only the loop touches the client.
+    unsafe { (*core::ptr::addr_of_mut!(DHCP)).as_mut() }
+}
+
+fn ticks_to_ms(ticks: u64) -> u64 {
+    ticks.saturating_mul(tick_period_ns()) / 1_000_000
+}
+
+fn monotonic_ms() -> Result<u64, u64> {
+    monotonic_ticks().map(ticks_to_ms)
+}
+
+fn lease_report_for(event: NetLeaseEvent, lease: &DhcpLease) -> NetLeaseReport {
+    NetLeaseReport {
+        event,
+        address: lease.address.octets(),
+        prefix_len: lease.prefix_len,
+    }
+}
+
+/// Runs the DHCP client (#360): its lease timers, the replies the ingress set aside, and the
+/// frame it has due. A lease that is granted, renewed or lost is applied at once
+/// ([`apply_network`]). Without a client (a static launch) the set-aside replies are
+/// dropped. Returns whether anything moved.
+fn pump_dhcp(ctx: &mut ServiceContext<'_>, now_ticks: u64) -> bool {
+    let now = ticks_to_ms(now_ticks);
+    let mut progressed = false;
+    let Some(dhcp) = dhcp_runtime() else {
+        while nic_ingress_take_dhcp().is_some() {
+            progressed = true;
+        }
+        return progressed;
+    };
+    let mut changes = [DhcpEvent::Ignored; INGRESS_DEPTH + 1];
+    changes[0] = dhcp.client.poll(now);
+    for change in &mut changes[1..] {
+        let Some(frame) = nic_ingress_take_dhcp() else {
+            break;
+        };
+        progressed = true;
+        *change = dhcp.client.handle_frame(frame.as_slice(), now);
+    }
+    if let Some(frame) = dhcp.client.transmit(now) {
+        let _ = DemuxLink::for_udp().transmit(frame);
+        progressed = true;
+    }
+    let launch = dhcp.launch;
+    for change in changes {
+        let (network, report) = match change {
+            DhcpEvent::Bound(lease) => (
+                launch.with_lease(&lease).ok(),
+                lease_report_for(NetLeaseEvent::Bound, &lease),
+            ),
+            DhcpEvent::Renewed(lease) => (
+                launch.with_lease(&lease).ok(),
+                lease_report_for(NetLeaseEvent::Renewed, &lease),
+            ),
+            DhcpEvent::Expired(lease) => (None, lease_report_for(NetLeaseEvent::Expired, &lease)),
+            DhcpEvent::Ignored | DhcpEvent::Offered | DhcpEvent::Restarted => continue,
+        };
+        // A lease that does not pass as a configuration leaves the service unconfigured.
+        apply_network(ctx, network.unwrap_or(unconfigured(&launch)), report);
+        progressed = true;
+    }
+    progressed
+}
+
+fn nic_ingress_take_dhcp() -> Option<FrameBuf> {
+    // SAFETY: single-threaded service; only the loop touches the ingress queues.
+    unsafe { (*core::ptr::addr_of_mut!(NIC_INGRESS)).pending_dhcp.pop() }
+}
+
+/// Moves the service to `network` after a lease change (#360): both stacks' route, the
+/// resolver queries go to, the resolver the app policies are judged against, and the one
+/// published for `/etc/resolv.conf`. The kernel logs `report` on serial. Connections from
+/// an address the service no longer holds fail on their own (unreachable or reset).
+fn apply_network(ctx: &mut ServiceContext<'_>, network: ServiceNetwork, report: NetLeaseReport) {
+    let old = *service_network();
+    unsafe {
+        *core::ptr::addr_of_mut!(SERVICE_NETWORK) = network;
+    }
+    if network.route != old.route {
+        if let Ok(resolver) = udp_resolver() {
+            resolver.udp_mut().stack_mut().set_route(network.route);
+        }
+        shared_tcp_transport_mut()
+            .stack_mut()
+            .set_route(network.route);
+    }
+    if network.resolver != old.resolver {
+        if let Ok(resolver) = udp_resolver() {
+            resolver.set_server(
+                network
+                    .resolver
+                    .unwrap_or(SocketAddrV4::new(Ipv4Addr::new([0; 4]), 53)),
+            );
+        }
+        ctx.service.authorizer_mut().set_resolver(network.resolver);
+    }
+    publish_resolver(ctx.raw_handle, network.resolver, Some(report));
 }
 
 /// State every request handler needs; built once by `run_service_loop`.
@@ -1298,11 +1453,15 @@ fn next_service_deadline<F>(ctx: &ServiceContext<'_>, tls: &TlsJob<'_, F>) -> Op
     let resolver_deadline = udp_resolver()
         .ok()
         .and_then(|resolver| resolver.next_deadline());
+    let dhcp_deadline = dhcp_runtime()
+        .and_then(|dhcp| dhcp.client.next_deadline_ms())
+        .map(ms_to_irq_ticks);
     [
         shared_tcp_transport_mut().next_timer_deadline(),
         ctx.parked.next_deadline(),
         resolver_deadline,
         tls_deadline,
+        dhcp_deadline,
     ]
     .into_iter()
     .flatten()

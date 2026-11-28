@@ -51,7 +51,7 @@ const TX_SPACE_TIMEOUT_NS: u64 = 500_000_000;
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::current_syscall_caller_pid;
 use crate::time::{irq_period_ns, monotonic_ns, monotonic_period_ticks, tsc_hz};
-use clean_slate_service_fixtures::NETWORK_SERVICE_ID;
+use clean_slate_service_fixtures::{NetLeaseReport, NETWORK_SERVICE_ID};
 
 fn current_holder() -> Result<HolderId, u64> {
     current_syscall_caller_pid()
@@ -795,8 +795,38 @@ fn handle_publish_resolver(frame: &mut SyscallContext) {
             return;
         }
     };
+    let lease = match frame.r9 {
+        0 => None,
+        raw => match NetLeaseReport::decode(raw) {
+            Some(report) => Some(report),
+            None => {
+                frame.rax = SYSCALL_EINVAL;
+                return;
+            }
+        },
+    };
     crate::service::net_resolver::publish(holder.0, resolver);
+    if let Some(report) = lease {
+        log_lease_report(report, resolver);
+    }
     frame.rax = 0;
+}
+
+/// One serial line per DHCP lease change the service reports (#360).
+fn log_lease_report(report: NetLeaseReport, resolver: Option<SocketAddrV4>) {
+    let address = Ipv4Addr::new(report.address);
+    match resolver {
+        Some(resolver) => crate::diagnostics::log::kernel_log_fmt(format_args!(
+            "[NET ] dhcp {} address={address}/{} resolver={resolver}\n",
+            report.event.as_str(),
+            report.prefix_len,
+        )),
+        None => crate::diagnostics::log::kernel_log_fmt(format_args!(
+            "[NET ] dhcp {} address={address}/{} resolver=none\n",
+            report.event.as_str(),
+            report.prefix_len,
+        )),
+    }
 }
 
 fn handle_ack_holder_exit(frame: &mut SyscallContext) {

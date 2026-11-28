@@ -125,6 +125,17 @@ impl<L: NetworkLink> L3Stack<L> {
         self.route
     }
 
+    /// Moves the stack to `route` (a renewed or new DHCP lease, #360). A changed address or
+    /// prefix also forgets every learned neighbour, since the old ones may no longer be
+    /// on-link; a route that only changes its gateway keeps them.
+    pub fn set_route(&mut self, route: Ipv4Route) {
+        if route.local != self.route.local || route.prefix_len != self.route.prefix_len {
+            self.arp.clear();
+        }
+        self.our_ip = route.local;
+        self.route = route;
+    }
+
     pub fn stats(&self) -> StackStats {
         self.stats
     }
@@ -570,6 +581,35 @@ mod tests {
             .unwrap();
         assert!(stack.poll(0).unwrap().is_none());
         assert_eq!(stack.link().tx_depth(), 0);
+    }
+
+    #[test]
+    fn a_new_lease_moves_the_stack_and_a_new_prefix_forgets_neighbours() {
+        let mac = MacAddr::new([0x02; 6]);
+        let gateway = Ipv4Addr::new([10, 0, 2, 2]);
+        let gateway_mac = MacAddr::new([0x52, 0x55, 0x0a, 0x00, 0x02, 0x02]);
+        let mut stack =
+            L3Stack::with_route(FakeLink::new(mac, true), mac, Ipv4Route::UNCONFIGURED, 1000);
+        let leased = Ipv4Route {
+            local: Ipv4Addr::new([10, 0, 2, 15]),
+            prefix_len: 24,
+            gateway: Some(gateway),
+        };
+        stack.set_route(leased);
+        assert_eq!((stack.our_ip(), stack.route()), (leased.local, leased));
+        stack.arp_cache_mut().insert(gateway, gateway_mac, 0);
+        // Same address and prefix, another gateway: neighbours stay.
+        let regated = Ipv4Route {
+            gateway: Some(Ipv4Addr::new([10, 0, 2, 3])),
+            ..leased
+        };
+        stack.set_route(regated);
+        assert_eq!(stack.arp_cache().lookup(gateway, 0), Some(gateway_mac));
+        stack.set_route(Ipv4Route::UNCONFIGURED);
+        assert_eq!(stack.arp_cache().lookup(gateway, 0), None);
+        assert!(stack
+            .send_ipv4(0, PEER_IPV4, IpProtocol::UDP, 0, |_| Ok(()))
+            .is_err());
     }
 
     #[test]
