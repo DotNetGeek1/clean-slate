@@ -206,6 +206,9 @@ impl Rights {
             ResourceClass::Launcher => Self(
                 Self::LAUNCH_CONNECT.0 | Self::LAUNCH_SERVE.0 | Self::DELEGATE.0 | Self::REVOKE.0,
             ),
+            // The existing `OBSERVE` bit, not a new one (#379): the rights word has few bits
+            // left. No `DELEGATE`, so a holder cannot pass the view on.
+            ResourceClass::SystemObserve => Self::OBSERVE,
         }
     }
 
@@ -228,6 +231,8 @@ impl Rights {
                 Self(Self::CONSOLE_SERVE.0 | Self::CONSOLE_ATTACH.0 | Self::READ.0 | Self::WRITE.0)
             }
             ResourceClass::Launcher => Self::LAUNCH_SERVE,
+            // Only a root grant (init, or a `Grant::SystemObserver` row) sees every process.
+            ResourceClass::SystemObserve => Self::OBSERVE,
             _ => Self::empty(),
         }
     }

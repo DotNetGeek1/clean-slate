@@ -60,6 +60,8 @@ pub(crate) trait InstanceGrantAuthority {
     /// policy (#353). With `stats` (the row also holds `Grant::NetworkStats`, #378) both carry
     /// `NET_STATS`.
     fn grant_native_network_client(&mut self, pid: u64, stats: bool) -> Result<(), &'static str>;
+    /// `OBSERVE` on the system usage view (#379): every row of the resource snapshot.
+    fn grant_system_observer(&mut self, pid: u64) -> Result<(), &'static str>;
 }
 
 /// Which console port client a row is (#310, #311).
@@ -133,7 +135,8 @@ pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
             | Grant::ConsoleFrontEnd
             | Grant::LauncherClient
             | Grant::NativeNetworkClient
-            | Grant::NetworkStats => {}
+            | Grant::NetworkStats
+            | Grant::SystemObserver => {}
             // Applied by the Linux launch path while it builds the process.
             Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {}
         }
@@ -170,6 +173,7 @@ pub(crate) fn apply_instance_grants<A: InstanceGrantAuthority>(
             }
             // Carried by the `NativeNetworkClient` grant, which manifest validation puts first.
             Grant::NetworkStats => Ok(()),
+            Grant::SystemObserver => authority.grant_system_observer(pid),
             Grant::ObjectServiceRole
             | Grant::AuditReader
             | Grant::AuditStore
@@ -208,6 +212,7 @@ mod tests {
         ConsoleClient(u64, ConsoleClientRole),
         LauncherClient(u64),
         NativeNetworkClient(u64, bool),
+        SystemObserver(u64),
     }
 
     #[derive(Default)]
@@ -316,6 +321,11 @@ mod tests {
         ) -> Result<(), &'static str> {
             self.calls.push(Call::NativeNetworkClient(pid, stats));
             self.outcome(Grant::NativeNetworkClient)
+        }
+
+        fn grant_system_observer(&mut self, pid: u64) -> Result<(), &'static str> {
+            self.calls.push(Call::SystemObserver(pid));
+            self.outcome(Grant::SystemObserver)
         }
     }
 
@@ -574,6 +584,15 @@ mod tests {
             &mut recorder,
         );
         assert_eq!(recorder.calls, [Call::NativeNetworkClient(7, true)]);
+    }
+
+    /// #379: the system observer grant is one instance grant call, after launch.
+    #[test]
+    fn system_observer_is_one_instance_grant() {
+        let mut recorder = Recorder::default();
+        let handles = apply_both(&[Grant::SystemObserver], &mut recorder);
+        assert_eq!(handles, BootstrapGrantHandles::default());
+        assert_eq!(recorder.calls, [Call::SystemObserver(7)]);
     }
 
     #[test]

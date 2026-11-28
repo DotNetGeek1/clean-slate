@@ -15,6 +15,8 @@
 //! - [`net`]: resolve names, TCP streams, connected UDP sockets and TLS exchanges through the
 //!   network service (syscalls 14 and 15, #353).
 //! - [`process`]: exit, abort and the service ready report (syscall 22).
+//! - [`resources`]: per-process CPU time and memory, the whole system's with the observer grant
+//!   (syscall 28, #379).
 //! - [`storage`]: offset reads, writes, truncates and commits on a persistent object (syscall 8,
 //!   #312).
 //! - `fake` (feature `fake`): a host stand-in for the kernel, for clients' host tests.
@@ -34,6 +36,7 @@ pub mod launcher;
 pub mod net;
 pub mod port;
 pub mod process;
+pub mod resources;
 pub mod storage;
 pub mod sys;
 

@@ -123,6 +123,9 @@ pub(crate) struct HeldAuthority {
     pub(crate) launcher_serve: usize,
     /// Every other launcher-class record (the desktop shell's `LAUNCH_CONNECT`).
     pub(crate) launcher_client: usize,
+    /// System-observe records (`OBSERVE` on the usage view, #379): init's and
+    /// `Grant::SystemObserver` rows'.
+    pub(crate) observe: usize,
     /// Capability-space records of any other kind. A console grant also records one IPC
     /// endpoint capability there; those are counted as `console_records`.
     pub(crate) console_records: usize,
@@ -230,6 +233,7 @@ impl HeldAuthority {
         console_client: 0,
         launcher_serve: 1,
         launcher_client: 0,
+        observe: 1,
         console_records: 1,
         other: 0,
         revoked_records: 0,
@@ -286,6 +290,7 @@ impl HeldAuthority {
                 + held(Grant::ConsoleSession)
                 + held(Grant::ConsoleFrontEnd),
             launcher_client: held(Grant::LauncherClient),
+            observe: held(Grant::SystemObserver),
             outside: OutsideCapabilitySpace {
                 ports_served: held(Grant::GraphicsPort) + held(Grant::ConsoleService),
                 raw_network_link: held(Grant::NetworkService),
@@ -374,6 +379,7 @@ impl HeldAuthority {
                         &mut held.launcher_serve
                     }
                     ResourceClass::Launcher => &mut held.launcher_client,
+                    ResourceClass::SystemObserve => &mut held.observe,
                     _ => &mut held.other,
                 };
                 *count += 1;
@@ -390,7 +396,7 @@ impl fmt::Display for HeldAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "lifecycle-control={} console={} block-device={} object-service={} network={} net-client={} net-client-entitlement={} tmp-objects={} gfx-serve={} gfx-shell={} gfx-client={} display={} input={} audit-read={} audit-store={} con-serve={} con-device={} con-client={} launch-serve={} launch-client={} other={} revoked={} allowance={} {}",
+            "lifecycle-control={} console={} block-device={} object-service={} network={} net-client={} net-client-entitlement={} tmp-objects={} gfx-serve={} gfx-shell={} gfx-client={} display={} input={} audit-read={} audit-store={} con-serve={} con-device={} con-client={} launch-serve={} launch-client={} observe={} other={} revoked={} allowance={} {}",
             self.lifecycle_control,
             self.console,
             self.block_device,
@@ -411,6 +417,7 @@ impl fmt::Display for HeldAuthority {
             self.console_client,
             self.launcher_serve,
             self.launcher_client,
+            self.observe,
             self.other + self.console_records.saturating_sub(self.console),
             self.revoked_records,
             self.slot_allowance,
@@ -560,6 +567,10 @@ pub(crate) fn launch_init(
             let lifecycle_capability = unsafe { super::service_lifecycle_controller_mut() }
                 .grant_lifecycle_control_capability(pid, manifest.iter().map(|spec| &spec.id))?;
             let launcher_capability = grant_launcher_serve(pid)?;
+            // #379: init reads the whole resource snapshot; the kernel finds the capability,
+            // so it is not in the bootstrap page.
+            crate::process::snapshot::grant_system_observer(clean_slate_capability::HolderId(pid))
+                .map_err(|_| "init's system observer capability was refused")?;
             Ok(InitBootstrap {
                 self_pid: pid,
                 console_capability,
@@ -582,7 +593,9 @@ pub(crate) fn launch_init(
         u8::from(matches)
     ));
     if !matches {
-        return Err("init holds authority beyond lifecycle control, the console and the launcher");
+        return Err(
+            "init holds authority beyond lifecycle control, the console, the launcher and the usage view",
+        );
     }
     let scope_matches = init_lifecycle_scope_is(pid, manifest);
     kernel_log_fmt(format_args!(
@@ -910,7 +923,7 @@ mod tests {
         );
         assert_eq!(
             std::format!("{audit}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 audit-store=1 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=1 audit-store=1 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
         assert_eq!(
             row(STORAGE_SERVICE_ID),
@@ -967,11 +980,11 @@ mod tests {
         );
         assert_eq!(
             std::format!("{shell}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=1 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=1 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         assert_eq!(
             std::format!("{without_network}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=1 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=5 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=1 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         let without_stdin = HeldAuthority::for_grants(
             ServiceImage::LinuxShell,
@@ -1021,7 +1034,7 @@ mod tests {
         );
         assert_eq!(
             std::format!("{compositor}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 other=0 revoked=0 allowance=24 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=0 launch-client=0 observe=0 other=0 revoked=0 allowance=24 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
         assert_eq!(
             row(DESKTOP_SHELL_SERVICE_ID),
@@ -1146,7 +1159,7 @@ mod tests {
     fn init_is_expected_to_hold_lifecycle_control_the_console_and_the_launcher_only() {
         assert_eq!(
             std::format!("{}", HeldAuthority::INIT),
-            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=1 launch-client=0 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 audit-read=0 audit-store=0 con-serve=0 con-device=0 con-client=0 launch-serve=1 launch-client=0 observe=1 other=0 revoked=0 allowance=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
         for held in [
             HeldAuthority {
@@ -1354,6 +1367,7 @@ mod tests {
             console_client,
             launcher_serve,
             launcher_client,
+            observe,
             console_records,
             other,
             revoked_records,
@@ -1436,6 +1450,7 @@ mod tests {
                 launcher_client,
                 ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
             ),
+            (observe, ReleasedBy::Hook(Hook::RevokeHolderCapabilities)),
             (
                 console_records,
                 ReleasedBy::Hook(Hook::RevokeHolderCapabilities),

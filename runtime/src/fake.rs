@@ -81,6 +81,71 @@ pub struct FakeKernel {
     console: Vec<Vec<u8>>,
     objects: FakeObjects,
     net: crate::fake_net::FakeNet,
+    resources: FakeResources,
+}
+
+/// What syscall 28 `RESOURCES` answers (#379).
+#[derive(Clone, Debug, Default)]
+struct FakeResources {
+    caller: u64,
+    observer: bool,
+    now_ns: u64,
+    rows: Vec<clean_slate_native_abi::resources::ProcessRow>,
+}
+
+impl FakeResources {
+    fn call(&self, args: [u64; 6]) -> u64 {
+        use clean_slate_native_abi::resources::{
+            rows_that_fit, snapshot_len, SnapshotHeader, RESOURCES_OP_SELF, RESOURCES_OP_SYSTEM,
+            SNAPSHOT_FLAG_SYSTEM, SNAPSHOT_HEADER_BYTES,
+        };
+        use clean_slate_native_abi::status::{STATUS_EACCES, STATUS_EINVAL};
+
+        if args[3..].iter().any(|arg| *arg != 0) {
+            return STATUS_EINVAL;
+        }
+        let Some(max_rows) = rows_that_fit(args[2] as usize) else {
+            return STATUS_EINVAL;
+        };
+        let system = match args[0] {
+            RESOURCES_OP_SELF => false,
+            RESOURCES_OP_SYSTEM if self.observer => true,
+            RESOURCES_OP_SYSTEM => return STATUS_EACCES,
+            _ => return STATUS_EINVAL,
+        };
+        let visible: Vec<_> = self
+            .rows
+            .iter()
+            .filter(|row| system || row.pid == self.caller)
+            .collect();
+        let written = visible.len().min(max_rows);
+        let busy: u64 = self.rows.iter().map(|row| row.cpu_ns).sum();
+        let header = SnapshotHeader {
+            flags: if system { SNAPSHOT_FLAG_SYSTEM } else { 0 },
+            rows: written as u32,
+            total_rows: visible.len() as u32,
+            snapshot_ns: self.now_ns,
+            elapsed_ns: if system { self.now_ns.max(busy) } else { 0 },
+            busy_ns: if system { busy } else { 0 },
+            idle_ns: if system {
+                self.now_ns.max(busy) - busy
+            } else {
+                0
+            },
+            unattributed_ns: 0,
+        };
+        let mut bytes = Vec::from(header.encode());
+        for row in visible.iter().take(written) {
+            bytes.extend_from_slice(&row.encode());
+        }
+        debug_assert_eq!(bytes.len(), snapshot_len(written));
+        debug_assert!(bytes.len() >= SNAPSHOT_HEADER_BYTES);
+        // SAFETY: the client passes a live buffer of `args[2]` bytes, and `bytes` fits in it.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), args[1] as *mut u8, bytes.len());
+        }
+        bytes.len() as u64
+    }
 }
 
 impl FakeKernel {
@@ -109,6 +174,32 @@ impl FakeKernel {
             console: Vec::new(),
             objects: FakeObjects::default(),
             net: crate::fake_net::FakeNet::default(),
+            resources: FakeResources::default(),
+        }
+    }
+
+    /// #379: the processes `RESOURCES` reports. The caller is `caller`; with `observer` it
+    /// holds the system observer grant and may read every row.
+    pub fn resources(
+        &mut self,
+        caller: u64,
+        observer: bool,
+        rows: &[clean_slate_native_abi::resources::ProcessRow],
+    ) {
+        self.resources.caller = caller;
+        self.resources.observer = observer;
+        self.resources.rows = rows.to_vec();
+    }
+
+    /// The monotonic time the next snapshots are taken at.
+    pub fn resources_at(&mut self, now_ns: u64) {
+        self.resources.now_ns = now_ns;
+    }
+
+    /// Process `pid` has now run `cpu_ns` in all.
+    pub fn resources_cpu(&mut self, pid: u64, cpu_ns: u64) {
+        for row in self.resources.rows.iter_mut().filter(|row| row.pid == pid) {
+            row.cpu_ns = cpu_ns;
         }
     }
 
@@ -613,6 +704,7 @@ impl Syscalls for FakeKernel {
             SYSCALL_NR_NETWORK_CAPABILITY => self.net.capability_call(args),
             SYSCALL_NR_NETWORK_REQUEST => self.net.request_call(args),
             SYSCALL_NR_WORK_SET => 1,
+            clean_slate_native_abi::resources::SYSCALL_NR_RESOURCES => self.resources.call(args),
             SYSCALL_NR_IPC_SEND => {
                 // SAFETY: the client passes a live slice.
                 let bytes =

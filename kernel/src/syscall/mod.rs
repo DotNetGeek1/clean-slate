@@ -976,6 +976,9 @@ fn dispatch_native(frame: &mut SyscallContext) {
             crate::process::native_mem::handle_syscall(frame)
         }
         clean_slate_native_abi::clock::SYSCALL_NR_CLOCK => crate::time::wall::handle_syscall(frame),
+        clean_slate_native_abi::resources::SYSCALL_NR_RESOURCES => {
+            crate::process::snapshot::handle_syscall(frame)
+        }
         clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY => {
             crate::service::service_ready::handle_syscall(frame)
         }

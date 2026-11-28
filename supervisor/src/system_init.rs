@@ -638,6 +638,32 @@ where
             .position(|slot| slot.is_some_and(|slot| slot.spec.id == service))
     }
 
+    /// Whether boot has settled: every row is running, idle or given up, and nothing is due.
+    pub fn is_settled(&self) -> bool {
+        self.settled_announced
+    }
+
+    /// #379: two lines about the resource snapshot, each one console message. The boot lanes
+    /// check the first.
+    pub fn report_usage(&mut self, summary: &crate::usage::UsageSummary) {
+        let _ = self.emit(format_args!(
+            "[INIT] usage rows={} init={} compositor={} init-cpu-grew={}",
+            summary.rows,
+            u8::from(summary.lists_init),
+            u8::from(summary.lists_compositor),
+            u8::from(summary.init_cpu_grew),
+        ));
+        let _ = self.emit(format_args!(
+            "[INIT] usage busy-permille={} init-cpu-us={}",
+            summary.busy_permille, summary.init_cpu_us
+        ));
+    }
+
+    /// #379: the snapshot could not be read.
+    pub fn report_usage_unavailable(&mut self, status: u64) {
+        let _ = self.emit(format_args!("[INIT] usage unavailable status={status:#x}"));
+    }
+
     fn emit(&mut self, args: fmt::Arguments<'_>) -> Result<(), ConvergedSupervisorError> {
         let mut line = LineBuffer::new();
         writeln!(line, "{args}").map_err(|_| ConvergedSupervisorError::UnknownService)?;
@@ -1409,6 +1435,39 @@ pub(crate) mod tests {
 
     const SETTLED_EIGHT: &str = "[INIT] boot settled running=8 down=0; waiting, no deadline";
 
+    /// #379: init settles first, then logs the usage summary in two console-sized lines.
+    #[test]
+    fn the_usage_summary_follows_the_settled_boot() {
+        let mut harness = Harness::boot_desktop_settled();
+        assert!(harness.init.is_settled());
+        harness.init.report_usage(&crate::usage::UsageSummary {
+            rows: 9,
+            lists_init: true,
+            lists_compositor: true,
+            init_cpu_grew: true,
+            busy_permille: 412,
+            init_cpu_us: 18_250,
+        });
+        harness
+            .init
+            .report_usage_unavailable(STATUS_EACCES_FOR_TEST);
+        let lines = harness.owned_lines_with("[INIT] usage ");
+        assert_eq!(
+            lines,
+            [
+                "[INIT] usage rows=9 init=1 compositor=1 init-cpu-grew=1",
+                "[INIT] usage busy-permille=412 init-cpu-us=18250",
+                "[INIT] usage unavailable status=0xfffffffffffffff3",
+            ]
+        );
+        for line in &lines {
+            assert!(line.len() < 63, "{line:?} must fit one console message");
+        }
+        assert!(harness.position_of(SETTLED_EIGHT) < harness.position_of("[INIT] usage rows="));
+    }
+
+    const STATUS_EACCES_FOR_TEST: u64 = clean_slate_native_abi::status::STATUS_EACCES;
+
     impl Harness {
         /// The desktop manifest booted with all seven rows ready and init settled, at 4 s.
         fn boot_desktop_settled() -> Self {
@@ -1426,6 +1485,14 @@ pub(crate) mod tests {
             }
             assert_eq!(harness.lines_with(SETTLED_EIGHT).len(), 1);
             harness
+        }
+
+        /// The lines init logged that contain `needle`, as owned strings.
+        fn owned_lines_with(&self, needle: &str) -> Vec<std::string::String> {
+            self.lines_with(needle)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect()
         }
 
         /// The services init asked the kernel to start since request `from`, in order.

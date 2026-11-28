@@ -430,6 +430,7 @@ const fn class_name(class: ResourceClass) -> &'static str {
         ResourceClass::Input => "input",
         ResourceClass::Console => "console",
         ResourceClass::Launcher => "launch",
+        ResourceClass::SystemObserve => "observe",
     }
 }
 

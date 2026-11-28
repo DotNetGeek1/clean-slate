@@ -265,6 +265,37 @@ pub(crate) fn holder_has_resource_rights(
     found.is_some()
 }
 
+/// [`holder_has_resource_rights`] for a check a caller may repeat often (#379, the resource
+/// snapshot): only a refusal is audited, so a monitor polling with its grant does not fill
+/// the audit log. The grant itself was audited when the kernel made it.
+pub(crate) fn holder_has_resource_rights_audit_refusal(
+    holder: HolderId,
+    resource: ResourceRef,
+    required: Rights,
+) -> bool {
+    let found = with_capability_space(|table| {
+        let mut cursor = 0usize;
+        loop {
+            let (next_cursor, handle, _) = list_holder(table, holder, cursor)?;
+            cursor = next_cursor;
+            if table.authorize(holder, handle, resource, required).is_ok() {
+                return Some(());
+            }
+        }
+    });
+    if found.is_none() {
+        audit::record_decision(
+            holder,
+            resource,
+            required,
+            CapabilityHandle::INVALID,
+            0,
+            Err(CapabilityError::MissingRight),
+        );
+    }
+    found.is_some()
+}
+
 /// Duplicates every live capability held by `parent` onto `child` for Linux `fork(2)`.
 ///
 /// Unlike userspace [`clean_slate_capability::delegate`], this kernel-only path does not

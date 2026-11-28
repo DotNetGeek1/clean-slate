@@ -83,7 +83,8 @@ impl LinuxGrants {
                 | Grant::ConsoleFrontEnd
                 | Grant::LauncherClient
                 | Grant::NativeNetworkClient
-                | Grant::NetworkStats => {
+                | Grant::NetworkStats
+                | Grant::SystemObserver => {
                     return Err("system shell: native grant on a Linux row");
                 }
             }
