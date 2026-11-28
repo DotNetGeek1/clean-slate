@@ -1099,8 +1099,23 @@ fn handle_service_next(frame: &mut SyscallContext) {
                 Err(_) => SYSCALL_EINVAL,
             };
         }
+        // #374: with nothing queued, a stop notice ends the wait: `0` tells the service to
+        // finish and exit. Requests still queued are served first.
+        None if stop_requested_for(holder) => frame.rax = 0,
         None => block_until_service_work(frame),
     }
+}
+
+/// Whether init has asked the instance `holder` to stop (#374).
+fn stop_requested_for(holder: HolderId) -> bool {
+    let controller = unsafe { crate::service::service_lifecycle_controller_mut() };
+    matches!(controller.stop_deadline_for_pid(holder.0), Ok(Some(_)))
+}
+
+/// Wakes the storage service if it waits in `OBJECT_SUBOP_SERVICE_NEXT`, so it sees a stop
+/// notice (#374). With no notice for it, it blocks again.
+pub(crate) fn wake_object_service() {
+    wake_all_registered(OBJECT_SERVICE_WORK_KEY);
 }
 
 /// Completes a staged request. A successful `READ_AT`'s `len` bytes at `src` (the service's

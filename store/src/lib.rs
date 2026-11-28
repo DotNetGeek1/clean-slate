@@ -345,6 +345,8 @@ pub struct ObjectStore<D> {
     active_slot: u64,
     next_epoch: u64,
     objects: Vec<StoredObject>,
+    /// A write, truncate or delete has been staged since the last commit that completed.
+    uncommitted: bool,
 }
 
 impl<D: BlockDevice> ObjectStore<D> {
@@ -363,6 +365,7 @@ impl<D: BlockDevice> ObjectStore<D> {
             active_slot: 0,
             next_epoch: superblock.next_epoch,
             objects: Vec::new(),
+            uncommitted: false,
         })
     }
 
@@ -397,6 +400,7 @@ impl<D: BlockDevice> ObjectStore<D> {
             active_slot,
             next_epoch: superblock.next_epoch,
             objects,
+            uncommitted: false,
         }
     }
 
@@ -428,6 +432,12 @@ impl<D: BlockDevice> ObjectStore<D> {
 
     pub fn into_inner(self) -> D {
         self.device
+    }
+
+    /// Whether anything is staged that no completed [`commit`](Self::commit) has made
+    /// durable yet (#374: the storage service commits it before it stops).
+    pub fn has_uncommitted(&self) -> bool {
+        self.uncommitted
     }
 
     pub fn write_object(&mut self, id: u64, name: &str, data: &[u8]) -> Result<(), StoreError> {
@@ -480,6 +490,7 @@ impl<D: BlockDevice> ObjectStore<D> {
             }
         }
 
+        self.uncommitted = true;
         Ok(())
     }
 
@@ -506,6 +517,7 @@ impl<D: BlockDevice> ObjectStore<D> {
             .position(|object| object.id == id)
             .ok_or(StoreError::NotFound)?;
         self.objects.remove(index);
+        self.uncommitted = true;
         Ok(())
     }
 
@@ -573,6 +585,7 @@ impl<D: BlockDevice> ObjectStore<D> {
             bytes.resize(end, 0);
         }
         bytes[start..end].copy_from_slice(data);
+        self.uncommitted = true;
         Ok(())
     }
 
@@ -589,6 +602,7 @@ impl<D: BlockDevice> ObjectStore<D> {
         let bytes = &mut self.objects[index].data;
         bytes.truncate(len as usize);
         bytes.resize(len as usize, 0);
+        self.uncommitted = true;
         Ok(())
     }
 
@@ -652,6 +666,7 @@ impl<D: BlockDevice> ObjectStore<D> {
         self.device.flush()?;
         self.generation = next_generation;
         self.active_slot = next_slot;
+        self.uncommitted = false;
         Ok(())
     }
 }

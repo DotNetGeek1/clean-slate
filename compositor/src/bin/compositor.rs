@@ -22,13 +22,14 @@
 #![no_main]
 
 use core::ptr::addr_of_mut;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use clean_slate_capability::syscall_abi::{CAP_REVOKE_OP_DROP, SYSCALL_NR_CAP_REVOKE};
 use clean_slate_capability::ResourceClass;
 use clean_slate_compositor::backend::{
     can_observe_presents, BufferMapping, DisplayBackend, InputFailure, InputSource, MapFailure,
     NoInput, PortFailure, PortServer, SharedBufferMapper, WaitFailure, WaitRequest, WorkWaiter,
-    WAKE_DISPLAY, WAKE_INPUT, WAKE_NOTICES, WAKE_REQUESTS,
+    WAKE_ALL, WAKE_DISPLAY, WAKE_INPUT, WAKE_NOTICES, WAKE_REQUESTS,
 };
 use clean_slate_compositor::diag::{self, DiagTracker};
 use clean_slate_compositor::{Compositor, Config, DefaultPolicy, Io};
@@ -55,6 +56,7 @@ use clean_slate_native_abi::port::{
     PORT_RECV_NONBLOCK, PORT_ROLE_SERVE,
 };
 use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
+use clean_slate_native_abi::service_stop::{SERVICE_STOP_OP_BIND_WAKE, SYSCALL_NR_SERVICE_STOP};
 use clean_slate_native_abi::work_set::{WORK_SET_OP_CREATE, WORK_SET_OP_NOW, WORK_SET_OP_WAIT};
 use clean_slate_native_abi::{
     is_status, ConnectionId, PortRecvRecord, TransferredCap, SHARED_BUFFER_ACCESS_READ,
@@ -394,8 +396,17 @@ impl InputSource for KernelInput {
     }
 }
 
+/// The stop notice's work-set bit (#374), above the compositor's own wake bits.
+const STOP_BIT: u32 = 8;
+const _: () = assert!(WAKE_ALL & (1 << STOP_BIT) == 0);
+
+/// Set once a wait returned the stop notice; the main loop then exits.
+static STOP_ASKED: AtomicBool = AtomicBool::new(false);
+
 struct KernelWorkSet {
     id: u64,
+    /// The stop notice's bit, added to every wait; 0 when it could not be bound (#374).
+    stop_mask: u32,
     /// `WORK_SET NOW` succeeds (the TSC is calibrated). A deadline `WAIT` needs it; without it
     /// every wait blocks on wake bits alone (see [`WaitRequest::plan`]).
     has_clock: bool,
@@ -411,12 +422,18 @@ impl WorkWaiter for KernelWorkSet {
             SYSCALL_NR_WORK_SET,
             WORK_SET_OP_WAIT,
             self.id,
-            u64::from(mask),
+            u64::from(mask | self.stop_mask),
             deadline,
             0,
         );
         match checked(raw) {
-            Ok(bits) => Ok(bits as u32),
+            Ok(bits) => {
+                let bits = bits as u32;
+                if bits & self.stop_mask != 0 {
+                    STOP_ASKED.store(true, Ordering::Relaxed);
+                }
+                Ok(bits & !self.stop_mask)
+            }
             Err(STATUS_ETIMEDOUT) => Ok(0),
             Err(status) => Err(WaitFailure(status)),
         }
@@ -544,8 +561,19 @@ pub extern "C" fn _start() -> ! {
     let mut buffers = KernelSharedBuffers;
     let mut kernel_input = input_handle.map(|handle| KernelInput { handle });
     let mut no_input = NoInput;
+    // A refused bind (no declared instance) leaves the stop to the kernel's deadline.
+    let stop_bound = checked(syscall(
+        SYSCALL_NR_SERVICE_STOP,
+        SERVICE_STOP_OP_BIND_WAKE,
+        work_set,
+        u64::from(STOP_BIT),
+        0,
+        0,
+    ))
+    .is_ok();
     let mut waiter = KernelWorkSet {
         id: work_set,
+        stop_mask: if stop_bound { 1 << STOP_BIT } else { 0 },
         has_clock: checked(syscall(SYSCALL_NR_WORK_SET, WORK_SET_OP_NOW, 0, 0, 0, 0)).is_ok(),
     };
     if !can_observe_presents(waiter.has_clock, display_wakes) {
@@ -600,6 +628,11 @@ pub extern "C" fn _start() -> ! {
         if !reported_ready && iteration.presented.is_some() {
             reported_ready = true;
             report_service_ready();
+        }
+        if STOP_ASKED.load(Ordering::Relaxed) {
+            // #374: nothing to save yet; the clients were stopped before the compositor.
+            console(&boot, &diag::exit_line("stopped"));
+            exit();
         }
     }
     console(&boot, &diag::exit_line("service-error"));

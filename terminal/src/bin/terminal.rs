@@ -4,7 +4,7 @@
 //! (#310) as the console session's front end, then waits on both connections through one work
 //! set (`BIND_EVENTS`). Compositor events go to the session; session output is drawn; the lines
 //! typed into the window go back to the console service, which hands them to the session's
-//! shell. It never wakes on its own.
+//! shell. It never wakes on its own. The stop notice (#374) ends it.
 //!
 //! Authority is exactly what its manifest row grants: `Graphics{GFX_CONNECT}`, and
 //! `Console{CONSOLE_CONNECT | CONSOLE_ATTACH}` on the console port, plus the buffers this
@@ -34,9 +34,10 @@ use clean_slate_terminal::app::INPUT_CAPACITY;
 use clean_slate_terminal::host::{allocate_buffers, exit_reason, Client};
 use clean_slate_terminal::{ExitReason, Outcome, Session};
 
-/// Work-set bits: one per connection.
+/// Work-set bits: one per connection, and the stop notice (#374).
 const COMPOSITOR_BIT: u32 = 0;
 const CONSOLE_BIT: u32 = 1;
+const STOP_BIT: u32 = 2;
 const ALL_BITS: u32 = (1 << COMPOSITOR_BIT) | (1 << CONSOLE_BIT);
 
 #[global_allocator]
@@ -65,6 +66,8 @@ enum End {
     Session(Outcome),
     ConsoleGone,
     WaitFailed,
+    /// Init asked the terminal to stop (#374); it has nothing to save.
+    Stopped,
 }
 
 fn run(log: &Log, boot: &DesktopLaunchPage, session: &mut Session) -> End {
@@ -104,13 +107,15 @@ fn attached(log: &Log, client: &mut Client<Kernel>, session: &mut Session) -> En
     {
         return End::ConsoleGone;
     }
+    let stop = process::StopNotice::bind(&mut Kernel, work, STOP_BIT);
     log.line("[TERM] attached as the console session front end\n");
     let mut outcome = session.start(client);
     let mut announced = false;
     let mut output = [0u8; CONSOLE_FRAME_PAYLOAD];
     let mut input = [0u8; INPUT_CAPACITY];
     while outcome == Outcome::Continue {
-        let ready = match work.wait(&mut Kernel, ALL_BITS, Wait::FOREVER) {
+        let ready = match work.wait(&mut Kernel, ALL_BITS | stop.mask(), Wait::FOREVER) {
+            Ok(ready) if stop.asked(ready) => return End::Stopped,
             Ok(ready) => ready,
             Err(_) => return End::WaitFailed,
         };
@@ -204,6 +209,7 @@ pub extern "C" fn _start() -> ! {
         }),
         End::ConsoleGone => log.line("[TERM] exit reason=console-gone\n"),
         End::WaitFailed => log.line("[TERM] exit reason=wait-failed\n"),
+        End::Stopped => log.line("[TERM] exit reason=stopped\n"),
     }
     process::exit();
 }

@@ -59,6 +59,8 @@ fn console(boot: &DesktopLaunchPage, line: &ConsoleLine) {
 /// Work-set bits: compositor events, launcher events.
 const WAKE_COMPOSITOR: u32 = 1 << 0;
 const WAKE_LAUNCHER: u32 = 1 << 1;
+/// The stop notice (#374).
+const WAKE_STOP_BIT: u32 = 2;
 
 /// Most events handled from one source before the other gets a turn.
 const MAX_DRAIN: usize = 64;
@@ -150,6 +152,7 @@ fn run(boot: &DesktopLaunchPage, session: &mut ShellSession) {
         client.shut_down();
         return;
     }
+    let stop = process::StopNotice::bind(&mut Kernel, work_set, WAKE_STOP_BIT);
     let mut launcher: Option<Launcher> = None;
     let mut outcome = session.start(&mut client);
     let mut announced = false;
@@ -207,7 +210,16 @@ fn run(boot: &DesktopLaunchPage, session: &mut ShellSession) {
         // With work left over, only collect new bits; otherwise sleep until an event.
         let wait = if more != 0 { Wait::No } else { Wait::FOREVER };
         woke = more
-            | match work_set.wait(&mut Kernel, WAKE_COMPOSITOR | WAKE_LAUNCHER, wait) {
+            | match work_set.wait(
+                &mut Kernel,
+                WAKE_COMPOSITOR | WAKE_LAUNCHER | stop.mask(),
+                wait,
+            ) {
+                // #374: nothing to save yet; the panel goes when init asks.
+                Ok(bits) if stop.asked(bits) => {
+                    outcome = Outcome::Exit(ExitReason::Stopped);
+                    break;
+                }
                 Ok(bits) => bits,
                 Err(Error::WouldBlock) => 0,
                 Err(error) => {

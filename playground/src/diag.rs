@@ -103,6 +103,7 @@ pub fn exit_line(reason: &str) -> ConsoleLine {
 pub const fn exit_reason(outcome: Outcome) -> &'static str {
     match outcome {
         Outcome::Exit(ExitReason::Closed) => "closed",
+        Outcome::Exit(ExitReason::Stopped) => "stopped",
         Outcome::Continue | Outcome::Exit(ExitReason::HostFailed(HostError::Gone)) => {
             "compositor-gone"
         }

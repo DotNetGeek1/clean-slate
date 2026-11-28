@@ -13,6 +13,9 @@ use clean_slate_native_abi::clock::{
     decode_wall, CLOCK_SUBOP_WALL, NANOS_PER_SECOND, SYSCALL_NR_CLOCK,
 };
 use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
+use clean_slate_native_abi::service_stop::{
+    StopQuery, SERVICE_STOP_OP_QUERY, SYSCALL_NR_SERVICE_STOP,
+};
 use clean_slate_network::addr::{
     BoundedHostname, EtherType, IpProtocol, Ipv4Addr, MacAddr, SocketAddrV4,
 };
@@ -59,6 +62,7 @@ use clean_slate_service_fixtures::{
     NET_SUBOP_PUBLISH_RESOLVER, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
     NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
+    NET_WAIT_WORK_STOP,
 };
 use clean_slate_service_fixtures::{NetLeaseEvent, NetLeaseReport};
 use core::alloc::{GlobalAlloc, Layout};
@@ -317,8 +321,82 @@ fn wait_for_service_work(
         return;
     }
     publish_occupancy(parked, tls_active);
-    if wait_net_work(NET_WAIT_WORK_REQUESTS | NET_WAIT_WORK_RX, now, deadline).is_err() {
+    let mask = NET_WAIT_WORK_REQUESTS | NET_WAIT_WORK_RX | NET_WAIT_WORK_STOP;
+    if wait_net_work(mask, now, deadline).is_err() {
         finish();
+    }
+}
+
+/// Whether init has asked this instance to stop (#374). A fixture instance, which is no
+/// declared service, is never asked.
+fn stop_requested() -> bool {
+    let raw = raw_syscall(
+        SYSCALL_NR_SERVICE_STOP,
+        [SERVICE_STOP_OP_QUERY, 0, 0, 0, 0, 0],
+    );
+    matches!(StopQuery::decode(raw), StopQuery::StopRequested { .. })
+}
+
+/// How long the stopping service keeps driving TCP so its FINs (and the peers' answers) go
+/// out, well inside the 2 s stop grace period.
+const STOP_FLUSH_MS: u64 = 300;
+
+/// #374: the service's answer to the stop notice. Every app connection gets a FIN and every
+/// listener is closed, so peers see a close rather than a connection that goes quiet; the
+/// DHCP lease, if the address came from one, is given back with DHCPRELEASE and the kernel
+/// logs `[NET ] dhcp released`; then the instance exits, which init logs as a clean stop.
+fn stop_service(ctx: &mut ServiceContext<'_>) -> ! {
+    close_every_tcp_session(ctx.service_generation);
+    flush_tcp_closes();
+    if let Some(dhcp) = dhcp_runtime() {
+        let lease = dhcp.client.lease();
+        if let Some(frame) = dhcp.client.release() {
+            let _ = DemuxLink::for_udp().transmit(frame);
+            if let Some(lease) = lease {
+                // The resolver came with the lease, so `/etc/resolv.conf` empties with it.
+                publish_resolver(
+                    ctx.raw_handle,
+                    None,
+                    Some(lease_report_for(NetLeaseEvent::Released, &lease)),
+                );
+            }
+        }
+    }
+    finish()
+}
+
+/// Closes every app TCP connection (FIN, or a reset when it cannot close) and listener,
+/// whoever holds it.
+fn close_every_tcp_session(service_generation: u64) {
+    let mappings = unsafe { &mut *core::ptr::addr_of_mut!(PLAIN_TCP_BY_SESSION) };
+    for slot in mappings.iter_mut() {
+        if let Some(mapping) = *slot {
+            close_tcp_mapping_owned_by(service_generation, mapping.owner, slot);
+        }
+    }
+    let listeners = unsafe { &mut *core::ptr::addr_of_mut!(PLAIN_TCP_LISTENER_BY_SESSION) };
+    for slot in listeners.iter_mut() {
+        if let Some(mapping) = *slot {
+            close_tcp_listener_owned_by(service_generation, mapping.owner, slot);
+        }
+    }
+}
+
+/// Drives the shared TCP transport until no connection is left or [`STOP_FLUSH_MS`] passes.
+/// The waits leave out `NET_WAIT_WORK_STOP`, which would return at once now.
+fn flush_tcp_closes() {
+    let Ok(start) = monotonic_ticks() else {
+        return;
+    };
+    let deadline = start.saturating_add(ms_to_irq_ticks(STOP_FLUSH_MS));
+    while shared_tcp_transport_mut().connections_in_use() > 0 {
+        drain_ingress();
+        let Ok(now) = monotonic_ticks() else {
+            return;
+        };
+        if now >= deadline || wait_net_work(NET_WAIT_WORK_RX, now, Some(deadline)).is_err() {
+            return;
+        }
     }
 }
 
@@ -1211,6 +1289,10 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             finish();
         };
         if found == 0 {
+            // Idle: every queued request was answered, so a stop can be taken now (#374).
+            if stop_requested() {
+                stop_service(&mut ctx);
+            }
             if !progressed {
                 let deadline = next_service_deadline(&ctx, &tls);
                 wait_for_service_work(ctx.parked, tls.future.is_some(), now, deadline);

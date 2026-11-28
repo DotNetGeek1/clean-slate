@@ -83,6 +83,8 @@ pub enum ExitReason {
     HostFailed(HostError),
     /// A buffer mapping was missing or too small.
     NoPixels,
+    /// Init asked the service to stop (#374).
+    Stopped,
 }
 
 /// Result of handling one event.

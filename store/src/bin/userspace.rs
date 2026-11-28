@@ -33,7 +33,7 @@ use clean_slate_service_fixtures::{
     STORAGE_SERVICE_RESULT_OK, STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
 };
 use clean_slate_store::heap::FreeListHeap;
-use clean_slate_store::service::serve;
+use clean_slate_store::service::{flush_on_stop, serve, StopFlush};
 use clean_slate_store::{ObjectStore, OpenError, Opened, StoreError};
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
@@ -213,9 +213,18 @@ fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u6
     // (#312).
     let mut staging = vec![0u8; OBJECT_MAX_BUFFER_PAYLOAD_BYTES];
     loop {
-        // Blocks in the kernel until a request is pending; it never reports an empty queue.
-        if object_service_next(role_handle, &mut request_buf, &mut staging)? != 1 {
-            return Err(0);
+        // Blocks in the kernel until a request is pending. With the queue empty it returns 0
+        // only once init has asked this instance to stop (#374): commit what is staged and
+        // exit, which init logs as a clean stop.
+        match object_service_next(role_handle, &mut request_buf, &mut staging)? {
+            1 => {}
+            0 => {
+                return match flush_on_stop(&mut store) {
+                    StopFlush::Clean | StopFlush::Committed => Ok(STORAGE_SERVICE_RESULT_OK),
+                    StopFlush::Failed(error) => Err(store_error_code(error)),
+                };
+            }
+            _ => return Err(0),
         }
         let request = ObjectServiceRequest::decode(&request_buf).map_err(|_| 0u64)?;
         let len = usize::try_from(request.len).map_err(|_| 0u64)?;

@@ -9,7 +9,8 @@
 //! It then drains the log through `CAP_AUDIT_READ` (12) with the handle its manifest row
 //! grants, keeping each drain's records in the store before printing anything about them,
 //! reports ready after the first drain, then drains once every [`AUDIT_DRAIN_PERIOD_NS`],
-//! sleeping in `WORK_SET` `WAIT` until the deadline. A refused read, a failed store request or
+//! sleeping in `WORK_SET` `WAIT` until the deadline. On the stop notice (#374) it drains once
+//! more, so what the log holds is in the store with its cursor, and exits. A refused read, a failed store request or
 //! a failed clock or wait is a `FAIL` line and `ud2`, which init's restart policy handles like
 //! any other service fault.
 
@@ -36,6 +37,8 @@ use clean_slate_supervisor::audit_store::{worth_keeping, AuditStore, Damage, Ope
 
 /// Nothing ever sets this bit, so a wait on it ends only at its deadline.
 const WAIT_MASK: u32 = 1;
+/// The stop notice's bit (#374).
+const STOP_BIT: u32 = 1;
 
 struct KernelAuditLog {
     capability: u64,
@@ -96,6 +99,7 @@ pub extern "C" fn _start() -> ! {
     let Ok(work_set) = WorkSet::create(&mut Kernel) else {
         fail(console, b"[ADT ] FAIL WORK_SET CREATE refused");
     };
+    let stop = process::StopNotice::bind(&mut Kernel, work_set, STOP_BIT);
     let mut emit = |line: &str| {
         let _ = console.send(&mut Kernel, line.as_bytes());
     };
@@ -176,6 +180,7 @@ pub extern "C" fn _start() -> ! {
 
     let mut drain = drain;
     let mut first = true;
+    let mut stopping = false;
     loop {
         let summary = match drain.drain(&mut log, &mut sink, &mut emit) {
             Ok(summary) => summary,
@@ -197,15 +202,27 @@ pub extern "C" fn _start() -> ! {
                 fail(console, b"[ADT ] FAIL SERVICE_READY refused");
             }
         }
+        if stopping {
+            // #374: that drain was the last. Every record it read is in the store, and the
+            // store's cursor with them, so the next boot's instance verifies a chain with no
+            // gap and does not read the same records again.
+            let header = *sink.store.header();
+            emit_line(
+                &mut emit,
+                format_args!(
+                    "[ADT ] stopped records={} next={}",
+                    header.records, header.next_since
+                ),
+            );
+            process::exit();
+        }
         let Ok(now) = now(&mut Kernel) else {
             fail(console, b"[ADT ] FAIL WORK_SET NOW failed");
         };
         let deadline = Deadline::after(now, AUDIT_DRAIN_PERIOD_NS);
-        if work_set
-            .sleep_until(&mut Kernel, WAIT_MASK, deadline)
-            .is_err()
-        {
-            fail(console, b"[ADT ] FAIL WORK_SET WAIT failed");
+        match work_set.sleep_until(&mut Kernel, WAIT_MASK | stop.mask(), deadline) {
+            Ok(ready) => stopping = stop.asked(ready),
+            Err(_) => fail(console, b"[ADT ] FAIL WORK_SET WAIT failed"),
         }
     }
 }
