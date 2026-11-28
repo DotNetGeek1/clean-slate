@@ -36,6 +36,7 @@ pub(crate) mod net_syscall;
 pub(crate) mod port;
 pub(crate) mod port_syscall;
 pub(crate) mod service_ready;
+pub(crate) mod service_stop;
 pub(crate) mod spawn;
 pub(crate) mod storage_refusal;
 pub(crate) mod system_init;

@@ -692,17 +692,22 @@ pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> 
     );
 
     let controller = unsafe { service_lifecycle_controller_mut() };
-    let maybe_fault_event =
-        match controller.notify_faulted_live_process(pid, context.error_code as u32) {
-            Ok(event) => event,
-            Err(error) => {
-                kernel_log_fmt(format_args!(
-                    "[FAIL] supervised fault publication failed pid={} err={:?}\n",
-                    pid, error
-                ));
-                fatal_kernel_error("failed to publish supervised fault event")
-            }
-        };
+    // #373: the exit trap of an instance that was asked to stop is its answer, not a failure.
+    let published = if context.vector as usize == crate::arch::x86_64::USER_TEST_VECTOR {
+        controller.notify_exit_trap_live_process(pid, context.error_code as u32)
+    } else {
+        controller.notify_faulted_live_process(pid, context.error_code as u32)
+    };
+    let maybe_fault_event = match published {
+        Ok(event) => event,
+        Err(error) => {
+            kernel_log_fmt(format_args!(
+                "[FAIL] supervised fault publication failed pid={} err={:?}\n",
+                pid, error
+            ));
+            fatal_kernel_error("failed to publish supervised fault event")
+        }
+    };
     if maybe_fault_event.is_none() {
         kernel_log_fmt(format_args!(
             "[PROC] unsupervised fault pid={} proceeding with teardown\n",

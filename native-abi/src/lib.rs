@@ -21,6 +21,7 @@ pub mod shared_buffer;
 #[macro_use]
 pub mod port;
 pub mod service_ready;
+pub mod service_stop;
 pub mod status;
 pub mod work_set;
 

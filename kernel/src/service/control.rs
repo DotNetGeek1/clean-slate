@@ -4,12 +4,16 @@ use crate::diagnostics::log::kernel_log_fmt;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::teardown_process_by_id;
 use crate::process::process_registry_mut;
+use crate::sched::work_set::{self, WorkSetBinding};
 use crate::service::capability::{lifecycle_capabilities_mut, BlockDeviceCapabilityError};
 use crate::service::capability::{LifecycleControlCapabilityError, LifecycleScope};
 use crate::service::grants::{apply_instance_grants, GraphicsRole, InstanceGrantAuthority};
 use crate::service::lifecycle_wait::wake_lifecycle_waiters;
 use crate::service::spawn::{launch_builtin_service, LaunchContext};
 use crate::sync::global_cell::GlobalCell;
+use clean_slate_native_abi::service_stop::{
+    stop_deadline_after, SERVICE_STOP_GRACE_NS, STOP_EXIT_STATUS_DEADLINE,
+};
 #[cfg(clean_slate_desktop)]
 use clean_slate_service_fixtures::manifest::graphics_port_row;
 use clean_slate_service_fixtures::manifest::{
@@ -73,6 +77,32 @@ impl ServiceRecord {
     }
 }
 
+/// #373: one instance's stop state, kept beside its service record. It belongs to the instance
+/// `pid` names, so an entry left from an earlier instance is never read for a later one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StopNotice {
+    pid: u64,
+    /// When the kernel terminates the instance; `None` until a stop is asked for.
+    deadline_ns: Option<u64>,
+    /// The work-set bit the instance bound with `SERVICE_STOP` `BIND_WAKE`.
+    wake: Option<(WorkSetBinding, u32)>,
+}
+
+impl StopNotice {
+    const NONE: Self = Self {
+        pid: 0,
+        deadline_ns: None,
+        wake: None,
+    };
+}
+
+/// Why a `SERVICE_STOP` call was refused. A refusal changes nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopNoticeRefusal {
+    /// The caller is not the live instance of a declared service.
+    NotAServiceInstance,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LifecycleControlError {
     Unauthorized,
@@ -110,6 +140,8 @@ pub(crate) struct ServiceLifecycleController {
     /// `pending` so an accepted report never depends on queue space. A newer instance's
     /// report replaces an older one still unpolled.
     ready_pending: [Option<LifecycleEvent>; SERVICE_REGISTRY_CAPACITY],
+    /// #373 stop notices, indexed like `services`.
+    stops: [StopNotice; SERVICE_REGISTRY_CAPACITY],
     next_scheduler_slot: usize,
     kernel_root_frame: u64,
     /// Rows that decide each started service's bootstrap mode and launch grants.
@@ -125,6 +157,7 @@ impl ServiceLifecycleController {
             pending: [None; SERVICE_PENDING_EVENTS],
             pending_count: 0,
             ready_pending: [None; SERVICE_REGISTRY_CAPACITY],
+            stops: [StopNotice::NONE; SERVICE_REGISTRY_CAPACITY],
             next_scheduler_slot: 0,
             kernel_root_frame: 0,
             manifest: SYSTEM_MANIFEST,
@@ -140,6 +173,7 @@ impl ServiceLifecycleController {
         self.pending = [None; SERVICE_PENDING_EVENTS];
         self.pending_count = 0;
         self.ready_pending = [None; SERVICE_REGISTRY_CAPACITY];
+        self.stops = [StopNotice::NONE; SERVICE_REGISTRY_CAPACITY];
         self.next_scheduler_slot = 0;
     }
 
@@ -1040,8 +1074,22 @@ impl ServiceLifecycleController {
     pub(crate) fn handle_control_request(
         &mut self,
         allocator: &mut PageAllocator,
+        supervisor_pid: u64,
+        request: ControlRequest,
+    ) -> Result<LifecycleControlResult, LifecycleControlError> {
+        let now_ns = crate::time::tsc_hz().map(|_| crate::time::monotonic_ns());
+        self.handle_control_request_at(allocator, supervisor_pid, request, now_ns)
+    }
+
+    /// [`Self::handle_control_request`] at `now_ns`, the monotonic clock, or `None` before the
+    /// clock is calibrated. Without a clock no stop deadline can be kept, so `Stop` terminates
+    /// at once, as it did before #373.
+    pub(crate) fn handle_control_request_at(
+        &mut self,
+        allocator: &mut PageAllocator,
         _supervisor_pid: u64,
         request: ControlRequest,
+        now_ns: Option<u64>,
     ) -> Result<LifecycleControlResult, LifecycleControlError> {
         let service_id = request.service;
         let kind = request.kind;
@@ -1063,6 +1111,13 @@ impl ServiceLifecycleController {
                 self.services[service_index].authoritative_generation = next_generation;
                 self.services[service_index].state = next_state;
                 Ok(result)
+            }
+            ControlRequestKind::Stop if now_ns.is_some() => {
+                let now_ns = now_ns.unwrap_or(0);
+                self.request_stop(service_index, now_ns)?;
+                self.services[service_index].state = next_state;
+                self.services[service_index].authoritative_generation = next_generation;
+                Ok(LifecycleControlResult { event: None })
             }
             ControlRequestKind::Terminate | ControlRequestKind::Stop => {
                 let result = self.terminate_service(allocator, service_id)?;
@@ -1098,6 +1153,172 @@ impl ServiceLifecycleController {
                 Ok(LifecycleControlResult { event: None })
             }
         }
+    }
+
+    /// #373 graceful stop: records the deadline and sets the instance's bound bit. The
+    /// instance keeps running until it exits or [`Self::terminate_overdue_stops`] ends it.
+    fn request_stop(
+        &mut self,
+        service_index: usize,
+        now_ns: u64,
+    ) -> Result<(), LifecycleControlError> {
+        let record = self.services[service_index];
+        let live = record.live.ok_or(LifecycleControlError::ServiceNotLive)?;
+        let deadline_ns = stop_deadline_after(now_ns);
+        let notice = self.stop_notice_mut(service_index, live.pid);
+        notice.deadline_ns = Some(deadline_ns);
+        let wake = notice.wake;
+        kernel_log_fmt(format_args!(
+            "[SVC ] stop notice service={} pid={} grace-ms={} woken={}\n",
+            record.service.0,
+            live.pid,
+            SERVICE_STOP_GRACE_NS / 1_000_000,
+            u8::from(wake.is_some())
+        ));
+        if let Some((binding, bit)) = wake {
+            work_set::signal(binding, bit);
+        }
+        Ok(())
+    }
+
+    /// The stop notice of the live instance `pid` of `services[index]`, reset when the entry
+    /// belonged to an earlier instance.
+    fn stop_notice_mut(&mut self, index: usize, pid: u64) -> &mut StopNotice {
+        let notice = &mut self.stops[index];
+        if notice.pid != pid {
+            *notice = StopNotice {
+                pid,
+                ..StopNotice::NONE
+            };
+        }
+        notice
+    }
+
+    fn live_index_for_pid(&self, pid: u64) -> Option<usize> {
+        self.services.iter().position(|entry| {
+            entry.service.0 != 0 && entry.live.is_some_and(|live| live.pid == pid)
+        })
+    }
+
+    /// `SERVICE_STOP` `QUERY` from `pid`: the stop deadline of its instance, `None` while no
+    /// stop was asked for.
+    pub(crate) fn stop_deadline_for_pid(&self, pid: u64) -> Result<Option<u64>, StopNoticeRefusal> {
+        let index = self
+            .live_index_for_pid(pid)
+            .ok_or(StopNoticeRefusal::NotAServiceInstance)?;
+        let notice = self.stops[index];
+        Ok(if notice.pid == pid {
+            notice.deadline_ns
+        } else {
+            None
+        })
+    }
+
+    /// `SERVICE_STOP` `BIND_WAKE` from `pid`. Returns whether a stop was already asked for, in
+    /// which case the caller sets the bit at once.
+    pub(crate) fn bind_stop_wake(
+        &mut self,
+        pid: u64,
+        binding: WorkSetBinding,
+        bit: u32,
+    ) -> Result<bool, StopNoticeRefusal> {
+        let index = self
+            .live_index_for_pid(pid)
+            .ok_or(StopNoticeRefusal::NotAServiceInstance)?;
+        let notice = self.stop_notice_mut(index, pid);
+        notice.wake = Some((binding, bit));
+        Ok(notice.deadline_ns.is_some())
+    }
+
+    /// #373: terminates every stopping instance whose deadline is at or before `now_ns` and
+    /// queues its `Exited` with [`STOP_EXIT_STATUS_DEADLINE`]. Returns how many were ended.
+    /// Called on init's `LIFECYCLE_WAIT`, which init makes for each deadline it waits on.
+    pub(crate) fn terminate_overdue_stops(
+        &mut self,
+        allocator: &mut PageAllocator,
+        now_ns: u64,
+    ) -> usize {
+        let mut ended = 0;
+        for index in 0..SERVICE_REGISTRY_CAPACITY {
+            let record = self.services[index];
+            if record.service.0 == 0 || record.state != ServiceLifecycleState::Stopping {
+                continue;
+            }
+            let Some(live) = record.live else {
+                continue;
+            };
+            let notice = self.stops[index];
+            let overdue = notice.pid == live.pid
+                && notice
+                    .deadline_ns
+                    .is_some_and(|deadline_ns| now_ns >= deadline_ns);
+            if !overdue {
+                continue;
+            }
+            kernel_log_fmt(format_args!(
+                "[SVC ] stop deadline passed service={} pid={}; terminating\n",
+                record.service.0, live.pid
+            ));
+            match self.terminate_service(allocator, record.service) {
+                Ok(LifecycleControlResult {
+                    event: Some(mut event),
+                }) => {
+                    event.status_code = STOP_EXIT_STATUS_DEADLINE;
+                    let _ = self.push_terminal_pending(event);
+                    ended += 1;
+                }
+                Ok(LifecycleControlResult { event: None }) => {}
+                Err(error) => kernel_log_fmt(format_args!(
+                    "[SVC ] stop deadline terminate failed service={} pid={} err={error:?}\n",
+                    record.service.0, live.pid
+                )),
+            }
+        }
+        ended
+    }
+
+    /// The live instance `pid` took the native exit trap. An instance that is stopping has
+    /// answered its stop notice, so it is reported `Exited`; at any other time the exit trap
+    /// is a failure like a fault, as before #373, so restart policies count it.
+    pub(crate) fn notify_exit_trap_live_process(
+        &mut self,
+        pid: u64,
+        status_code: u32,
+    ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
+        let Some(service_index) = self
+            .services
+            .iter()
+            .position(|entry| entry.live.is_some_and(|live| live.pid == pid))
+        else {
+            return Ok(None);
+        };
+        let record = self.services[service_index];
+        if record.state != ServiceLifecycleState::Stopping {
+            return self.notify_faulted_live_process(pid, status_code);
+        }
+        let live = record.live.ok_or(LifecycleControlError::ServiceNotLive)?;
+        let instance = ServiceInstanceId::new(
+            record.service,
+            live.generation,
+            ProcessId(live.pid),
+            DomainId(live.domain_id),
+        );
+        let (next_state, _) = apply_transition(
+            record.state,
+            record.authoritative_generation,
+            TransitionInput::Event(LifecycleEventKind::Exited),
+            Some(instance),
+        )
+        .map_err(LifecycleControlError::InvalidTransition)?;
+        let event = LifecycleEvent::new(instance, LifecycleEventKind::Exited);
+        self.push_terminal_pending(event)?;
+        self.services[service_index].state = next_state;
+        self.services[service_index].live = None;
+        kernel_log_fmt(format_args!(
+            "[SVC ] stopped service={} pid={} on its own\n",
+            record.service.0, live.pid
+        ));
+        Ok(Some(event))
     }
 
     #[allow(dead_code)]
@@ -2188,6 +2409,183 @@ mod tests {
             controller.declare_service(ServiceId(8)),
             Err("service was already declared")
         );
+    }
+
+    /// Slot 7 at the last generation is never issued by the host tests' work-set table, so
+    /// signalling it is a no-op there.
+    fn stop_wake_binding() -> WorkSetBinding {
+        let id = clean_slate_native_abi::WorkSetId::new(7, u32::MAX).expect("work-set id");
+        WorkSetBinding::for_test(id)
+    }
+
+    #[test]
+    fn stop_is_a_notice_with_a_deadline_and_the_instance_keeps_running() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = live_record(ServiceId(40), 140);
+        assert_eq!(controller.stop_deadline_for_pid(140), Ok(None));
+        assert_eq!(
+            controller.bind_stop_wake(140, stop_wake_binding(), 3),
+            Ok(false)
+        );
+        let mut allocator = test_allocator();
+        let result = controller
+            .handle_control_request_at(
+                &mut allocator,
+                0,
+                ControlRequest::new(ServiceId(40), ControlRequestKind::Stop),
+                Some(1_000),
+            )
+            .expect("stop");
+        assert_eq!(result.event, None);
+        let record = controller.find_service(ServiceId(40)).expect("record");
+        assert_eq!(record.state, ServiceLifecycleState::Stopping);
+        assert_eq!(record.live.expect("still live").pid, 140);
+        assert_eq!(
+            controller.stop_deadline_for_pid(140),
+            Ok(Some(1_000 + SERVICE_STOP_GRACE_NS))
+        );
+        assert_eq!(controller.stops[0].wake, Some((stop_wake_binding(), 3)));
+        // Binding again once the notice is out asks the caller to set the bit at once.
+        assert_eq!(
+            controller.bind_stop_wake(140, stop_wake_binding(), 4),
+            Ok(true)
+        );
+        // Nobody else learns of it, and a second stop is refused.
+        assert_eq!(
+            controller.stop_deadline_for_pid(141),
+            Err(StopNoticeRefusal::NotAServiceInstance)
+        );
+        assert!(matches!(
+            controller.handle_control_request_at(
+                &mut allocator,
+                0,
+                ControlRequest::new(ServiceId(40), ControlRequestKind::Stop),
+                Some(2_000),
+            ),
+            Err(LifecycleControlError::InvalidTransition(_))
+        ));
+        assert_eq!(
+            controller.stop_deadline_for_pid(140),
+            Ok(Some(1_000 + SERVICE_STOP_GRACE_NS))
+        );
+    }
+
+    #[test]
+    fn without_a_clock_stop_terminates_at_once() {
+        let mut controller = ServiceLifecycleController::new();
+        // pid 0 cannot be torn down on the host, which shows the terminate was attempted.
+        controller.services[0] = live_record(ServiceId(41), 0);
+        let mut allocator = test_allocator();
+        let error = controller
+            .handle_control_request_at(
+                &mut allocator,
+                0,
+                ControlRequest::new(ServiceId(41), ControlRequestKind::Stop),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(error, LifecycleControlError::TeardownFailed(_)));
+        assert_eq!(controller.stop_deadline_for_pid(0), Ok(None));
+    }
+
+    #[test]
+    fn a_stop_deadline_is_kept_only_once_it_has_passed() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = live_record(ServiceId(42), 0);
+        controller.services[1] = live_record(ServiceId(43), 143);
+        let mut allocator = test_allocator();
+        controller
+            .handle_control_request_at(
+                &mut allocator,
+                0,
+                ControlRequest::new(ServiceId(42), ControlRequestKind::Stop),
+                Some(10),
+            )
+            .expect("stop");
+        let deadline = 10 + SERVICE_STOP_GRACE_NS;
+        assert_eq!(
+            controller.terminate_overdue_stops(&mut allocator, deadline - 1),
+            0
+        );
+        assert_eq!(
+            controller
+                .find_service(ServiceId(42))
+                .expect("record")
+                .state,
+            ServiceLifecycleState::Stopping
+        );
+        // At the deadline the kernel terminates it (pid 0 cannot be torn down on the host,
+        // so the instance stays and nothing is queued). The running service is untouched.
+        assert_eq!(
+            controller.terminate_overdue_stops(&mut allocator, deadline),
+            0
+        );
+        assert_eq!(controller.pending_count, 0);
+        assert_eq!(
+            controller
+                .find_service(ServiceId(43))
+                .expect("record")
+                .state,
+            ServiceLifecycleState::Running
+        );
+    }
+
+    #[test]
+    fn a_notice_from_an_earlier_instance_does_not_reach_the_next() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = live_record(ServiceId(44), 144);
+        controller.stops[0] = StopNotice {
+            pid: 99,
+            deadline_ns: Some(5),
+            wake: Some((stop_wake_binding(), 1)),
+        };
+        assert_eq!(controller.stop_deadline_for_pid(144), Ok(None));
+        let mut allocator = test_allocator();
+        assert_eq!(
+            controller.terminate_overdue_stops(&mut allocator, u64::MAX),
+            0
+        );
+        assert_eq!(
+            controller.bind_stop_wake(144, stop_wake_binding(), 2),
+            Ok(false)
+        );
+        assert_eq!(controller.stops[0].pid, 144);
+        assert_eq!(controller.stops[0].deadline_ns, None);
+    }
+
+    #[test]
+    fn the_exit_trap_answers_a_stop_and_is_a_failure_otherwise() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = live_record(ServiceId(45), 145);
+        controller.services[1] = live_record(ServiceId(46), 146);
+        controller.services[0].state = ServiceLifecycleState::Stopping;
+        let stopped = controller
+            .notify_exit_trap_live_process(145, 0)
+            .expect("published")
+            .expect("event");
+        assert_eq!(stopped.kind, LifecycleEventKind::Exited);
+        assert_eq!(stopped.status_code, 0);
+        assert_eq!(
+            controller
+                .find_service(ServiceId(45))
+                .expect("record")
+                .state,
+            ServiceLifecycleState::Exited
+        );
+        let failed = controller
+            .notify_exit_trap_live_process(146, 0)
+            .expect("published")
+            .expect("event");
+        assert_eq!(failed.kind, LifecycleEventKind::Faulted);
+        assert_eq!(controller.notify_exit_trap_live_process(999, 0), Ok(None));
+        // A real fault while stopping is still a fault.
+        controller.services[2] = live_record(ServiceId(47), 147);
+        controller.services[2].state = ServiceLifecycleState::Stopping;
+        let crashed = controller
+            .notify_faulted_live_process(147, 14)
+            .expect("published")
+            .expect("event");
+        assert_eq!(crashed.kind, LifecycleEventKind::Faulted);
     }
 
     fn live_record(service: ServiceId, pid: u64) -> ServiceRecord {
