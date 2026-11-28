@@ -73,6 +73,8 @@ pub(crate) struct MappingRow {
     pub(crate) authority: MappingAuthority,
     pt_frames: [u64; MAX_PAGE_TABLES_PER_ROW],
     pde_count: u8,
+    /// Buffer pages this row maps (#377); an orphaned row maps only the zero page.
+    pages: u32,
 }
 
 impl MappingRow {
@@ -83,12 +85,20 @@ impl MappingRow {
         authority: MappingAuthority::KernelGrant,
         pt_frames: [0; MAX_PAGE_TABLES_PER_ROW],
         pde_count: 0,
+        pages: 0,
     };
 
-    #[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
     pub(crate) fn private_page_tables(&self) -> usize {
         match self.state {
             RowState::Live => usize::from(self.pde_count),
+            RowState::Empty | RowState::Orphaned => 0,
+        }
+    }
+
+    /// Shared-buffer pages this row maps: the buffer's pages while Live, none otherwise.
+    pub(crate) fn mapped_pages(&self) -> usize {
+        match self.state {
+            RowState::Live => self.pages as usize,
             RowState::Empty | RowState::Orphaned => 0,
         }
     }
@@ -127,7 +137,6 @@ impl ProcessWindow {
     }
 
     /// Directory frames plus the private page tables of every Live row.
-    #[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
     pub(crate) fn page_table_frames(&self) -> usize {
         2 + self
             .rows
@@ -425,6 +434,7 @@ fn map_row(
         authority,
         pt_frames: tables,
         pde_count: table_count as u8,
+        pages: record.page_count,
     };
     Ok(ProcessWindow::row_va(row))
 }
@@ -630,6 +640,46 @@ mod tests {
                 .pool
                 .orphan(PID + 1, 0, fixture.zero_pt, &mut fixture.pending),
             None
+        );
+    }
+
+    fn mapped_pages(pool: &WindowPool<4>) -> usize {
+        pool.get(PID).map_or(0, |window| {
+            window.rows().iter().map(MappingRow::mapped_pages).sum()
+        })
+    }
+
+    #[test]
+    fn shared_mapping_pages_follow_map_orphan_unmap_and_return_to_zero() {
+        let mut fixture = Fixture::new(256);
+        for cycle in 0..4u64 {
+            let first = fixture.buffer(3 + cycle);
+            let second = fixture.buffer(2);
+            fixture.map(first, SharedBufferAccess::ReadWrite).unwrap();
+            assert_eq!(mapped_pages(&fixture.pool), (3 + cycle) as usize);
+            fixture.map(second, SharedBufferAccess::Read).unwrap();
+            assert_eq!(mapped_pages(&fixture.pool), (5 + cycle) as usize);
+            fixture
+                .pool
+                .orphan(PID, 0, fixture.zero_pt, &mut fixture.pending)
+                .unwrap();
+            assert_eq!(
+                mapped_pages(&fixture.pool),
+                2,
+                "an orphaned row maps no buffer"
+            );
+            let removed = fixture
+                .pool
+                .remove_process(PID, &mut fixture.pending, |_, _| {});
+            assert_eq!(removed, 2);
+            assert_eq!(mapped_pages(&fixture.pool), 0, "cycle {cycle}");
+            fixture.drain();
+        }
+        let buffer_pages = (0..4).map(|cycle| 5 + cycle).sum::<usize>();
+        assert_eq!(
+            fixture.frames.live_frames(),
+            Fixture::BASELINE + buffer_pages,
+            "only the buffers' own pages stay held"
         );
     }
 

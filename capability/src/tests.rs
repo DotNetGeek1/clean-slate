@@ -66,7 +66,8 @@ fn rights_subset_and_names() {
     assert!(!Rights::WRITE.is_subset_of(Rights::READ));
     assert_eq!(Rights::from_bits(1 << 31), None);
     assert_eq!(Rights::from_bits(1 << 26), Some(Rights::DIRECTORY));
-    assert_eq!(Rights::from_bits(1 << 27), Some(Rights::POWER_CONTROL));
+    assert_eq!(Rights::from_bits(1 << 27), Some(Rights::NET_STATS));
+    assert_eq!(Rights::from_bits(1 << 29), Some(Rights::POWER_CONTROL));
     let mut buf = alloc::string::String::new();
     full.write_names(&mut buf).unwrap();
     assert_eq!(buf, "read|write|delegate");
@@ -94,6 +95,7 @@ fn valid_for_masks() {
             .union(Rights::NET_SEND)
             .union(Rights::NET_RECEIVE)
             .union(Rights::NET_RAW_DEVICE)
+            .union(Rights::NET_STATS)
             .union(Rights::DELEGATE)
             .union(Rights::REVOKE)
     );

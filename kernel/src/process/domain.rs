@@ -458,8 +458,14 @@ fn run_teardown_hook(
                 let scheduler = scheduler_mut();
                 let resources = scheduler.resources_for_process(ctx.process_id);
                 let reaped = scheduler.reap_threads_for_process(ctx.process_id)?;
-                if reaped != resources.threads {
+                if reaped.threads != resources.threads {
                     return Err("scheduler thread cleanup count diverged from teardown snapshot");
+                }
+                // Keep the reaped threads' run time with the process until its record goes.
+                if let Some(process) = process_registry_mut().get_mut(ctx.process_id) {
+                    process
+                        .resource_domain
+                        .credit_retired_cpu_ticks(reaped.cpu_ticks);
                 }
                 Ok::<ThreadProcessResources, &'static str>(resources)
             })?);

@@ -20,13 +20,14 @@
 
 use clean_slate_native_abi::net::{
     net_error_status, NetRequest, NetResponse, NETWORK_CAPABILITY_VERSION,
-    NETWORK_CLIENT_DEVICE_ID, NET_FRAME_BYTES, NET_MAX_PAYLOAD_BYTES, NET_SOCKET_DATAGRAM,
-    NET_SOCKET_STREAM, NET_SOCKET_TLS_EXCHANGE, NET_SUBOP_DISCARD, NET_SUBOP_POLL,
-    NET_SUBOP_SUBMIT, NET_SUBOP_WAIT, SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
+    NETWORK_CLIENT_DEVICE_ID, NET_APP_STATS_ROW_BYTES, NET_FRAME_BYTES, NET_MAX_PAYLOAD_BYTES,
+    NET_SOCKET_DATAGRAM, NET_SOCKET_STREAM, NET_SOCKET_TLS_EXCHANGE, NET_STATS_MAX_APPS,
+    NET_SUBOP_DISCARD, NET_SUBOP_POLL, NET_SUBOP_SUBMIT, NET_SUBOP_WAIT,
+    SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
 };
 use clean_slate_native_abi::status::STATUS_EINVAL;
 
-pub use clean_slate_native_abi::net::{NetAddr, NET_MAX_HOSTNAME_BYTES};
+pub use clean_slate_native_abi::net::{NetAddr, NetAppStats, NET_MAX_HOSTNAME_BYTES};
 
 use crate::port::Deadline;
 use crate::{Error, Syscalls};
@@ -554,6 +555,74 @@ fn tls_send_and_receive<S: Syscalls>(
     let len = filled?;
     answer.take(response);
     Ok(len)
+}
+
+/// The network service's per-app counters (#378): one [`NetAppStats`] row per running app that
+/// has used the network. See `clean_slate_native_abi::net` for what each counter counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetStats {
+    rows: [NetAppStats; NET_STATS_MAX_APPS],
+    len: usize,
+    apps: usize,
+    untracked: u32,
+}
+
+impl NetStats {
+    /// The rows, in the service's table order.
+    pub fn rows(&self) -> &[NetAppStats] {
+        &self.rows[..self.len]
+    }
+
+    /// `app`'s row (its manifest row id), if it has one.
+    pub fn app(&self, app: u64) -> Option<NetAppStats> {
+        self.rows().iter().copied().find(|row| row.app == app)
+    }
+
+    /// Requests from apps the service's full table had no row for.
+    pub fn untracked(&self) -> u32 {
+        self.untracked
+    }
+
+    /// Whether every row the service holds is here (always, unless the table and this type
+    /// disagree on its size).
+    pub fn complete(&self) -> bool {
+        self.apps == self.len
+    }
+}
+
+/// Reads every app's network counters (#378). The row needs `Grant::NetworkStats` (after
+/// `Grant::NativeNetworkClient`); without it the call fails with `Failed(STATUS_EACCES)`.
+pub fn app_stats<S: Syscalls>(sys: &mut S, deadline: Deadline) -> Result<NetStats, Error> {
+    let client = Client::get(sys)?;
+    let mut payload = [0u8; NET_STATS_MAX_APPS * NET_APP_STATS_ROW_BYTES];
+    let request = NetRequest::Stats {
+        max_len: payload.len() as u32,
+    };
+    let NetResponse::Stats {
+        rows,
+        apps,
+        untracked,
+    } = client.exchange(sys, request, &[], &mut payload, deadline)?
+    else {
+        return Err(Error::Failed(STATUS_EINVAL));
+    };
+    let mut stats = NetStats {
+        rows: [NetAppStats::default(); NET_STATS_MAX_APPS],
+        len: 0,
+        apps: usize::from(apps),
+        untracked,
+    };
+    for chunk in payload
+        .chunks_exact(NET_APP_STATS_ROW_BYTES)
+        .take(usize::from(rows))
+    {
+        let Some(row) = NetAppStats::decode(chunk) else {
+            break;
+        };
+        stats.rows[stats.len] = row;
+        stats.len += 1;
+    }
+    Ok(stats)
 }
 
 #[cfg(test)]

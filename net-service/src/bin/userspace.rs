@@ -40,6 +40,7 @@ use clean_slate_network::tls::{
     TLS_RECORD_BUFFER_BYTES, TLS_SCRATCH_PAGES,
 };
 use clean_slate_runtime::heap::{ArenaPages, Heap};
+use clean_slate_service_fixtures::network_stats::{AppNetStats, NetStatsEvent};
 use clean_slate_service_fixtures::ready_detail::NetworkReadyDetail;
 use clean_slate_service_fixtures::{
     audit_destination, AppPolicyAuthorizer, NetworkProbe, NetworkRefusal, NetworkService,
@@ -1228,6 +1229,9 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         if let Some((response, out_len)) =
             handle_service_request(&mut ctx, &mut tls, request_id, caller, request, payload)
         {
+            if !matches!(request, NetworkRequest::Stats { .. }) {
+                count_response(&caller, &response);
+            }
             ctx.complete(request_id, response, out_len);
         }
     }
@@ -1887,6 +1891,7 @@ fn pump_parked_requests(ctx: &mut ServiceContext<'_>, now: u64) -> bool {
             continue;
         };
         ctx.parked.slots[index] = None;
+        count_response(&entry.caller, &response);
         ctx.complete(entry.request_id, response, out_len);
         completed = true;
     }
@@ -2381,9 +2386,13 @@ fn handle_service_request<F: Future<Output = TlsJobOutput>>(
     // that bypasses `NetworkService::handle_request` (resolve, TLS send, plain TCP connect)
     // is judged the same way.
     if let Err(refusal) = ctx.service.authorize_request(&caller, &request) {
+        app_stats().record(&caller, NetStatsEvent::Refusal);
         report_refusal(ctx, caller, &request, refusal);
         let code = NetworkError::Denied(refusal.reason).code();
         return Some((NetworkResponse::Error { code }, 0));
+    }
+    if let NetworkRequest::Stats { max_len } = request {
+        return Some(answer_stats(ctx, max_len));
     }
     match handle_linux_socket_data_plane(ctx, request_id, caller, request, payload) {
         LinuxSocketDispatch::Done(response, out_len) => return Some((response, out_len)),
@@ -2420,6 +2429,51 @@ fn handle_service_request<F: Future<Output = TlsJobOutput>>(
             )
         }
     }
+}
+
+/// #378: the per-app counters. Only the service loop touches them.
+static mut APP_STATS: AppNetStats = AppNetStats::new();
+
+fn app_stats() -> &'static mut AppNetStats {
+    unsafe { &mut *core::ptr::addr_of_mut!(APP_STATS) }
+}
+
+/// Counts what a completed request did for `caller`'s app. Bytes are application bytes: what a
+/// `Send` accepted and a `Receive` returned. A resolve is counted when its query goes out
+/// (`handle_service_resolve`), a refusal when the policy refuses (`handle_service_request`).
+/// Requests cancelled for a close or an exit are not counted.
+fn count_response(
+    caller: &clean_slate_network::protocol::TrustedCaller,
+    response: &NetworkResponse,
+) {
+    let event = match *response {
+        NetworkResponse::Send { bytes_sent } => NetStatsEvent::Sent(bytes_sent),
+        NetworkResponse::Receive { payload_len } => NetStatsEvent::Received(payload_len),
+        NetworkResponse::Connect | NetworkResponse::Accept { .. } => NetStatsEvent::Connection,
+        NetworkResponse::Listen => NetStatsEvent::Listener,
+        NetworkResponse::Stats { .. } => return,
+        NetworkResponse::Resolve { .. }
+        | NetworkResponse::Open { .. }
+        | NetworkResponse::Close
+        | NetworkResponse::Error { .. } => NetStatsEvent::Seen,
+    };
+    app_stats().record(caller, event);
+}
+
+/// `STATS` (#378): the kernel admitted it on `NET_STATS`, so any caller here may read every
+/// app's row. As many rows as fit `max_len`; the response says how many the table holds.
+fn answer_stats(ctx: &mut ServiceContext<'_>, max_len: u32) -> (NetworkResponse, u32) {
+    let want = (max_len as usize).min(ctx.response_payload.len());
+    let table = app_stats().encode(&mut ctx.response_payload[..want]);
+    let len = u32::from(table.rows) * clean_slate_native_abi::net::NET_APP_STATS_ROW_BYTES as u32;
+    (
+        NetworkResponse::Stats {
+            rows: table.rows,
+            apps: table.apps,
+            untracked: table.untracked,
+        },
+        len,
+    )
 }
 
 /// A retried refusal is reported at most once per this many milliseconds.
@@ -2525,6 +2579,7 @@ fn handle_service_resolve(
         Ok(ResolveOutcome::Pending { query_id }) => query_id,
         Err(err) => return error(NetworkError::from(err)),
     };
+    app_stats().record(&caller, NetStatsEvent::DnsLookup);
     ctx.parked.park(ParkedRequest {
         request_id,
         caller,
@@ -2634,6 +2689,7 @@ fn pump_tls_job<F: Future<Output = TlsJobOutput>>(
             result: Err(err), ..
         }) => tls_error(err),
     };
+    count_response(&active.caller, &response);
     ctx.complete(active.request_id, response, 0);
     true
 }
@@ -2738,6 +2794,7 @@ fn drain_holder_exits<F>(ctx: &mut ServiceContext<'_>, tls: &mut TlsJob<'_, F>) 
         forget_linux_udp_endpoints_for_caller(caller);
         close_linux_tcp_connections_for_caller(ctx.service_generation, caller);
         refusal_reports().forget(caller);
+        app_stats().on_holder_exit(&caller);
         let (sessions, pending) = ctx.service.on_holder_exit(caller);
         let ack = net_request([
             NET_SUBOP_ACK_HOLDER_EXIT,

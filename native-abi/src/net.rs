@@ -54,6 +54,24 @@
 //! | `CLOSE` | `[8..16]` session | — |
 //! | `LISTEN` | `[8..16]` session, `[16..18]` local port | — |
 //! | `ACCEPT` | `[8..16]` listening session | `[8..16]` new session, `[16..20]` peer IPv4 address, `[20..22]` peer port |
+//! | `STATS` | `[8..12]` most payload bytes wanted | `[8..10]` rows in the payload, `[10..12]` apps in the table, `[12..16]` untracked requests |
+//!
+//! # Per-app counters
+//!
+//! `STATS` (#378) reads what the service has counted for each running app: application bytes
+//! sent and received, connections opened (a stream or datagram `CONNECT`, a TLS exchange's
+//! `CONNECT`, an `ACCEPT`), listeners started, policy refusals, and DNS lookups that left the
+//! machine (a name answered from the service's cache is not one). An app is its manifest row,
+//! the identity the kernel attests and the network policy is keyed by; a fork counts toward its
+//! parent's row. A row appears with an app's first request and is dropped once the last
+//! process of the app that used the network has exited. The table holds at most
+//! [`NET_STATS_MAX_APPS`] apps; requests from another app while it is full are counted only in
+//! the response's untracked total.
+//!
+//! Only a client capability with `NET_STATS` may ask (`EACCES` otherwise): a row with both
+//! `Grant::NativeNetworkClient` and `Grant::NetworkStats`. The payload is up to `max_len /
+//! NET_APP_STATS_ROW_BYTES` rows, each a [`NetAppStats`] encoding; the response's app count says
+//! whether some did not fit. `STATS` itself is not counted.
 //!
 //! An error response has status [`NET_RESPONSE_ERROR`] and `[8..10]` a service error code
 //! ([`net_error_status`] turns it into a status).
@@ -121,6 +139,14 @@ pub const NET_KIND_RECEIVE: u8 = 5;
 pub const NET_KIND_CLOSE: u8 = 6;
 pub const NET_KIND_LISTEN: u8 = 7;
 pub const NET_KIND_ACCEPT: u8 = 8;
+/// Per-app counters (#378).
+pub const NET_KIND_STATS: u8 = 9;
+
+/// The most apps the counter table holds.
+pub const NET_STATS_MAX_APPS: usize = 32;
+/// One [`NetAppStats`] row in a `STATS` payload.
+pub const NET_APP_STATS_ROW_BYTES: usize = 48;
+const _: () = assert!(NET_STATS_MAX_APPS * NET_APP_STATS_ROW_BYTES <= NET_MAX_PAYLOAD_BYTES);
 
 pub const NET_RESPONSE_OK: u8 = 0;
 pub const NET_RESPONSE_ERROR: u8 = 1;
@@ -164,6 +190,7 @@ pub enum NetRequest<'a> {
     Close { session: u64 },
     Listen { session: u64, port: u16 },
     Accept { session: u64 },
+    Stats { max_len: u32 },
 }
 
 /// Checks a name `RESOLVE` can carry.
@@ -218,6 +245,10 @@ impl NetRequest<'_> {
                 out[16..18].copy_from_slice(&port.to_le_bytes());
             }
             Self::Accept { session } => session_and(&mut out, NET_KIND_ACCEPT, session),
+            Self::Stats { max_len } => {
+                out[6] = NET_KIND_STATS;
+                out[8..12].copy_from_slice(&max_len.to_le_bytes());
+            }
         }
         Ok(out)
     }
@@ -253,6 +284,13 @@ pub enum NetResponse {
     Accept {
         session: u64,
         peer: NetAddr,
+    },
+    /// `rows` [`NetAppStats`] rows are in the payload, of `apps` the table holds; `untracked`
+    /// requests came from apps the full table had no row for.
+    Stats {
+        rows: u16,
+        apps: u16,
+        untracked: u32,
     },
     /// A service error code; see [`net_error_status`].
     Error {
@@ -302,6 +340,11 @@ impl NetResponse {
                     u16::from_le_bytes([frame[20], frame[21]]),
                 ),
             },
+            NET_KIND_STATS => Self::Stats {
+                rows: u16::from_le_bytes([frame[8], frame[9]]),
+                apps: u16::from_le_bytes([frame[10], frame[11]]),
+                untracked: word(12),
+            },
             _ => return Err(BadFrame),
         })
     }
@@ -337,12 +380,99 @@ impl NetResponse {
                 out[16..20].copy_from_slice(&peer.ip);
                 out[20..22].copy_from_slice(&peer.port.to_le_bytes());
             }
+            Self::Stats {
+                rows,
+                apps,
+                untracked,
+            } => {
+                out[6] = NET_KIND_STATS;
+                out[8..10].copy_from_slice(&rows.to_le_bytes());
+                out[10..12].copy_from_slice(&apps.to_le_bytes());
+                out[12..16].copy_from_slice(&untracked.to_le_bytes());
+            }
             Self::Error { code } => {
                 out[7] = NET_RESPONSE_ERROR;
                 out[8..10].copy_from_slice(&code.to_le_bytes());
             }
         }
         out
+    }
+}
+
+/// One app's counters in a `STATS` payload, [`NET_APP_STATS_ROW_BYTES`] long, little-endian:
+///
+/// ```text
+/// [0..8]   app (manifest row id; 0 unattributed)
+/// [8..16]  bytes sent
+/// [16..24] bytes received
+/// [24..28] connections opened
+/// [28..32] listeners started
+/// [32..36] policy refusals
+/// [36..40] DNS lookups
+/// [40..44] processes of the app the service knows are running
+/// [44..48] 0
+/// ```
+///
+/// Counts saturate rather than wrap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetAppStats {
+    pub app: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub connections: u32,
+    pub listeners: u32,
+    pub refusals: u32,
+    pub dns_lookups: u32,
+    pub processes: u32,
+}
+
+impl NetAppStats {
+    pub const fn new(app: u64) -> Self {
+        Self {
+            app,
+            bytes_sent: 0,
+            bytes_received: 0,
+            connections: 0,
+            listeners: 0,
+            refusals: 0,
+            dns_lookups: 0,
+            processes: 0,
+        }
+    }
+
+    pub fn encode(&self) -> [u8; NET_APP_STATS_ROW_BYTES] {
+        let mut out = [0u8; NET_APP_STATS_ROW_BYTES];
+        out[0..8].copy_from_slice(&self.app.to_le_bytes());
+        out[8..16].copy_from_slice(&self.bytes_sent.to_le_bytes());
+        out[16..24].copy_from_slice(&self.bytes_received.to_le_bytes());
+        out[24..28].copy_from_slice(&self.connections.to_le_bytes());
+        out[28..32].copy_from_slice(&self.listeners.to_le_bytes());
+        out[32..36].copy_from_slice(&self.refusals.to_le_bytes());
+        out[36..40].copy_from_slice(&self.dns_lookups.to_le_bytes());
+        out[40..44].copy_from_slice(&self.processes.to_le_bytes());
+        out
+    }
+
+    /// The row at the start of `bytes`, or `None` when fewer than a row's bytes are left.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let row = bytes.get(..NET_APP_STATS_ROW_BYTES)?;
+        let u64_at = |at: usize| {
+            let mut word = [0u8; 8];
+            word.copy_from_slice(&row[at..at + 8]);
+            u64::from_le_bytes(word)
+        };
+        let u32_at =
+            |at: usize| u32::from_le_bytes([row[at], row[at + 1], row[at + 2], row[at + 3]]);
+        Some(Self {
+            app: u64_at(0),
+            bytes_sent: u64_at(8),
+            bytes_received: u64_at(16),
+            connections: u32_at(24),
+            listeners: u32_at(28),
+            refusals: u32_at(32),
+            dns_lookups: u32_at(36),
+            processes: u32_at(40),
+        })
     }
 }
 
@@ -444,6 +574,11 @@ mod tests {
                 session: 0x1_0000_0009,
                 peer: NetAddr::new([10, 0, 2, 2], 51_000),
             },
+            NetResponse::Stats {
+                rows: 2,
+                apps: 9,
+                untracked: 70_000,
+            },
             NetResponse::Error { code: 15 },
         ] {
             assert_eq!(NetResponse::decode(&response.encode()), Ok(response));
@@ -451,6 +586,34 @@ mod tests {
         let mut frame = NetResponse::Close.encode();
         frame[0] ^= 1;
         assert_eq!(NetResponse::decode(&frame), Err(BadFrame));
+    }
+
+    #[test]
+    fn a_stats_request_carries_its_length() {
+        let frame = NetRequest::Stats { max_len: 1536 }.encode().unwrap();
+        assert_eq!(frame[6], NET_KIND_STATS);
+        assert_eq!(&frame[8..12], &1536u32.to_le_bytes());
+    }
+
+    #[test]
+    fn app_stats_rows_round_trip_and_need_a_whole_row() {
+        let row = NetAppStats {
+            app: 0x5700,
+            bytes_sent: u64::MAX,
+            bytes_received: 1 << 40,
+            connections: 3,
+            listeners: 1,
+            refusals: 2,
+            dns_lookups: 4,
+            processes: 1,
+        };
+        let bytes = row.encode();
+        assert_eq!(&bytes[44..], &[0; 4]);
+        assert_eq!(NetAppStats::decode(&bytes), Some(row));
+        assert_eq!(
+            NetAppStats::decode(&bytes[..NET_APP_STATS_ROW_BYTES - 1]),
+            None
+        );
     }
 
     #[test]

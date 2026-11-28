@@ -7,8 +7,10 @@
 //! The probe resolves the fixture name, fetches the fixture's page over a TCP stream and over
 //! TLS, makes a UDP round trip, then connects to a destination its policy does not name. That
 //! connect must be refused; the kernel then checks that the refusal is in the audit log, naming
-//! the probe and the destination. The probe reports each step through lane checks, and the
-//! kernel ends the boot at its last report.
+//! the probe and the destination. Last (#378) the probe reads the network service's per-app
+//! counters, which its row's `Grant::NetworkStats` allows, checks its own row and reports it; the
+//! kernel logs it. The probe reports each step through lane checks, and the kernel ends the boot
+//! at its last report.
 //!
 //! With `m10-net-listen-self-test` (#359, `cargo xtask test-m10-net-listen`) the kernel answers
 //! the probe's mode check with the listen mode: the probe listens on its policy's port, is
@@ -36,11 +38,11 @@ use crate::syscall::service_lifecycle_syscall_allocator_mut;
 use clean_slate_capability::{HolderId, NetDestination, NetTransport};
 use clean_slate_native_abi::status::STATUS_EINVAL;
 use clean_slate_service_fixtures::net_probe::{
-    NetProbeFailure, NetProbeStep, NET_PROBE_CHECK_DONE, NET_PROBE_CHECK_FAILED,
+    NetProbeFailure, NetProbeStats, NetProbeStep, NET_PROBE_CHECK_DONE, NET_PROBE_CHECK_FAILED,
     NET_PROBE_CHECK_LISTENING, NET_PROBE_CHECK_LISTEN_REFUSED, NET_PROBE_CHECK_MODE,
-    NET_PROBE_CHECK_REFUSED, NET_PROBE_CHECK_STEP, NET_PROBE_DENIED, NET_PROBE_LISTEN_DENIED_PORT,
-    NET_PROBE_MANIFEST, NET_PROBE_MODE_LISTEN, NET_PROBE_SERVICE_ID, NET_PROBE_SUBOP_LANE_CHECK,
-    NET_PROBE_WRONG_ANSWER,
+    NET_PROBE_CHECK_REFUSED, NET_PROBE_CHECK_STATS, NET_PROBE_CHECK_STEP, NET_PROBE_DENIED,
+    NET_PROBE_LISTEN_DENIED_PORT, NET_PROBE_MANIFEST, NET_PROBE_MODE_LISTEN, NET_PROBE_SERVICE_ID,
+    NET_PROBE_SUBOP_LANE_CHECK, NET_PROBE_WRONG_ANSWER,
 };
 use clean_slate_service_fixtures::NETWORK_SERVICE_ID;
 use clean_slate_service_lifecycle::{
@@ -52,6 +54,7 @@ const SUPERVISOR_TEST_PID: u64 = 61;
 
 static PROBE_PID: AtomicU64 = AtomicU64::new(0);
 static REFUSAL_AUDITED: AtomicBool = AtomicBool::new(false);
+static STATS_REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// Serves the probe's lane check (`SYSCALL_NR_CAP_GRANT` sub-operation
 /// [`NET_PROBE_SUBOP_LANE_CHECK`]); `false` for any other sub-operation.
@@ -120,9 +123,28 @@ fn lane_check(pid: u64, check: u64, arg: u64) -> u64 {
             ));
             0
         }
+        NET_PROBE_CHECK_STATS => {
+            let stats = NetProbeStats::decode(arg);
+            STATS_REPORTED.store(true, Ordering::Relaxed);
+            kernel_log_fmt(format_args!(
+                "[M10.net] stats sent={} received={} connections={} listeners={} refusals={} dns={}\n",
+                stats.bytes_sent,
+                stats.bytes_received,
+                stats.connections,
+                stats.listeners,
+                stats.refusals,
+                stats.dns_lookups
+            ));
+            0
+        }
         NET_PROBE_CHECK_DONE => {
             if !REFUSAL_AUDITED.load(Ordering::Relaxed) {
                 fatal_kernel_error("[M10.net] probe finished without the refusal check");
+            }
+            if !cfg!(feature = "m10-net-listen-self-test")
+                && !STATS_REPORTED.load(Ordering::Relaxed)
+            {
+                fatal_kernel_error("[M10.net] probe finished without reading its counters");
             }
             kernel_log_fmt(format_args!("[M10.net] PASS pid={pid}\n"));
             qemu_exit(QEMU_EXIT_SUCCESS)

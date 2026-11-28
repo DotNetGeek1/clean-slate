@@ -33,6 +33,8 @@ pub(crate) enum NetworkOp {
     Send,
     Receive,
     RawDevice,
+    /// Read the service's per-app counters (#378).
+    Stats,
 }
 
 impl NetworkOp {
@@ -43,6 +45,7 @@ impl NetworkOp {
             Self::Send => Rights::NET_SEND,
             Self::Receive => Rights::NET_RECEIVE,
             Self::RawDevice => Rights::NET_RAW_DEVICE,
+            Self::Stats => Rights::NET_STATS,
         }
     }
 
@@ -53,6 +56,7 @@ impl NetworkOp {
             Self::Send => "send",
             Self::Receive => "receive",
             Self::RawDevice => "raw-device",
+            Self::Stats => "stats",
         }
     }
 }
@@ -468,6 +472,10 @@ pub(crate) const NETWORK_CLIENT_RIGHTS: Rights = Rights::NET_RESOLVE
     .union(Rights::NET_SEND)
     .union(Rights::NET_RECEIVE);
 
+/// The most an entitlement, and so a client capability derived from it, may carry: the client
+/// rights, and `NET_STATS` for a row that also holds `Grant::NetworkStats` (#378).
+pub(crate) const NETWORK_CLIENT_MAX_RIGHTS: Rights = NETWORK_CLIENT_RIGHTS.union(Rights::NET_STATS);
+
 /// Generation of the entitlement record: the network service, no instance. Instance
 /// generations are `u32`, and an M7 grant made before the first network start sits on the
 /// authoritative generation 0, so no other network record can carry this one.
@@ -566,57 +574,72 @@ const fn network_service_any_instance() -> ResourceRef {
 fn record_client_grant(
     holder: HolderId,
     resource: ResourceRef,
+    rights: Rights,
     result: Result<CapabilityHandle, CapabilityError>,
 ) {
     audit::record(
-        AuditEvent::new(
-            AuditKind::Grant,
-            HolderId::KERNEL,
-            resource,
-            NETWORK_CLIENT_RIGHTS,
-        )
-        .with_subject(holder)
-        .with_handle(*result.as_ref().unwrap_or(&CapabilityHandle::INVALID))
-        .with_result(result.map(|_| ())),
+        AuditEvent::new(AuditKind::Grant, HolderId::KERNEL, resource, rights)
+            .with_subject(holder)
+            .with_handle(*result.as_ref().unwrap_or(&CapabilityHandle::INVALID))
+            .with_result(result.map(|_| ())),
     );
 }
 
-/// Replaces `holder`'s client capability with one bound to instance `generation`.
+/// The rights of `holder`'s entitlement, within [`NETWORK_CLIENT_MAX_RIGHTS`]; the plain client
+/// rights when it holds none.
+fn entitlement_rights<const N: usize>(table: &CapabilityTable<N>, holder: HolderId) -> Rights {
+    (0..N)
+        .map(|slot| table.record_at(slot))
+        .find(|record| {
+            record.state == CapabilityState::Live
+                && record.holder == holder
+                && is_network_client_entitlement(record)
+        })
+        .map_or(NETWORK_CLIENT_RIGHTS, |record| {
+            record.rights.attenuate(NETWORK_CLIENT_MAX_RIGHTS)
+        })
+}
+
+/// Replaces `holder`'s client capability with one bound to instance `generation`, with its
+/// entitlement's rights.
 fn issue_client_capability_in<const N: usize>(
     table: &mut CapabilityTable<N>,
     holder: HolderId,
     generation: u64,
 ) -> Result<CapabilityHandle, CapabilityError> {
     let resource = ResourceRef::network(u64::from(NETWORK_SERVICE_ID.0), generation);
+    let rights = entitlement_rights(table, holder);
     let result = if is_started_instance_generation(generation) {
         revoke_client_capabilities_in(table, holder);
-        table.grant(
-            holder,
-            resource,
-            NETWORK_CLIENT_RIGHTS,
-            Provenance::root(holder),
-        )
+        table.grant(holder, resource, rights, Provenance::root(holder))
     } else {
         Err(CapabilityError::WrongResource)
     };
-    record_client_grant(holder, resource, result);
+    record_client_grant(holder, resource, rights, result);
     result
 }
 
-/// Installs the entitlement for `holder`, and its client capability when an instance is
-/// live (`live_generation`).
+/// Installs the entitlement for `holder` with `rights` (within [`NETWORK_CLIENT_MAX_RIGHTS`]),
+/// and its client capability when an instance is live (`live_generation`).
 fn grant_entitlement_in<const N: usize>(
     table: &mut CapabilityTable<N>,
     holder: HolderId,
     live_generation: Option<u64>,
+    rights: Rights,
 ) -> Result<(), CapabilityError> {
+    let rights = rights.attenuate(NETWORK_CLIENT_MAX_RIGHTS);
     let entitlement = table.grant(
         holder,
         network_client_entitlement_resource(),
-        NETWORK_CLIENT_RIGHTS,
+        rights,
         Provenance::root(holder),
     );
-    record_client_grant(holder, network_client_entitlement_resource(), entitlement);
+    record_client_grant(
+        holder,
+        network_client_entitlement_resource(),
+        rights,
+        entitlement,
+    );
     entitlement?;
     if let Some(generation) = live_generation {
         issue_client_capability_in(table, holder, generation)?;
@@ -648,16 +671,25 @@ fn revoke_entitled_client_capabilities_in<const N: usize>(table: &mut Capability
 }
 
 /// The `NetworkClient` launch grant for `holder` (a Linux row, in a build with the Linux socket
-/// layer: `system_shell::grant_network_client`), and the `NativeNetworkClient` one (#353).
-pub(crate) fn grant_network_client_entitlement(holder: HolderId) -> Result<(), CapabilityError> {
+/// layer: `system_shell::grant_network_client`), and the `NativeNetworkClient` one (#353), which
+/// with `Grant::NetworkStats` on the row also carries `NET_STATS` (`stats`, #378).
+pub(crate) fn grant_network_client_entitlement(
+    holder: HolderId,
+    stats: bool,
+) -> Result<(), CapabilityError> {
+    let rights = if stats {
+        NETWORK_CLIENT_MAX_RIGHTS
+    } else {
+        NETWORK_CLIENT_RIGHTS
+    };
     let live_generation = live_network_instance_generation().map(|g| u64::from(g.0));
     let table = unsafe { capability_space_mut() };
     // An entitlement installed without its client capability is left for the launch's
     // teardown to revoke; only a grant that installed nothing is retried.
-    match grant_entitlement_in(table, holder, live_generation) {
+    match grant_entitlement_in(table, holder, live_generation, rights) {
         Err(CapabilityError::CapacityExhausted) if !holds_live_entitlement(table, holder) => {
             let _ = clean_slate_capability::release_revoked(table);
-            grant_entitlement_in(table, holder, live_generation)
+            grant_entitlement_in(table, holder, live_generation, rights)
         }
         other => other,
     }?;
@@ -931,7 +963,7 @@ mod tests {
     #[test]
     fn the_entitlement_names_the_service_and_no_instance_and_authorises_no_instance() {
         let mut table = CapabilityTable::<MAX_SLOTS>::new();
-        grant_entitlement_in(&mut table, SHELL, None).unwrap();
+        grant_entitlement_in(&mut table, SHELL, None, NETWORK_CLIENT_RIGHTS).unwrap();
         assert_eq!(held(&table, SHELL), (1, 0));
         let handle = table.handle_at(0).unwrap();
         let record = table.record(handle).unwrap();
@@ -983,7 +1015,7 @@ mod tests {
     #[test]
     fn a_launch_with_no_live_instance_holds_the_entitlement_only() {
         let mut table = CapabilityTable::<MAX_SLOTS>::new();
-        grant_entitlement_in(&mut table, SHELL, None).unwrap();
+        grant_entitlement_in(&mut table, SHELL, None, NETWORK_CLIENT_RIGHTS).unwrap();
         assert_eq!(held(&table, SHELL), (1, 0));
         assert_eq!(occupied(&table), 1);
     }
@@ -991,7 +1023,7 @@ mod tests {
     #[test]
     fn a_launch_with_a_live_instance_also_holds_a_client_for_that_instance() {
         let mut table = CapabilityTable::<MAX_SLOTS>::new();
-        grant_entitlement_in(&mut table, SHELL, Some(1)).unwrap();
+        grant_entitlement_in(&mut table, SHELL, Some(1), NETWORK_CLIENT_RIGHTS).unwrap();
         assert_eq!(held(&table, SHELL), (1, 1));
         assert_eq!(client_generation(&table, SHELL), 1);
         let client = client_handle(&table, SHELL);
@@ -1001,10 +1033,47 @@ mod tests {
         assert_eq!(table.record(client).unwrap().rights, NETWORK_CLIENT_RIGHTS);
     }
 
+    /// #378: a `NetworkStats` row's entitlement carries `NET_STATS`, and so does every client
+    /// derived from it, across restarts; a plain client's never does, and nothing past the
+    /// client rights and `NET_STATS` gets in.
+    #[test]
+    fn the_stats_right_follows_the_entitlement_through_reissue() {
+        let mut table = CapabilityTable::<MAX_SLOTS>::new();
+        grant_entitlement_in(&mut table, SHELL, Some(1), NETWORK_CLIENT_MAX_RIGHTS).unwrap();
+        grant_entitlement_in(
+            &mut table,
+            CHILD,
+            Some(1),
+            NETWORK_CLIENT_RIGHTS.union(Rights::NET_RAW_DEVICE),
+        )
+        .unwrap();
+        for generation in [1, 2] {
+            if generation == 2 {
+                revoke_entitled_client_capabilities_in(&mut table);
+                reissue_client_capabilities_in(&mut table, 2, |_, result| assert!(result.is_ok()));
+            }
+            let stats = client_handle(&table, SHELL);
+            assert_eq!(
+                table.record(stats).unwrap().rights,
+                NETWORK_CLIENT_MAX_RIGHTS
+            );
+            assert!(table
+                .authorize(SHELL, stats, instance(generation), Rights::NET_STATS)
+                .is_ok());
+            let plain = client_handle(&table, CHILD);
+            assert_eq!(table.record(plain).unwrap().rights, NETWORK_CLIENT_RIGHTS);
+            assert_eq!(
+                table.authorize(CHILD, plain, instance(generation), Rights::NET_STATS),
+                Err(CapabilityError::MissingRight)
+            );
+        }
+        assert_eq!(NetworkOp::Stats.required_right(), Rights::NET_STATS);
+    }
+
     #[test]
     fn a_new_instance_reissues_the_client_and_the_old_one_stops_authorising() {
         let mut table = CapabilityTable::<MAX_SLOTS>::new();
-        grant_entitlement_in(&mut table, SHELL, Some(1)).unwrap();
+        grant_entitlement_in(&mut table, SHELL, Some(1), NETWORK_CLIENT_RIGHTS).unwrap();
         let old = client_handle(&table, SHELL);
 
         assert_eq!(revoke_entitled_client_capabilities_in(&mut table), 1);
@@ -1027,7 +1096,7 @@ mod tests {
     #[test]
     fn a_new_instance_without_the_old_one_going_first_still_leaves_one_client() {
         let mut table = CapabilityTable::<MAX_SLOTS>::new();
-        grant_entitlement_in(&mut table, SHELL, Some(1)).unwrap();
+        grant_entitlement_in(&mut table, SHELL, Some(1), NETWORK_CLIENT_RIGHTS).unwrap();
         reissue_client_capabilities_in(&mut table, 2, |_, result| assert!(result.is_ok()));
         assert_eq!(held(&table, SHELL), (1, 1));
         assert_eq!(client_generation(&table, SHELL), 2);
@@ -1041,7 +1110,7 @@ mod tests {
     #[test]
     fn many_restarts_never_accumulate_records() {
         let mut table = CapabilityTable::<MAX_SLOTS>::new();
-        grant_entitlement_in(&mut table, SHELL, Some(1)).unwrap();
+        grant_entitlement_in(&mut table, SHELL, Some(1), NETWORK_CLIENT_RIGHTS).unwrap();
         fork(&mut table, SHELL, CHILD);
         table
             .grant(
@@ -1078,7 +1147,7 @@ mod tests {
     #[test]
     fn a_child_forked_before_a_restart_holds_its_own_client_after_it() {
         let mut table = CapabilityTable::<MAX_SLOTS>::new();
-        grant_entitlement_in(&mut table, SHELL, Some(1)).unwrap();
+        grant_entitlement_in(&mut table, SHELL, Some(1), NETWORK_CLIENT_RIGHTS).unwrap();
         fork(&mut table, SHELL, CHILD);
         let derived = table.record_at(client_slot(&table, CHILD));
         assert_eq!(derived.provenance.depth, 1);
@@ -1105,8 +1174,8 @@ mod tests {
     #[test]
     fn a_failed_reissue_is_reported_for_its_holder() {
         let mut table = CapabilityTable::<2>::new();
-        grant_entitlement_in(&mut table, SHELL, None).unwrap();
-        grant_entitlement_in(&mut table, CHILD, None).unwrap();
+        grant_entitlement_in(&mut table, SHELL, None, NETWORK_CLIENT_RIGHTS).unwrap();
+        grant_entitlement_in(&mut table, CHILD, None, NETWORK_CLIENT_RIGHTS).unwrap();
         let mut results = std::vec::Vec::new();
         reissue_client_capabilities_in(&mut table, 1, |holder, result| {
             results.push((holder, result.map(|_| ())))

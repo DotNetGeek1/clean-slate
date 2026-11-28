@@ -22,6 +22,8 @@ pub mod manifest;
 pub mod net_probe;
 pub mod network_policy;
 mod network_service;
+/// #378 per-app network counters the network service keeps.
+pub mod network_stats;
 mod network_transport;
 /// M6.3 object-capability protocol (lane-owned).
 pub mod object_capability;
