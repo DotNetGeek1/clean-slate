@@ -141,7 +141,13 @@ fn apply_control(
             ServiceLifecycleState::Running,
             ControlRequestKind::Stop | ControlRequestKind::Terminate,
         ) => Ok((ServiceLifecycleState::Stopping, generation)),
-        (ServiceLifecycleState::Starting, ControlRequestKind::Terminate) => {
+        // #373: a stop may also reach an instance that has not reported ready yet, and an
+        // instance that is stopping may still be terminated at once.
+        (
+            ServiceLifecycleState::Starting,
+            ControlRequestKind::Stop | ControlRequestKind::Terminate,
+        ) => Ok((ServiceLifecycleState::Stopping, generation)),
+        (ServiceLifecycleState::Stopping, ControlRequestKind::Terminate) => {
             Ok((ServiceLifecycleState::Stopping, generation))
         }
         (
@@ -196,6 +202,10 @@ fn apply_event(
         }
         (ServiceLifecycleState::Stopping, LifecycleEventKind::Exited) => {
             Ok((ServiceLifecycleState::Exited, authoritative_generation))
+        }
+        // A crash while finishing work on the stop notice is still a crash.
+        (ServiceLifecycleState::Stopping, LifecycleEventKind::Faulted) => {
+            Ok((ServiceLifecycleState::Faulted, authoritative_generation))
         }
         (ServiceLifecycleState::Starting, LifecycleEventKind::Faulted) => {
             Ok((ServiceLifecycleState::Faulted, authoritative_generation))
@@ -306,5 +316,53 @@ mod tests {
                 current: InstanceGeneration(u32::MAX),
             }
         );
+    }
+
+    #[test]
+    fn a_stopping_instance_can_be_terminated_exit_or_fault() {
+        for from in [
+            ServiceLifecycleState::Starting,
+            ServiceLifecycleState::Running,
+        ] {
+            let (next, gen) = apply_transition(
+                from,
+                InstanceGeneration(3),
+                TransitionInput::Control(ControlRequestKind::Stop),
+                None,
+            )
+            .expect("stop");
+            assert_eq!(
+                (next, gen),
+                (ServiceLifecycleState::Stopping, InstanceGeneration(3))
+            );
+        }
+        let (next, _) = apply_transition(
+            ServiceLifecycleState::Stopping,
+            InstanceGeneration(3),
+            TransitionInput::Control(ControlRequestKind::Terminate),
+            None,
+        )
+        .expect("terminate a stopping instance");
+        assert_eq!(next, ServiceLifecycleState::Stopping);
+        for (event, expected) in [
+            (LifecycleEventKind::Exited, ServiceLifecycleState::Exited),
+            (LifecycleEventKind::Faulted, ServiceLifecycleState::Faulted),
+        ] {
+            let (next, _) = apply_transition(
+                ServiceLifecycleState::Stopping,
+                InstanceGeneration(3),
+                TransitionInput::Event(event),
+                Some(instance(3, 9)),
+            )
+            .expect("end of a stopping instance");
+            assert_eq!(next, expected);
+        }
+        assert!(apply_transition(
+            ServiceLifecycleState::Stopping,
+            InstanceGeneration(3),
+            TransitionInput::Control(ControlRequestKind::Stop),
+            None,
+        )
+        .is_err());
     }
 }

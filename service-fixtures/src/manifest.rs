@@ -286,6 +286,34 @@ impl ServiceSpec {
         self.grants(Grant::NetworkClient) || self.grants(Grant::NativeNetworkClient)
     }
 
+    /// A short name for init's lines (#373): the launch name when the row has one, otherwise
+    /// one for its image. The two shell rows run the same image, so the terminal's is told apart.
+    pub const fn name(&self) -> &'static str {
+        if let Some(name) = self.launch_name {
+            return name;
+        }
+        match self.image {
+            ServiceImage::Storage => "storage",
+            ServiceImage::Network => "network",
+            ServiceImage::ImmediateExit => "immediate-exit",
+            ServiceImage::M3UserTest => "m3-user-test",
+            ServiceImage::CrashService => "crash-service",
+            ServiceImage::M6Fixture => "m6-fixture",
+            ServiceImage::LinuxHello => "linux-hello",
+            ServiceImage::LinuxShell if self.id.0 == TERMINAL_SHELL_SERVICE_ID.0 => {
+                "terminal-shell"
+            }
+            ServiceImage::LinuxShell => "shell",
+            ServiceImage::Compositor => "compositor",
+            ServiceImage::DesktopShell => "desktop-shell",
+            ServiceImage::Playground => "playground",
+            ServiceImage::Audit => "audit",
+            ServiceImage::Console => "console",
+            ServiceImage::Terminal => "terminal",
+            ServiceImage::NetProbe => "net-probe",
+        }
+    }
+
     pub const fn grants(&self, grant: Grant) -> bool {
         let mut index = 0;
         while index < self.grants.len() {
@@ -1938,5 +1966,23 @@ mod tests {
             validate_manifest(&[COMPOSITOR_SERVICE_SPEC, DESKTOP_SHELL_SERVICE_SPEC, app]),
             Err(ManifestError::GrantNotSupportedByImage { row: 2 })
         );
+    }
+
+    #[test]
+    fn row_names_tell_every_row_of_a_shipped_manifest_apart() {
+        for manifest in [
+            SYSTEM_MANIFEST,
+            SYSTEM_DESKTOP_MANIFEST,
+            SYSTEM_TERMINAL_DESKTOP_MANIFEST,
+        ] {
+            for (index, row) in manifest.iter().enumerate() {
+                for other in &manifest[index + 1..] {
+                    assert_ne!(row.name(), other.name(), "{:?} {:?}", row.id, other.id);
+                }
+            }
+        }
+        assert_eq!(SYSTEM_SHELL_SPEC.name(), "shell");
+        assert_eq!(TERMINAL_SHELL_SPEC.name(), "terminal-shell");
+        assert_eq!(PLAYGROUND_SERVICE_SPEC.name(), "playground");
     }
 }

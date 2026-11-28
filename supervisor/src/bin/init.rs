@@ -143,7 +143,9 @@ pub extern "C" fn _start() -> ! {
             Ok(bits) => bits,
             // After a bounded drain the leftovers' bits were cleared, so look again anyway.
             Err(Error::TimedOut) if deadline == Deadline::at(1) => WAKE_MASK,
-            Err(Error::TimedOut) => 0,
+            // #373: a deadline may be a stop deadline, which the kernel keeps on the next
+            // `LIFECYCLE_WAIT`, so look for lifecycle messages on every timeout too.
+            Err(Error::TimedOut) => 1 << LIFECYCLE_BIT,
             Err(_) => fail(console, b"[INIT] WORK_SET WAIT failed\n"),
         };
         let at = now(console);
@@ -180,6 +182,7 @@ pub extern "C" fn _start() -> ! {
                     at,
                     record.kind,
                     record.envelope.connection.encode(),
+                    record.envelope.rights,
                     &record.frame,
                 );
             }

@@ -7,14 +7,25 @@
 //! due, the deadline is `None`, so init blocks until the kernel has a message for it.
 //!
 //! Ticks are monotonic nanoseconds throughout.
+//!
+//! #373 system stop: [`SystemInit::request_system_stop`] (a launcher client holding
+//! `LAUNCH_POWER` asks for it) turns restart policies off for good and stops the running rows
+//! one at a time in reverse manifest order. Every row comes after the rows it depends on, so
+//! each service stops before anything it needs. Init sends `Stop`, which gives the instance a
+//! stop notice and [`SERVICE_STOP_GRACE_NS`]; it waits for the instance's end and logs
+//! `[INIT] stop <name> ok|timeout|fault service=<id>`: `ok` when it exited by itself,
+//! `timeout` when the kernel (or, as a fallback, init) terminated it at the deadline, `fault`
+//! when it crashed. A crash of any service during the stop is not restarted. After the last row
+//! init logs `[INIT] system stopped` and waits with no deadline; powering off is #372's.
 
 use core::fmt::{self, Write};
 
-use clean_slate_native_abi::launcher::{AppEntry, AppName, AppState, StartResult};
+use clean_slate_native_abi::launcher::{AppEntry, AppName, AppState, StartResult, StopResult};
+use clean_slate_native_abi::service_stop::{SERVICE_STOP_GRACE_NS, STOP_EXIT_STATUS_DEADLINE};
 use clean_slate_service_fixtures::manifest::{RestartSpec, ServiceSpec, Start};
 use clean_slate_service_lifecycle::{
-    ticks_add, ticks_reached, DependencyEdge, DependencyMetadata, LivenessConfig, MonotonicTicks,
-    ProcessId, ServiceId, ServiceLifecycleState,
+    ticks_add, ticks_reached, DependencyEdge, DependencyMetadata, LifecycleEventKind,
+    LivenessConfig, MonotonicTicks, ProcessId, ServiceId, ServiceLifecycleState,
 };
 
 use crate::control::LifecycleControl;
@@ -32,6 +43,11 @@ pub const INIT_READY_TIMEOUT_NS: u64 = 10_000_000_000;
 /// be declared unhealthy, and restarted, once the period passed without a report. `ticks_add`
 /// saturates, so this deadline is never reached.
 const LIVENESS_OFF: LivenessConfig = LivenessConfig::new(u64::MAX);
+
+/// How long after the kernel's stop deadline init terminates a stopping instance itself. The
+/// kernel ends it at its deadline on init's next `LIFECYCLE_WAIT`, so this only matters if
+/// that did not happen.
+pub const INIT_STOP_SLACK_NS: u64 = 250_000_000;
 
 /// Messages handled per wake at most, so one wake cannot turn into a loop.
 const MAX_EVENTS_PER_WAKE: usize = 16;
@@ -82,11 +98,55 @@ struct ServiceSlot {
     announced_ready_generation: u32,
 }
 
+/// How a stopped row's instance ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopOutcome {
+    /// It exited by itself after the notice.
+    Ok,
+    /// It was terminated at the deadline.
+    Timeout,
+    /// It crashed.
+    Fault,
+}
+
+impl StopOutcome {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Timeout => "timeout",
+            Self::Fault => "fault",
+        }
+    }
+}
+
+/// The row init is stopping.
+#[derive(Clone, Copy, Debug)]
+struct Stopping {
+    index: usize,
+    /// When init terminates the instance itself if it is still live.
+    deadline: MonotonicTicks,
+    /// The instance's end, as its lifecycle message reported it.
+    ended: Option<StopOutcome>,
+    /// Init terminated it after the deadline.
+    forced: bool,
+}
+
+/// #373: a system stop under way.
+#[derive(Clone, Copy, Debug)]
+struct SystemStop {
+    current: Option<Stopping>,
+    /// Rows at this index and above have been dealt with; the next is looked for below it.
+    below: usize,
+    stopped: usize,
+    finished: bool,
+}
+
 pub struct SystemInit<C, D, const N: usize> {
     supervisor: ConvergedSupervisor<C, D, N>,
     slots: [Option<ServiceSlot>; N],
     ready_timeout_ns: u64,
     settled_announced: bool,
+    system_stop: Option<SystemStop>,
 }
 
 impl<C, D, const N: usize> SystemInit<C, D, N>
@@ -114,6 +174,7 @@ where
             slots: [None; N],
             ready_timeout_ns,
             settled_announced: false,
+            system_stop: None,
         };
         init.emit(format_args!(
             "[INIT] started pid={self_pid} services={}",
@@ -161,6 +222,14 @@ where
     /// Handles that service's messages, runs retries that are due, enforces ready deadlines and
     /// starts rows whose dependencies became ready.
     pub fn on_wake(&mut self, now: MonotonicTicks, pending: Option<ServiceId>) {
+        if self.system_stop.is_some() {
+            let _ = self.supervisor.advance_ticks(now);
+            if let Some(service) = pending {
+                self.handle_messages(service, now);
+            }
+            self.advance_system_stop(now);
+            return;
+        }
         if self.supervisor.advance_ticks(now).is_err() {
             self.give_up_on_due_retries(now);
         }
@@ -175,6 +244,12 @@ where
     /// When init must wake without a message: the earliest ready deadline or due retry. `None`
     /// once every service is running or given up.
     pub fn next_deadline(&self) -> Option<MonotonicTicks> {
+        if let Some(stop) = self.system_stop {
+            return stop
+                .current
+                .filter(|stopping| !stopping.forced)
+                .map(|stopping| stopping.deadline);
+        }
         let mut earliest: Option<MonotonicTicks> = None;
         let mut consider = |deadline: MonotonicTicks| {
             earliest = Some(earliest.map_or(deadline, |current| current.min(deadline)));
@@ -209,6 +284,7 @@ where
                     return;
                 }
             };
+            self.note_stop_outcome(service, event.kind, event.status_code);
             // A message for a service init does not run is consumed so it cannot wake init
             // again; there is nothing to apply it to.
             if known && self.supervisor.handle_lifecycle_event(event).is_err() {
@@ -457,6 +533,25 @@ where
     /// on-request row with no instance) and every row it depends on is running. Returns the
     /// answer and the row's service id (0 when no row has that name).
     pub fn launch(&mut self, now: MonotonicTicks, name: &[u8]) -> (StartResult, u32) {
+        if self.system_stop.is_some() {
+            let service = self
+                .slots
+                .iter()
+                .flatten()
+                .find(|slot| {
+                    slot.spec
+                        .launch_name
+                        .is_some_and(|own| own.as_bytes() == name)
+                })
+                .map_or(0, |slot| slot.spec.id.0);
+            if service == 0 {
+                return (StartResult::UnknownName, 0);
+            }
+            let _ = self.emit(format_args!(
+                "[INIT] launch service={service} result=refused: system stopping"
+            ));
+            return (StartResult::Refused, service);
+        }
         let Some(index) = self.slots.iter().position(|slot| {
             slot.is_some_and(|slot| {
                 slot.spec
@@ -556,6 +651,254 @@ where
             ServiceLifecycleState::Exited
             | ServiceLifecycleState::Faulted
             | ServiceLifecycleState::RestartPending => AppState::Restarting,
+        }
+    }
+
+    /// #373: whether a system stop has been asked for.
+    pub fn system_stopping(&self) -> bool {
+        self.system_stop.is_some()
+    }
+
+    /// #373: whether every row a system stop had to stop is down.
+    pub fn system_stopped(&self) -> bool {
+        self.system_stop.is_some_and(|stop| stop.finished)
+    }
+
+    /// #373: stops the system, once. From here on no restart policy fires and no row starts;
+    /// the running rows are stopped in reverse manifest order, one at a time.
+    pub fn request_system_stop(&mut self, now: MonotonicTicks) -> StopResult {
+        if self.system_stop.is_some() {
+            let _ = self.emit(format_args!(
+                "[INIT] system stop requested again; already stopping"
+            ));
+            return StopResult::AlreadyStopping;
+        }
+        self.supervisor.suspend_restarts();
+        let live = (0..N).filter(|index| self.stoppable(*index)).count();
+        self.system_stop = Some(SystemStop {
+            current: None,
+            below: N,
+            stopped: 0,
+            finished: false,
+        });
+        let _ = self.emit(format_args!(
+            "[INIT] system stop requested; stopping {live} services, last first"
+        ));
+        self.advance_system_stop(now);
+        StopResult::Accepted
+    }
+
+    /// #373: a `SYSTEM_STOP` from a client without `LAUNCH_POWER`. Nothing changes.
+    pub fn refuse_system_stop(&mut self) {
+        let _ = self.emit(format_args!(
+            "[INIT] system stop refused: the client does not hold launch_power"
+        ));
+    }
+
+    /// Whether row `index` has an instance a system stop must end.
+    fn stoppable(&self, index: usize) -> bool {
+        let Some(slot) = self.slots[index] else {
+            return false;
+        };
+        slot.progress == Progress::Started
+            && self
+                .supervisor
+                .registry()
+                .query(slot.spec.id)
+                .is_some_and(|snapshot| {
+                    matches!(
+                        snapshot.state,
+                        ServiceLifecycleState::Starting
+                            | ServiceLifecycleState::Running
+                            | ServiceLifecycleState::Stopping
+                    )
+                })
+    }
+
+    /// Records how the instance being stopped ended, from its lifecycle message.
+    fn note_stop_outcome(&mut self, service: ServiceId, kind: LifecycleEventKind, status: u32) {
+        let Some(stop) = self.system_stop.as_mut() else {
+            return;
+        };
+        let Some(stopping) = stop.current.as_mut() else {
+            return;
+        };
+        let current = self.slots[stopping.index].map(|slot| slot.spec.id);
+        if current != Some(service) || stopping.ended.is_some() {
+            return;
+        }
+        stopping.ended = match kind {
+            LifecycleEventKind::Exited if status == STOP_EXIT_STATUS_DEADLINE => {
+                Some(StopOutcome::Timeout)
+            }
+            LifecycleEventKind::Exited if stopping.forced => Some(StopOutcome::Timeout),
+            LifecycleEventKind::Exited => Some(StopOutcome::Ok),
+            LifecycleEventKind::Faulted => Some(StopOutcome::Fault),
+            _ => None,
+        };
+    }
+
+    /// Moves the system stop on as far as it can without waiting: logs the end of the row being
+    /// stopped, then stops the next running row below it, until one is left to wait for.
+    fn advance_system_stop(&mut self, now: MonotonicTicks) {
+        for _ in 0..=N {
+            let Some(stop) = self.system_stop else {
+                return;
+            };
+            if stop.finished {
+                return;
+            }
+            if let Some(stopping) = stop.current {
+                if !self.finish_stopping(stopping, now) {
+                    return;
+                }
+                continue;
+            }
+            let next = (0..stop.below).rev().find(|index| self.stoppable(*index));
+            let Some(index) = next else {
+                if let Some(stop) = self.system_stop.as_mut() {
+                    stop.finished = true;
+                    stop.below = 0;
+                }
+                let _ = self.emit(format_args!(
+                    "[INIT] system stopped services={}; waiting, no deadline",
+                    stop.stopped
+                ));
+                return;
+            };
+            self.begin_stopping(index, now);
+        }
+    }
+
+    fn begin_stopping(&mut self, index: usize, now: MonotonicTicks) {
+        let Some(slot) = self.slots[index] else {
+            return;
+        };
+        if let Some(stop) = self.system_stop.as_mut() {
+            stop.below = index;
+            stop.current = Some(Stopping {
+                index,
+                deadline: ticks_add(
+                    now,
+                    SERVICE_STOP_GRACE_NS.saturating_add(INIT_STOP_SLACK_NS),
+                ),
+                ended: None,
+                forced: false,
+            });
+        }
+        let service = slot.spec.id;
+        let _ = self.emit(format_args!(
+            "[INIT] stopping {} service={}",
+            slot.spec.name(),
+            service.0
+        ));
+        if self.supervisor.stop(service).is_err() {
+            let _ = self.emit(format_args!(
+                "[INIT] stop {} refused service={}; terminating",
+                slot.spec.name(),
+                service.0
+            ));
+            self.force_stop(index);
+        }
+        // A kernel without a clock ends the instance at once; its message may be queued.
+        self.handle_messages(service, now);
+    }
+
+    /// Init's fallback: the instance outlived its deadline, so terminate it.
+    fn force_stop(&mut self, index: usize) {
+        if let Some(stopping) = self
+            .system_stop
+            .as_mut()
+            .and_then(|stop| stop.current.as_mut())
+            .filter(|stopping| stopping.index == index)
+        {
+            stopping.forced = true;
+        }
+        let Some(slot) = self.slots[index] else {
+            return;
+        };
+        if self.supervisor.terminate(slot.spec.id).is_err() {
+            let _ = self.emit(format_args!(
+                "[INIT] terminate failed service={}; carrying on",
+                slot.spec.id.0
+            ));
+        }
+    }
+
+    /// Handles the row being stopped. Returns whether it is done with, so the next row can go.
+    fn finish_stopping(&mut self, stopping: Stopping, now: MonotonicTicks) -> bool {
+        let Some(slot) = self.slots[stopping.index] else {
+            return true;
+        };
+        let state = self
+            .supervisor
+            .registry()
+            .query(slot.spec.id)
+            .map(|snapshot| snapshot.state);
+        let ended = matches!(
+            state,
+            None | Some(ServiceLifecycleState::Exited)
+                | Some(ServiceLifecycleState::Faulted)
+                | Some(ServiceLifecycleState::Declared)
+        );
+        if !ended {
+            if stopping.forced || !ticks_reached(now, stopping.deadline) {
+                return false;
+            }
+            let _ = self.emit(format_args!(
+                "[INIT] service={} still live after its stop deadline; terminating",
+                slot.spec.id.0
+            ));
+            self.force_stop(stopping.index);
+            let still_live =
+                self.supervisor
+                    .registry()
+                    .query(slot.spec.id)
+                    .is_some_and(|snapshot| {
+                        !matches!(
+                            snapshot.state,
+                            ServiceLifecycleState::Exited | ServiceLifecycleState::Faulted
+                        )
+                    });
+            if still_live {
+                // Nothing more init can do for it; do not hold up the rest.
+                let _ = self.emit(format_args!(
+                    "[INIT] stop {} timeout service={}; left behind",
+                    slot.spec.name(),
+                    slot.spec.id.0
+                ));
+                self.end_current();
+                return true;
+            }
+        }
+        let outcome = self
+            .system_stop
+            .and_then(|stop| stop.current)
+            .and_then(|current| {
+                current.ended.or(if current.forced {
+                    Some(StopOutcome::Timeout)
+                } else {
+                    None
+                })
+            })
+            .unwrap_or(match state {
+                Some(ServiceLifecycleState::Faulted) => StopOutcome::Fault,
+                _ => StopOutcome::Ok,
+            });
+        let _ = self.emit(format_args!(
+            "[INIT] stop {} {} service={}",
+            slot.spec.name(),
+            outcome.name(),
+            slot.spec.id.0
+        ));
+        self.end_current();
+        true
+    }
+
+    fn end_current(&mut self) {
+        if let Some(stop) = self.system_stop.as_mut() {
+            stop.current = None;
+            stop.stopped += 1;
         }
     }
 
@@ -1693,6 +2036,293 @@ pub(crate) mod tests {
         ] {
             assert_eq!(harness.starts_of(service), 1);
             assert_eq!(harness.state(service), ServiceLifecycleState::Running);
+        }
+    }
+
+    /// #373 system stop.
+    mod system_stop {
+        use super::*;
+        use clean_slate_native_abi::service_stop::{
+            SERVICE_STOP_GRACE_NS, STOP_EXIT_STATUS_DEADLINE,
+        };
+        use clean_slate_service_fixtures::{
+            COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
+        };
+
+        /// The desktop rows, last first.
+        const REVERSE_DESKTOP: [ServiceId; 8] = [
+            PLAYGROUND_SERVICE_ID,
+            DESKTOP_SHELL_SERVICE_ID,
+            COMPOSITOR_SERVICE_ID,
+            AUDIT_SERVICE_ID,
+            SYSTEM_SHELL_SERVICE_ID,
+            CONSOLE_SERVICE_ID,
+            NETWORK_SERVICE_ID,
+            STORAGE_SERVICE_ID,
+        ];
+
+        const STOP_AT: u64 = 100 * SECOND;
+
+        impl Harness {
+            /// The control requests of `kind` since request `from`.
+            fn requests_since(&self, from: usize, kind: ControlRequestKind) -> Vec<ServiceId> {
+                self.requests()[from..]
+                    .iter()
+                    .filter(|(_, issued)| *issued == kind)
+                    .map(|(service, _)| *service)
+                    .collect()
+            }
+
+            /// The live instance of `service` ends with `kind` and `status`.
+            fn end_with(
+                &mut self,
+                now: u64,
+                service: ServiceId,
+                kind: LifecycleEventKind,
+                status: u32,
+            ) {
+                {
+                    let mut model = self.kernel.0.borrow_mut();
+                    let mut event = LifecycleEvent::new(model.instance(service), kind);
+                    event.status_code = status;
+                    model.fake.push_pending(event).expect("queue event");
+                }
+                self.init.on_wake(now, Some(service));
+            }
+
+            fn stop_lines(&self) -> Vec<String> {
+                self.lines_with("[INIT] stop ")
+            }
+        }
+
+        #[test]
+        fn services_stop_one_at_a_time_last_started_first() {
+            let mut harness = Harness::boot_desktop_settled();
+            let from = harness.requests().len();
+            assert_eq!(
+                harness.init.request_system_stop(STOP_AT),
+                StopResult::Accepted
+            );
+            assert_eq!(
+                harness.lines_with("[INIT] system stop requested"),
+                ["[INIT] system stop requested; stopping 8 services, last first"]
+            );
+            for (step, service) in REVERSE_DESKTOP.iter().enumerate() {
+                // Init waits for each service before it asks the next one.
+                assert_eq!(
+                    harness.requests_since(from, ControlRequestKind::Stop),
+                    REVERSE_DESKTOP[..=step],
+                    "step {step}"
+                );
+                assert_eq!(
+                    harness.init.next_deadline(),
+                    Some(
+                        STOP_AT + step as u64 * SECOND + SERVICE_STOP_GRACE_NS + INIT_STOP_SLACK_NS
+                    )
+                );
+                harness.end_with(
+                    STOP_AT + (step as u64 + 1) * SECOND,
+                    *service,
+                    LifecycleEventKind::Exited,
+                    0,
+                );
+            }
+            let expected: Vec<String> = REVERSE_DESKTOP
+                .iter()
+                .map(|service| {
+                    let spec = clean_slate_service_fixtures::manifest::SYSTEM_DESKTOP_MANIFEST
+                        .iter()
+                        .find(|spec| spec.id == *service)
+                        .unwrap();
+                    std::format!("[INIT] stop {} ok service={}", spec.name(), service.0)
+                })
+                .collect();
+            assert_eq!(harness.stop_lines(), expected);
+            assert_eq!(
+                expected[0],
+                std::format!(
+                    "[INIT] stop playground ok service={}",
+                    PLAYGROUND_SERVICE_ID.0
+                )
+            );
+            assert_eq!(
+                harness.lines_with("[INIT] system stopped"),
+                ["[INIT] system stopped services=8; waiting, no deadline"]
+            );
+            assert!(harness.init.system_stopped());
+            assert_eq!(harness.init.next_deadline(), None);
+            // Nothing was terminated, started or restarted.
+            assert!(harness
+                .requests_since(from, ControlRequestKind::Terminate)
+                .is_empty());
+            assert!(harness
+                .requests_since(from, ControlRequestKind::Start)
+                .is_empty());
+            harness.run_until(STOP_AT + 600 * SECOND);
+            assert!(harness
+                .requests_since(from, ControlRequestKind::Start)
+                .is_empty());
+        }
+
+        #[test]
+        fn a_service_that_ignores_the_notice_is_logged_as_a_timeout() {
+            let mut harness = Harness::boot_desktop_settled();
+            harness.init.request_system_stop(STOP_AT);
+            // The kernel ended the playground at its deadline.
+            let deadline = harness.init.next_deadline().expect("a stop deadline");
+            harness.end_with(
+                deadline - INIT_STOP_SLACK_NS,
+                PLAYGROUND_SERVICE_ID,
+                LifecycleEventKind::Exited,
+                STOP_EXIT_STATUS_DEADLINE,
+            );
+            assert_eq!(
+                harness.stop_lines(),
+                [std::format!(
+                    "[INIT] stop playground timeout service={}",
+                    PLAYGROUND_SERVICE_ID.0
+                )]
+            );
+            // If the kernel did not end the desktop shell, init terminates it at its own deadline.
+            let from = harness.requests().len();
+            let deadline = harness.init.next_deadline().expect("a stop deadline");
+            harness.init.on_wake(deadline - 1, None);
+            assert!(harness
+                .requests_since(from, ControlRequestKind::Terminate)
+                .is_empty());
+            harness.init.on_wake(deadline, None);
+            assert_eq!(
+                harness.requests_since(from, ControlRequestKind::Terminate),
+                [DESKTOP_SHELL_SERVICE_ID]
+            );
+            assert_eq!(
+                harness.stop_lines()[1],
+                std::format!(
+                    "[INIT] stop desktop-shell timeout service={}",
+                    DESKTOP_SHELL_SERVICE_ID.0
+                )
+            );
+            // The stop carried on with the compositor.
+            assert_eq!(
+                harness.requests_since(from, ControlRequestKind::Stop),
+                [COMPOSITOR_SERVICE_ID]
+            );
+        }
+
+        #[test]
+        fn a_crash_during_the_system_stop_is_not_restarted() {
+            let mut harness = Harness::boot_desktop_settled();
+            let from = harness.requests().len();
+            harness.init.request_system_stop(STOP_AT);
+            // The playground crashes while it finishes; storage crashes before its turn.
+            harness.end_with(
+                STOP_AT + 1,
+                PLAYGROUND_SERVICE_ID,
+                LifecycleEventKind::Faulted,
+                0,
+            );
+            harness.end_with(
+                STOP_AT + 2,
+                STORAGE_SERVICE_ID,
+                LifecycleEventKind::Faulted,
+                0,
+            );
+            assert_eq!(
+                harness.stop_lines(),
+                [std::format!(
+                    "[INIT] stop playground fault service={}",
+                    PLAYGROUND_SERVICE_ID.0
+                )]
+            );
+            for service in &REVERSE_DESKTOP[1..7] {
+                harness.end_with(STOP_AT + 3, *service, LifecycleEventKind::Exited, 0);
+            }
+            // Storage had already gone, so there was nothing left to stop.
+            assert_eq!(
+                harness.requests_since(from, ControlRequestKind::Stop),
+                REVERSE_DESKTOP[..7]
+            );
+            assert_eq!(harness.stop_lines().len(), 7);
+            assert!(harness.init.system_stopped());
+            harness.run_until(STOP_AT + 600 * SECOND);
+            assert!(harness
+                .requests_since(from, ControlRequestKind::Start)
+                .is_empty());
+            assert!(harness
+                .requests_since(from, ControlRequestKind::Restart)
+                .is_empty());
+        }
+
+        #[test]
+        fn a_second_request_and_launches_during_the_stop_are_refused() {
+            let mut harness = Harness::boot_desktop_settled();
+            assert_eq!(
+                harness.init.request_system_stop(STOP_AT),
+                StopResult::Accepted
+            );
+            assert_eq!(
+                harness.init.request_system_stop(STOP_AT + 1),
+                StopResult::AlreadyStopping
+            );
+            harness.end_with(
+                STOP_AT + 2,
+                PLAYGROUND_SERVICE_ID,
+                LifecycleEventKind::Exited,
+                0,
+            );
+            let from = harness.requests().len();
+            assert_eq!(
+                harness.init.launch(STOP_AT + 3, b"playground"),
+                (StartResult::Refused, PLAYGROUND_SERVICE_ID.0)
+            );
+            assert_eq!(
+                harness.init.launch(STOP_AT + 3, b"nope"),
+                (StartResult::UnknownName, 0)
+            );
+            assert!(harness
+                .requests_since(from, ControlRequestKind::Start)
+                .is_empty());
+        }
+
+        #[test]
+        fn a_service_still_starting_is_stopped_too_and_idle_rows_are_skipped() {
+            // Storage never reports ready, so only storage and the console service run.
+            let mut harness = Harness::boot_manifest_unready(SYSTEM_MANIFEST);
+            harness.report(0, CONSOLE_SERVICE_ID, LifecycleEventKind::Ready);
+            let from = harness.requests().len();
+            assert_eq!(
+                harness.init.request_system_stop(SECOND),
+                StopResult::Accepted
+            );
+            assert_eq!(
+                harness.lines_with("[INIT] system stop requested"),
+                ["[INIT] system stop requested; stopping 2 services, last first"]
+            );
+            harness.end_with(
+                2 * SECOND,
+                CONSOLE_SERVICE_ID,
+                LifecycleEventKind::Exited,
+                0,
+            );
+            harness.end_with(
+                3 * SECOND,
+                STORAGE_SERVICE_ID,
+                LifecycleEventKind::Exited,
+                0,
+            );
+            assert_eq!(
+                harness.requests_since(from, ControlRequestKind::Stop),
+                [CONSOLE_SERVICE_ID, STORAGE_SERVICE_ID]
+            );
+            assert!(harness.init.system_stopped());
+            // Its ready deadline passing changes nothing now.
+            harness.run_until(60 * SECOND);
+            assert!(harness
+                .requests_since(from, ControlRequestKind::Start)
+                .is_empty());
+            assert!(harness
+                .requests_since(from, ControlRequestKind::Terminate)
+                .is_empty());
         }
     }
 }

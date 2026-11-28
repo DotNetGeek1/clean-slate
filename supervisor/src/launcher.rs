@@ -1,10 +1,13 @@
 //! #237 init's side of the launcher port: answers `LIST` and `START` from [`SystemInit`] and
-//! tells every connected client when a listed row's state or instance changes.
+//! tells every connected client when a listed row's state or instance changes. #373: a
+//! `SYSTEM_STOP` from a connection whose capability holds `LAUNCH_POWER` (the kernel's trusted
+//! envelope says which rights it holds) starts init's system stop.
 //!
 //! Host-testable: the port is behind [`LauncherPort`]; `bin/init.rs` implements it with
 //! syscall 17 `POST` and `DISCONNECT` on init's `LAUNCH_SERVE` handle.
 
-use clean_slate_native_abi::launcher::{AppEntry, LauncherEvent, LauncherRequest};
+use clean_slate_capability::Rights;
+use clean_slate_native_abi::launcher::{AppEntry, LauncherEvent, LauncherRequest, StopResult};
 use clean_slate_native_abi::port::PORT_FRAME_BYTES;
 use clean_slate_native_abi::RecvKind;
 use clean_slate_service_lifecycle::MonotonicTicks;
@@ -56,7 +59,9 @@ impl Launcher {
     }
 
     /// One received record. A request from a connection not seen before adds it; a malformed
-    /// request, or one the launcher cannot answer in full, ends that connection.
+    /// request, or one the launcher cannot answer in full, ends that connection. `rights` are
+    /// the bits of the client's capability from the record's trusted envelope.
+    #[allow(clippy::too_many_arguments)]
     pub fn on_record<C, D, P, const N: usize>(
         &mut self,
         init: &mut SystemInit<C, D, N>,
@@ -64,6 +69,7 @@ impl Launcher {
         now: MonotonicTicks,
         kind: RecvKind,
         connection: u64,
+        rights: u32,
         frame: &Frame,
     ) where
         C: LifecycleControl,
@@ -91,6 +97,15 @@ impl Launcher {
                         posted.and(port.post(connection, &LauncherEvent::Entry(entry).encode()));
                 }
                 posted.and(port.post(connection, &LauncherEvent::ListEnd { count }.encode()))
+            }
+            Ok(LauncherRequest::SystemStop) => {
+                let result = if rights & Rights::LAUNCH_POWER.bits() != 0 {
+                    init.request_system_stop(now)
+                } else {
+                    init.refuse_system_stop();
+                    StopResult::Refused
+                };
+                port.post(connection, &LauncherEvent::StopResult(result).encode())
             }
             Ok(LauncherRequest::Start(name)) => {
                 let (result, service) = init.launch(now, name.as_bytes());
@@ -231,6 +246,7 @@ mod tests {
                 1,
                 RecvKind::Request,
                 connection,
+                Rights::LAUNCH_CONNECT.bits(),
                 &request.encode(),
             );
         }
@@ -417,6 +433,7 @@ mod tests {
             1,
             RecvKind::Request,
             7,
+            Rights::LAUNCH_CONNECT.bits(),
             &bad,
         );
         assert_eq!(rig.port.disconnected, [7]);
@@ -436,6 +453,7 @@ mod tests {
             1,
             RecvKind::ClientClosed,
             10,
+            0,
             &[0; PORT_FRAME_BYTES],
         );
         assert_eq!(rig.launcher.client_count(), LAUNCHER_CLIENTS - 1);
@@ -451,5 +469,38 @@ mod tests {
         rig.publish();
         assert_eq!(rig.port.disconnected, [7]);
         assert_eq!(rig.changes(), [(8, AppState::Starting, 102)]);
+    }
+
+    #[test]
+    fn a_system_stop_needs_launch_power() {
+        let mut rig = Rig::new(ON_REQUEST);
+        rig.request(7, LauncherRequest::SystemStop);
+        assert_eq!(
+            rig.port.posted,
+            [(7, LauncherEvent::StopResult(StopResult::Refused))]
+        );
+        assert!(!rig.harness.init.system_stopping());
+        assert!(rig.port.disconnected.is_empty());
+        assert_eq!(
+            rig.harness
+                .lines_with("[INIT] system stop refused: the client does not hold launch_power")
+                .len(),
+            1
+        );
+        rig.port.posted.clear();
+        let power = Rights::LAUNCH_CONNECT.union(Rights::LAUNCH_POWER).bits();
+        for expected in [StopResult::Accepted, StopResult::AlreadyStopping] {
+            rig.launcher.on_record(
+                &mut rig.harness.init,
+                &mut rig.port,
+                1,
+                RecvKind::Request,
+                8,
+                power,
+                &LauncherRequest::SystemStop.encode(),
+            );
+            assert_eq!(rig.last(), LauncherEvent::StopResult(expected));
+        }
+        assert!(rig.harness.init.system_stopping());
     }
 }
