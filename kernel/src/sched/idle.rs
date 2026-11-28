@@ -162,7 +162,7 @@ pub(crate) fn handoff_to_idle_thread() -> Result<u64, &'static str> {
     ensure_idle_thread_configured()?;
     let scheduler = unsafe { scheduler_mut() };
     let idle = IDLE_THREAD_INDEX;
-    scheduler.current_thread = Some(idle);
+    scheduler.set_current(Some(idle));
     scheduler.threads[idle].state = ThreadState::Running;
     scheduler.threads[idle].started = true;
     // Always bootstrap a clean idle stack. Reusing `saved_stack_pointer` here would

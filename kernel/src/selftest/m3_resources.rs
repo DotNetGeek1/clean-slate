@@ -36,6 +36,9 @@ use crate::process::domain::ResourceSnapshot;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
+use crate::process::usage::cpu_totals;
+use crate::process::usage::process_usage;
+use crate::process::usage::KERNEL_STACK_PAGES_PER_THREAD;
 use crate::process::Process;
 use crate::process::ProcessState;
 use crate::process::ResourceDomain;
@@ -338,10 +341,52 @@ fn log_resource_snapshot(process_id: u64, snapshot: ResourceSnapshot) {
     ));
 }
 
+/// #377: the usage counters agree with the resource snapshot, and run time adds up.
+fn verify_live_usage(process_id: u64, snapshot: ResourceSnapshot) -> Result<(), &'static str> {
+    let usage = process_usage(process_id)?;
+    if usage.private_pages != snapshot.user_pages || usage.shared_pages != 0 {
+        return Err("resources-test usage pages diverged from the resource snapshot");
+    }
+    let expected_kernel_pages =
+        snapshot.page_table_frames + snapshot.kernel_stacks * KERNEL_STACK_PAGES_PER_THREAD;
+    if usage.kernel_pages != expected_kernel_pages {
+        return Err("resources-test usage kernel pages diverged from the resource snapshot");
+    }
+    if usage.cpu_ticks == 0 {
+        return Err("resources-test process reached its rendezvous with no run time charged");
+    }
+    verify_cpu_totals_add_up()?;
+    kernel_log_fmt(format_args!(
+        "[RES ] usage pid={} cpu_ticks={} private={} shared={} kernel={}\n",
+        process_id, usage.cpu_ticks, usage.private_pages, usage.shared_pages, usage.kernel_pages
+    ));
+    Ok(())
+}
+
+fn verify_cpu_totals_add_up() -> Result<(), &'static str> {
+    let totals = cpu_totals();
+    let charged = totals
+        .busy_ticks()
+        .saturating_add(totals.idle_ticks)
+        .saturating_add(totals.unattributed_ticks);
+    if charged != totals.elapsed_ticks {
+        return Err("scheduler run time did not add up to elapsed time");
+    }
+    Ok(())
+}
+
 fn verify_process_cleanup(process: UserspaceResourceProcess) -> Result<(), &'static str> {
     if unsafe { process_registry_mut().get(process.process_id) }.is_some() {
         return Err("process registry still retained a released resources-test process");
     }
+    if process_usage(process.process_id).is_ok()
+        || without_interrupts(|| unsafe {
+            scheduler_mut().cpu_ticks_for_process(process.process_id)
+        }) != 0
+    {
+        return Err("released resources-test process still had usage counted");
+    }
+    verify_cpu_totals_add_up()?;
     let thread_resources: ThreadProcessResources =
         without_interrupts(|| unsafe { scheduler_mut().resources_for_process(process.process_id) });
     if thread_resources != ThreadProcessResources::default() {
@@ -544,6 +589,7 @@ pub(crate) fn handle_userspace_resource_entry(
         return Err("resources-test live snapshot missed owned resources");
     }
     log_resource_snapshot(process.process_id, snapshot);
+    verify_live_usage(process.process_id, snapshot)?;
 
     match state.stage {
         ResourceScenarioStage::NormalExit => {
