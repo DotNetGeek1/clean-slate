@@ -5,7 +5,9 @@
 //! stream, makes the same request as a TLS exchange, sends a datagram to the UDP echo and reads
 //! it back, and finally connects to [`NET_PROBE_DENIED`], which its row's policy does not name.
 //! That connect must be refused (`EACCES`); the probe then asks the kernel to check that the
-//! refusal is in the audit log.
+//! refusal is in the audit log. Last (#378) it reads the service's per-app counters and checks
+//! its own row against what it did ([`NET_PROBE_EXPECTED_STATS`]), reporting the row to the
+//! kernel.
 //!
 //! In the listen lane (#359, `test-m10-net-listen`) the kernel answers the mode check with
 //! [`NET_PROBE_MODE_LISTEN`] and [`run`] runs the listen steps instead: it listens on
@@ -16,7 +18,9 @@
 #![cfg_attr(not(test), no_std)]
 
 use clean_slate_native_abi::status::STATUS_EACCES;
-use clean_slate_runtime::net::{resolve, tls_exchange, NetAddr, TcpListener, TcpStream, UdpSocket};
+use clean_slate_runtime::net::{
+    app_stats, resolve, tls_exchange, NetAddr, TcpListener, TcpStream, UdpSocket,
+};
 use clean_slate_runtime::port::{now, Deadline};
 use clean_slate_runtime::{Error, Syscalls};
 use clean_slate_service_fixtures::net_probe::{
@@ -25,6 +29,9 @@ use clean_slate_service_fixtures::net_probe::{
     NET_PROBE_DENIED, NET_PROBE_ECHO, NET_PROBE_HOSTNAME, NET_PROBE_LISTEN_DENIED_PORT,
     NET_PROBE_LISTEN_PORT, NET_PROBE_MODE_LISTEN, NET_PROBE_PAGE, NET_PROBE_REQUEST,
     NET_PROBE_TCP_PORT, NET_PROBE_TLS_PORT, NET_PROBE_UDP_PORT, NET_PROBE_WRONG_ANSWER,
+};
+use clean_slate_service_fixtures::net_probe::{
+    NetProbeStats, NET_PROBE_CHECK_STATS, NET_PROBE_EXPECTED_STATS, NET_PROBE_SERVICE_ID,
 };
 
 /// Each step's bound. The fixture answers within milliseconds; a TLS exchange is bounded by
@@ -129,6 +136,25 @@ fn run_client<S: Syscalls>(
         }
     }
     check(sys, NET_PROBE_CHECK_REFUSED, 0);
+
+    let deadline = step_deadline(sys, &mut check, NetProbeStep::Stats, STEP_BUDGET_NS)?;
+    let stats = app_stats(sys, deadline).map_err(|error| failed(NetProbeStep::Stats, error))?;
+    let Some(own) = stats.app(u64::from(NET_PROBE_SERVICE_ID.0)) else {
+        return Err(wrong(NetProbeStep::Stats));
+    };
+    let narrow = |count: u32| u8::try_from(count).unwrap_or(u8::MAX);
+    let seen = NetProbeStats {
+        bytes_sent: u16::try_from(own.bytes_sent).unwrap_or(u16::MAX),
+        bytes_received: u16::try_from(own.bytes_received).unwrap_or(u16::MAX),
+        connections: narrow(own.connections),
+        listeners: narrow(own.listeners),
+        refusals: narrow(own.refusals),
+        dns_lookups: narrow(own.dns_lookups),
+    };
+    check(sys, NET_PROBE_CHECK_STATS, seen.encode());
+    if seen != NET_PROBE_EXPECTED_STATS || own.processes != 1 {
+        return Err(wrong(NetProbeStep::Stats));
+    }
     Ok(())
 }
 

@@ -5758,7 +5758,7 @@ fn print_help() {
         "  test-m10-net-listen  #359 native TCP listen: listen/accept host tests, then one m10-net-listen-self-test QEMU boot on restricted slirp with a hostfwd to the native probe: it listens on port 7000, is refused port 7001 with the refusal audited, and the host connects in and gets its bytes echoed back; prints [M10.net] listen lane PASS (aliases: m10-net-listen, m10.359)"
     );
     println!(
-        "  test-m10-net  #353 native network client: network client host tests, then one m10-net-client-self-test QEMU boot against the M7 fixture peer: a native app with only the NativeNetworkClient grant resolves a name, fetches a page over TCP and over TLS, makes a UDP round trip, and is refused a destination its policy does not name, with the refusal in the audit log; prints [M10.net] lane PASS (aliases: m10-net, m10.353)"
+        "  test-m10-net  #353 native network client: network client host tests, then one m10-net-client-self-test QEMU boot against the M7 fixture peer: a native app with only the NativeNetworkClient grant resolves a name, fetches a page over TCP and over TLS, makes a UDP round trip, and is refused a destination its policy does not name, with the refusal in the audit log, then checks its own per-app network counters (#378); prints [M10.net] lane PASS (aliases: m10-net, m10.353)"
     );
     println!(
         "  test-net-acceptance  #355 network acceptance: the M7.8 converged lane on QEMU slirp (restrict=on, DHCP) with a lane-generated CA as the only trust anchor; DNS over TCP and two HTTPS fetches through loopback guestfwd, wall-clock certificate time, no M7 test CA in the image, no network::fixture in the net service; prints [NET ] test-net-acceptance PASS (alias: net-acceptance)"

@@ -25,6 +25,8 @@ pub enum NetworkOp {
     Listen,
     /// Take a connection from a session that listens (#359).
     Accept,
+    /// Read the per-app counters (#378). The kernel admits it only on `NET_STATS`.
+    Stats,
     RawDevice,
 }
 
@@ -231,6 +233,7 @@ where
             NetworkRequest::Close { .. } => NetworkOp::Close,
             NetworkRequest::Listen { .. } => NetworkOp::Listen,
             NetworkRequest::Accept { .. } => NetworkOp::Accept,
+            NetworkRequest::Stats { .. } => NetworkOp::Stats,
         }
     }
 
@@ -532,6 +535,8 @@ where
                     Err(response) => (response, 0),
                 }
             }
+            // The network image keeps the counters and answers (#378).
+            NetworkRequest::Stats { .. } => (Self::error_response(NetworkError::InvalidRequest), 0),
             // Only stream sessions listen; the network image serves them (#359).
             NetworkRequest::Listen { session, .. } | NetworkRequest::Accept { session } => {
                 match self.validate_session(&caller, session) {

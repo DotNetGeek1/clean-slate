@@ -304,3 +304,49 @@ fn closing_a_listener_with_an_accept_outstanding_cancels_it() {
     assert_eq!(sys.net_outstanding_requests(), 0);
     assert_eq!(sys.net_open_sessions(), 0);
 }
+
+#[test]
+fn app_stats_needs_the_stats_right() {
+    let mut sys = kernel();
+    assert_eq!(app_stats(&mut sys, SOON), Err(Error::Failed(STATUS_EACCES)));
+    assert_eq!(sys.net_outstanding_requests(), 0);
+}
+
+#[test]
+fn app_stats_reads_every_row() {
+    let mut sys = kernel();
+    let probe = NetAppStats {
+        app: 0x5700,
+        bytes_sent: 87,
+        bytes_received: 89,
+        connections: 3,
+        listeners: 0,
+        refusals: 1,
+        dns_lookups: 1,
+        processes: 1,
+    };
+    let shell = NetAppStats {
+        bytes_sent: 1 << 33,
+        ..NetAppStats::new(0x3000)
+    };
+    sys.net_stats(&[probe, shell], 2);
+    let stats = app_stats(&mut sys, SOON).unwrap();
+    assert_eq!(stats.rows(), [probe, shell]);
+    assert_eq!(stats.app(0x5700), Some(probe));
+    assert_eq!(stats.app(0x5701), None);
+    assert_eq!(stats.untracked(), 2);
+    assert!(stats.complete());
+    assert_eq!(sys.net_outstanding_requests(), 0);
+}
+
+#[test]
+fn app_stats_takes_a_full_table() {
+    let mut sys = kernel();
+    let rows: std::vec::Vec<NetAppStats> = (1..=NET_STATS_MAX_APPS as u64)
+        .map(NetAppStats::new)
+        .collect();
+    sys.net_stats(&rows, 0);
+    let stats = app_stats(&mut sys, SOON).unwrap();
+    assert_eq!(stats.rows(), &rows[..]);
+    assert!(stats.complete());
+}

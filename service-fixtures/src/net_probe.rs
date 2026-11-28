@@ -6,7 +6,9 @@
 //! personality, no console. Against the M7 fixture peer it resolves [`NET_PROBE_HOSTNAME`],
 //! fetches a page over a TCP stream, makes a TLS exchange and a UDP round trip, all through the
 //! network service, then connects to [`NET_PROBE_DENIED`], which its policy does not name: the
-//! service refuses it and records the refusal in the audit log, which the kernel checks.
+//! service refuses it and records the refusal in the audit log, which the kernel checks. Last
+//! (#378) it reads the service's per-app counters, which its row's `Grant::NetworkStats` lets it,
+//! and checks its own row matches what it did ([`NET_PROBE_EXPECTED_STATS`]).
 //!
 //! The same probe runs the #359 listen lane (`m10-net-listen-self-test`) when the kernel's
 //! [`NET_PROBE_CHECK_MODE`] answers [`NET_PROBE_MODE_LISTEN`]: it listens on
@@ -30,7 +32,7 @@ pub const NET_PROBE_SPEC: ServiceSpec = ServiceSpec {
     id: NET_PROBE_SERVICE_ID,
     image: ServiceImage::NetProbe,
     mode: 0,
-    grants: &[Grant::NativeNetworkClient],
+    grants: &[Grant::NativeNetworkClient, Grant::NetworkStats],
     restart: RestartSpec::Never,
     depends_on: &[NETWORK_SERVICE_ID],
     slot_allowance: None,
@@ -127,6 +129,57 @@ pub const NET_PROBE_CHECK_LISTENING: u64 = 6;
 /// audit log holds the refusal. The argument is the port.
 pub const NET_PROBE_CHECK_LISTEN_REFUSED: u64 = 7;
 
+/// Lane check: the probe's own counters (#378); the argument is [`NetProbeStats::encode`]. The
+/// kernel logs them.
+pub const NET_PROBE_CHECK_STATS: u64 = 8;
+
+/// The probe's row in the network service's counters, narrowed to what the lane checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetProbeStats {
+    pub bytes_sent: u16,
+    pub bytes_received: u16,
+    pub connections: u8,
+    pub listeners: u8,
+    pub refusals: u8,
+    pub dns_lookups: u8,
+}
+
+impl NetProbeStats {
+    /// Each field in its own bits, low to high, in declaration order. A count past a field's
+    /// width saturates.
+    pub const fn encode(self) -> u64 {
+        (self.bytes_sent as u64)
+            | (self.bytes_received as u64) << 16
+            | (self.connections as u64) << 32
+            | (self.listeners as u64) << 40
+            | (self.refusals as u64) << 48
+            | (self.dns_lookups as u64) << 56
+    }
+
+    pub const fn decode(raw: u64) -> Self {
+        Self {
+            bytes_sent: raw as u16,
+            bytes_received: (raw >> 16) as u16,
+            connections: (raw >> 32) as u8,
+            listeners: (raw >> 40) as u8,
+            refusals: (raw >> 48) as u8,
+            dns_lookups: (raw >> 56) as u8,
+        }
+    }
+}
+
+/// What the client lane's probe has done when it reads its counters: the TCP and TLS requests
+/// and the datagram out, the two pages and the datagram back, three connects (stream, TLS
+/// exchange, datagram), the refused connect, and one lookup that went to the resolver.
+pub const NET_PROBE_EXPECTED_STATS: NetProbeStats = NetProbeStats {
+    bytes_sent: (2 * NET_PROBE_REQUEST.len() + NET_PROBE_DATAGRAM.len()) as u16,
+    bytes_received: (2 * NET_PROBE_PAGE.len() + NET_PROBE_DATAGRAM.len()) as u16,
+    connections: 3,
+    listeners: 0,
+    refusals: 1,
+    dns_lookups: 1,
+};
+
 /// [`NET_PROBE_CHECK_MODE`]'s answer for the listen lane.
 pub const NET_PROBE_MODE_LISTEN: u64 = 1;
 
@@ -148,10 +201,12 @@ pub enum NetProbeStep {
     Accept = 9,
     /// Listen lane: read the host's bytes and send them back.
     Echo = 10,
+    /// Client lane (#378): read the per-app counters and check the probe's own row.
+    Stats = 11,
 }
 
 impl NetProbeStep {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Resolve,
         Self::Connect,
         Self::Fetch,
@@ -162,6 +217,7 @@ impl NetProbeStep {
         Self::ListenDenied,
         Self::Accept,
         Self::Echo,
+        Self::Stats,
     ];
 
     pub const fn code(self) -> u64 {
@@ -191,6 +247,7 @@ impl NetProbeStep {
             Self::ListenDenied => "listen-denied",
             Self::Accept => "accept",
             Self::Echo => "echo",
+            Self::Stats => "stats",
         }
     }
 }
@@ -254,9 +311,29 @@ mod tests {
     }
 
     #[test]
+    fn probe_stats_round_trip() {
+        let stats = NetProbeStats {
+            bytes_sent: u16::MAX,
+            bytes_received: 89,
+            connections: 3,
+            listeners: 255,
+            refusals: 1,
+            dns_lookups: 2,
+        };
+        assert_eq!(NetProbeStats::decode(stats.encode()), stats);
+        assert_eq!(
+            NET_PROBE_EXPECTED_STATS.bytes_sent as usize,
+            2 * NET_PROBE_REQUEST.len() + NET_PROBE_DATAGRAM.len()
+        );
+    }
+
+    #[test]
     fn the_probe_row_is_a_native_network_client_with_nothing_else() {
         assert!(!NET_PROBE_SPEC.image.is_linux());
-        assert_eq!(NET_PROBE_SPEC.grants, [Grant::NativeNetworkClient]);
+        assert_eq!(
+            NET_PROBE_SPEC.grants,
+            [Grant::NativeNetworkClient, Grant::NetworkStats]
+        );
         assert!(NET_PROBE_SPEC.is_network_client());
     }
 

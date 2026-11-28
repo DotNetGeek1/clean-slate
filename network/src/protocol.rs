@@ -67,6 +67,8 @@ pub enum NetworkRequestKind {
     Listen = 7,
     /// Takes the next connection a listener's backlog holds (#359).
     Accept = 8,
+    /// Reads the per-app network counters (#378); needs `NET_STATS`.
+    Stats = 9,
 }
 
 impl NetworkRequestKind {
@@ -80,6 +82,7 @@ impl NetworkRequestKind {
             6 => Some(Self::Close),
             7 => Some(Self::Listen),
             8 => Some(Self::Accept),
+            9 => Some(Self::Stats),
             _ => None,
         }
     }
@@ -119,6 +122,11 @@ pub enum NetworkRequest {
     /// The oldest established connection on listening `session`, as a new stream session.
     Accept {
         session: SessionId,
+    },
+    /// The per-app counters (#378), as many rows as fit `max_len` bytes of the service payload
+    /// region. Rows are `clean_slate_native_abi::net::NetAppStats` encodings.
+    Stats {
+        max_len: u32,
     },
 }
 
@@ -181,14 +189,18 @@ impl NetworkRequest {
                 out[6] = NetworkRequestKind::Accept as u8;
                 out[8..16].copy_from_slice(&session.raw().to_le_bytes());
             }
+            Self::Stats { max_len } => {
+                out[6] = NetworkRequestKind::Stats as u8;
+                out[8..12].copy_from_slice(&max_len.to_le_bytes());
+            }
         }
         out
     }
 
-    /// The session a request acts on; `None` for `Resolve` and `Open`.
+    /// The session a request acts on; `None` for `Resolve`, `Open` and `Stats`.
     pub const fn session(&self) -> Option<SessionId> {
         match *self {
-            Self::Resolve { .. } | Self::Open { .. } => None,
+            Self::Resolve { .. } | Self::Open { .. } | Self::Stats { .. } => None,
             Self::Connect { session, .. }
             | Self::Send { session, .. }
             | Self::Receive { session, .. }
@@ -278,6 +290,13 @@ impl NetworkRequest {
                 ));
                 Ok(Self::Accept { session })
             }
+            NetworkRequestKind::Stats => {
+                let max_len = u32::from_le_bytes(bytes[8..12].try_into().expect("slice"));
+                if max_len as usize > MAX_APPLICATION_PAYLOAD_BYTES {
+                    return Err(NetworkRequestDecodeError::OversizedField);
+                }
+                Ok(Self::Stats { max_len })
+            }
         }
     }
 }
@@ -311,6 +330,14 @@ pub enum NetworkResponse {
     Accept {
         session: SessionId,
         peer: SocketAddrV4,
+    },
+    /// `rows` counter rows are in the payload; the table held `apps` rows (more than `rows`
+    /// when `max_len` was too short), and `untracked` counts requests from apps the full table
+    /// had no row for.
+    Stats {
+        rows: u16,
+        apps: u16,
+        untracked: u32,
     },
     Error {
         code: u16,
@@ -370,6 +397,17 @@ impl NetworkResponse {
                 out[7] = NetworkResponseStatus::Ok as u8;
                 out[8..16].copy_from_slice(&session.raw().to_le_bytes());
                 out[16..22].copy_from_slice(&peer.encode());
+            }
+            Self::Stats {
+                rows,
+                apps,
+                untracked,
+            } => {
+                out[6] = NetworkRequestKind::Stats as u8;
+                out[7] = NetworkResponseStatus::Ok as u8;
+                out[8..10].copy_from_slice(&rows.to_le_bytes());
+                out[10..12].copy_from_slice(&apps.to_le_bytes());
+                out[12..16].copy_from_slice(&untracked.to_le_bytes());
             }
             Self::Error { code } => {
                 out[7] = NetworkResponseStatus::Error as u8;
@@ -436,6 +474,11 @@ impl NetworkResponse {
                             .map_err(|_| NetworkResponseDecodeError::Truncated)?;
                         Ok(Self::Accept { session, peer })
                     }
+                    NetworkRequestKind::Stats => Ok(Self::Stats {
+                        rows: u16::from_le_bytes(bytes[8..10].try_into().expect("slice")),
+                        apps: u16::from_le_bytes(bytes[10..12].try_into().expect("slice")),
+                        untracked: u32::from_le_bytes(bytes[12..16].try_into().expect("slice")),
+                    }),
                 }
             }
             other => Err(NetworkResponseDecodeError::InvalidStatus(other)),

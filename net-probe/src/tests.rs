@@ -1,8 +1,24 @@
 use super::*;
 use clean_slate_runtime::fake::FakeKernel;
+use clean_slate_runtime::net::NetAppStats;
 use clean_slate_service_fixtures::net_probe::{
     NET_PROBE_CHECK_LISTENING, NET_PROBE_CHECK_STEP, NET_PROBE_PEER,
 };
+
+/// The service's row for the probe after the client steps (the fake does not count).
+fn probe_row() -> NetAppStats {
+    let expected = NET_PROBE_EXPECTED_STATS;
+    NetAppStats {
+        app: u64::from(NET_PROBE_SERVICE_ID.0),
+        bytes_sent: u64::from(expected.bytes_sent),
+        bytes_received: u64::from(expected.bytes_received),
+        connections: u32::from(expected.connections),
+        listeners: u32::from(expected.listeners),
+        refusals: u32::from(expected.refusals),
+        dns_lookups: u32::from(expected.dns_lookups),
+        processes: 1,
+    }
+}
 
 fn fixture() -> FakeKernel {
     let mut sys = FakeKernel::new();
@@ -19,6 +35,7 @@ fn fixture() -> FakeKernel {
     sys.net_udp_echo(at(NET_PROBE_UDP_PORT));
     let (ip, port) = NET_PROBE_DENIED;
     sys.net_deny(NetAddr::new(ip, port));
+    sys.net_stats(&[NetAppStats::new(0x3000), probe_row()], 0);
     sys
 }
 
@@ -148,10 +165,15 @@ fn every_step_passes_against_the_fixture_and_leaves_nothing_open() {
         NetProbeStep::Tls,
         NetProbeStep::Udp,
         NetProbeStep::Denied,
+        NetProbeStep::Stats,
     ]
     .map(NetProbeStep::code);
     assert_eq!(steps, client);
-    assert_eq!(checks.last(), Some(&(NET_PROBE_CHECK_REFUSED, 0)));
+    assert!(checks.contains(&(NET_PROBE_CHECK_REFUSED, 0)));
+    assert_eq!(
+        checks.last(),
+        Some(&(NET_PROBE_CHECK_STATS, NET_PROBE_EXPECTED_STATS.encode()))
+    );
     let (ip, port) = NET_PROBE_DENIED;
     assert_eq!(sys.net_refusals(), [Some(NetAddr::new(ip, port))]);
     assert_eq!(sys.net_open_sessions(), 0);
@@ -214,6 +236,65 @@ fn an_unknown_name_fails_the_resolve_with_its_status() {
         Err(NetProbeFailure {
             step: NetProbeStep::Resolve,
             status: clean_slate_native_abi::status::STATUS_ENOENT,
+        })
+    );
+}
+
+#[test]
+fn counters_that_do_not_match_fail_the_stats_step() {
+    let mut sys = fixture();
+    let mut row = probe_row();
+    row.bytes_received -= 1;
+    sys.net_stats(&[row], 0);
+    let (result, checks) = run_recording(&mut sys);
+    assert_eq!(
+        result,
+        Err(NetProbeFailure {
+            step: NetProbeStep::Stats,
+            status: NET_PROBE_WRONG_ANSWER,
+        })
+    );
+    let reported = checks
+        .iter()
+        .find(|(check, _)| *check == NET_PROBE_CHECK_STATS)
+        .map(|&(_, arg)| NetProbeStats::decode(arg))
+        .unwrap();
+    assert_eq!(
+        reported.bytes_received,
+        NET_PROBE_EXPECTED_STATS.bytes_received - 1
+    );
+}
+
+#[test]
+fn a_missing_row_or_right_fails_the_stats_step() {
+    let mut sys = fixture();
+    sys.net_stats(&[NetAppStats::new(0x3000)], 0);
+    assert_eq!(
+        run_recording(&mut sys).0,
+        Err(NetProbeFailure {
+            step: NetProbeStep::Stats,
+            status: NET_PROBE_WRONG_ANSWER,
+        })
+    );
+    let mut sys = FakeKernel::new();
+    sys.net_grant(0x4e_0001);
+    sys.net_name(NET_PROBE_HOSTNAME, NET_PROBE_PEER);
+    let at = |port| NetAddr::new(NET_PROBE_PEER, port);
+    sys.net_tcp_peer(
+        at(NET_PROBE_TCP_PORT),
+        NET_PROBE_REQUEST.len(),
+        NET_PROBE_PAGE,
+        false,
+    );
+    sys.net_tls_peer(at(NET_PROBE_TLS_PORT), NET_PROBE_PAGE);
+    sys.net_udp_echo(at(NET_PROBE_UDP_PORT));
+    let (ip, port) = NET_PROBE_DENIED;
+    sys.net_deny(NetAddr::new(ip, port));
+    assert_eq!(
+        run_recording(&mut sys).0,
+        Err(NetProbeFailure {
+            step: NetProbeStep::Stats,
+            status: STATUS_EACCES,
         })
     );
 }

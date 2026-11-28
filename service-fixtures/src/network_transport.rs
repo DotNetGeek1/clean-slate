@@ -528,6 +528,10 @@ mod native_abi_mirrors_the_service_protocol {
                 },
                 NetworkRequest::Accept { session },
             ),
+            (
+                NetRequest::Stats { max_len: 1536 },
+                NetworkRequest::Stats { max_len: 1536 },
+            ),
         ];
         for (native, service) in cases {
             let frame = native.encode().unwrap();
@@ -575,6 +579,18 @@ mod native_abi_mirrors_the_service_protocol {
                 NetResponse::Accept {
                     session: session.raw(),
                     peer: NetAddr::new([10, 0, 2, 2], 51_000),
+                },
+            ),
+            (
+                NetworkResponse::Stats {
+                    rows: 2,
+                    apps: 3,
+                    untracked: 4,
+                },
+                NetResponse::Stats {
+                    rows: 2,
+                    apps: 3,
+                    untracked: 4,
                 },
             ),
             (

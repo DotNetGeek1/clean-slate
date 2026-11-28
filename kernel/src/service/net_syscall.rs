@@ -146,6 +146,8 @@ fn network_op_for_request(request: &NetworkRequest) -> NetworkOp {
         // #359: a listen starts an endpoint as a connect does; an accept takes what arrived.
         NetworkRequest::Listen { .. } => NetworkOp::Connect,
         NetworkRequest::Accept { .. } => NetworkOp::Receive,
+        // #378: the per-app counters, for a row holding `Grant::NetworkStats` only.
+        NetworkRequest::Stats { .. } => NetworkOp::Stats,
     }
 }
 
