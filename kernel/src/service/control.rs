@@ -1636,13 +1636,14 @@ impl InstanceGrantAuthority for KernelInstanceGrants {
 
     /// #353: the row's instance is its app for the network policy, as a Linux network client's
     /// is (`system_shell::apply_linux_grants`), then it gets the client entitlement and, with a
-    /// network instance live, the capability derived from it.
-    fn grant_native_network_client(&mut self, pid: u64) -> Result<(), &'static str> {
+    /// network instance live, the capability derived from it, with `NET_STATS` when `stats`
+    /// (#378).
+    fn grant_native_network_client(&mut self, pid: u64, stats: bool) -> Result<(), &'static str> {
         use clean_slate_capability::HolderId;
 
         crate::service::net_app::attribute(pid, u64::from(self.service_id.0))
             .map_err(|message| self.grant_failed(pid, "network client", message))?;
-        crate::capability::network::grant_network_client_entitlement(HolderId(pid))
+        crate::capability::network::grant_network_client_entitlement(HolderId(pid), stats)
             .map_err(|_| self.grant_failed(pid, "network client", "entitlement refused"))?;
         Ok(())
     }
@@ -1705,7 +1706,9 @@ const fn rollback_failure_message(grant: Grant) -> &'static str {
         | Grant::ConsoleSession
         | Grant::ConsoleFrontEnd => "console grant rollback teardown failed",
         Grant::LauncherClient => "launcher grant rollback teardown failed",
-        Grant::NativeNetworkClient => "network client grant rollback teardown failed",
+        Grant::NativeNetworkClient | Grant::NetworkStats => {
+            "network client grant rollback teardown failed"
+        }
     }
 }
 

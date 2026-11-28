@@ -10,13 +10,14 @@ use std::string::{String, ToString};
 use std::vec::Vec;
 
 use clean_slate_native_abi::net::{
-    NetAddr, NetResponse, NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID,
-    NET_ERROR_ADDRESS_IN_USE, NET_ERROR_CLOSED, NET_ERROR_DESTINATION_DENIED,
-    NET_ERROR_INVALID_REQUEST, NET_ERROR_NOT_FOUND, NET_ERROR_RESET, NET_ERROR_STALE_GENERATION,
-    NET_ERROR_TIMEOUT, NET_FRAME_BYTES, NET_KIND_ACCEPT, NET_KIND_CLOSE, NET_KIND_CONNECT,
-    NET_KIND_LISTEN, NET_KIND_OPEN, NET_KIND_RECEIVE, NET_KIND_RESOLVE, NET_KIND_SEND,
-    NET_MAX_PAYLOAD_BYTES, NET_SOCKET_DATAGRAM, NET_SOCKET_STREAM, NET_SOCKET_TLS_EXCHANGE,
-    NET_SUBOP_DISCARD, NET_SUBOP_POLL, NET_SUBOP_SUBMIT, NET_SUBOP_WAIT,
+    NetAddr, NetAppStats, NetResponse, NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID,
+    NET_APP_STATS_ROW_BYTES, NET_ERROR_ADDRESS_IN_USE, NET_ERROR_CLOSED,
+    NET_ERROR_DESTINATION_DENIED, NET_ERROR_INVALID_REQUEST, NET_ERROR_NOT_FOUND, NET_ERROR_RESET,
+    NET_ERROR_STALE_GENERATION, NET_ERROR_TIMEOUT, NET_FRAME_BYTES, NET_KIND_ACCEPT,
+    NET_KIND_CLOSE, NET_KIND_CONNECT, NET_KIND_LISTEN, NET_KIND_OPEN, NET_KIND_RECEIVE,
+    NET_KIND_RESOLVE, NET_KIND_SEND, NET_KIND_STATS, NET_MAX_PAYLOAD_BYTES, NET_SOCKET_DATAGRAM,
+    NET_SOCKET_STREAM, NET_SOCKET_TLS_EXCHANGE, NET_SUBOP_DISCARD, NET_SUBOP_POLL,
+    NET_SUBOP_SUBMIT, NET_SUBOP_WAIT,
 };
 use clean_slate_native_abi::status::{STATUS_EACCES, STATUS_EINVAL, STATUS_ETIMEDOUT};
 
@@ -93,6 +94,8 @@ pub(crate) struct FakeNet {
     incoming: VecDeque<Incoming>,
     /// What closed sessions sent, and to whom.
     closed_sent: Vec<(NetAddr, Vec<u8>)>,
+    /// `STATS` rows and untracked count; `None` while the capability has no `NET_STATS`.
+    stats: Option<(Vec<NetAppStats>, u32)>,
 }
 
 fn session_of(frame: &[u8; NET_FRAME_BYTES]) -> u64 {
@@ -122,6 +125,10 @@ impl FakeNet {
 
     pub(crate) fn forbid_resolve(&mut self) {
         self.may_resolve = false;
+    }
+
+    pub(crate) fn stats(&mut self, rows: &[NetAppStats], untracked: u32) {
+        self.stats = Some((rows.to_vec(), untracked));
     }
 
     pub(crate) fn deny(&mut self, addr: NetAddr) {
@@ -228,6 +235,10 @@ impl FakeNet {
                     unsafe { *(args[2] as *const [u8; NET_FRAME_BYTES]) };
                 if args[4] as usize > NET_MAX_PAYLOAD_BYTES {
                     return STATUS_EINVAL;
+                }
+                // The kernel checks `NET_STATS` before the request reaches the service.
+                if frame[6] == NET_KIND_STATS && self.stats.is_none() {
+                    return STATUS_EACCES;
                 }
                 let payload = if args[4] == 0 {
                     Vec::new()
@@ -366,12 +377,29 @@ impl FakeNet {
         let session_id = session_of(frame);
         let stale = frame[6] != NET_KIND_RESOLVE
             && frame[6] != NET_KIND_OPEN
+            && frame[6] != NET_KIND_STATS
             && session_id >> 32 != generation;
         if stale {
             return error(NET_ERROR_STALE_GENERATION);
         }
         let index = self.sessions.iter().position(|s| s.id == session_id);
         match frame[6] {
+            NET_KIND_STATS => {
+                let Some((rows, untracked)) = &self.stats else {
+                    return error(NET_ERROR_INVALID_REQUEST);
+                };
+                let fit = word(frame, 8) as usize / NET_APP_STATS_ROW_BYTES;
+                let sent = &rows[..rows.len().min(fit)];
+                let payload = sent.iter().flat_map(|row| row.encode()).collect();
+                Request::Done(
+                    NetResponse::Stats {
+                        rows: sent.len() as u16,
+                        apps: rows.len() as u16,
+                        untracked: *untracked,
+                    },
+                    payload,
+                )
+            }
             NET_KIND_RESOLVE => {
                 if !self.may_resolve {
                     return self.refuse(None);

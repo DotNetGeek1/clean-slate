@@ -80,17 +80,20 @@ fn is_stale_client(record: &CapabilityRecord, service: u64, generation: u64) -> 
         && record.rights.contains(Rights::CONSOLE_CONNECT)
 }
 
-/// A console service instance registered `port`: every holder that `kernel_client` accepts
-/// and that holds `CONSOLE_CONNECT` on an earlier instance's port gets it on `port` instead.
-/// The kernel is the console client of those holders (a Linux process's console fds,
-/// `service::console_stream`), so the new record needs no handle handed to anyone. Calls
-/// `reissued` with each holder and the result; returns how many holders were reissued.
+/// A console service instance registered `port`: every holder that `reissuable` accepts and
+/// that holds `CONSOLE_CONNECT` on an earlier instance's port gets it on `port` instead. No
+/// handle is handed to anyone: the kernel connects a Linux process's console fds itself
+/// (`service::console_stream`), and a native client finds the new record by its resource when
+/// it connects again (`runtime::console::LiveConsoleStream`, #368). A front end
+/// (`CONSOLE_ATTACH`) is left out: it ends with the service and comes back as a new process
+/// with a new grant. Calls `reissued` with each holder and the result; returns how many
+/// holders were reissued.
 // The caller, the console service's port grant, exists only where the desktop rows do.
 #[cfg_attr(not(clean_slate_desktop), allow(dead_code))]
 fn reissue_clients_in<const N: usize>(
     table: &mut CapabilityTable<N>,
     port: ResourceRef,
-    kernel_client: impl Fn(HolderId) -> bool,
+    reissuable: impl Fn(HolderId) -> bool,
     mut reissued: impl FnMut(HolderId, Result<(), CapabilityError>),
 ) -> usize {
     // Holders first: revoking one holder's record also revokes the copies its forks made.
@@ -99,8 +102,9 @@ fn reissue_clients_in<const N: usize>(
     for slot in 0..N {
         let record = table.record_at(slot);
         if is_stale_client(record, port.id, port.instance_generation)
+            && !record.rights.contains(Rights::CONSOLE_ATTACH)
             && !holders[..count].iter().any(|(h, _)| *h == record.holder)
-            && kernel_client(record.holder)
+            && reissuable(record.holder)
         {
             holders[count] = (record.holder, reissued_rights(record.rights));
             count += 1;
@@ -148,22 +152,18 @@ fn reissue_clients_in<const N: usize>(
     count
 }
 
-/// [`reissue_clients_in`] on the kernel's capability space, for the Linux processes, whose
-/// console streams the kernel connects.
+/// [`reissue_clients_in`] on the kernel's capability space, for every live process: the Linux
+/// processes, whose console streams the kernel connects, and the native clients, which
+/// connect again themselves (#368).
 // The caller, the console service's port grant, exists only where the desktop rows do.
 #[cfg_attr(not(clean_slate_desktop), allow(dead_code))]
 pub(crate) fn reissue_kernel_console_clients(port: ResourceRef) {
-    use crate::process::personality::{execution_personality_for_pid, ExecutionPersonality};
+    use crate::process::personality::execution_personality_for_pid;
     let table = unsafe { super::capability_space_mut() };
     reissue_clients_in(
         table,
         port,
-        |holder| {
-            matches!(
-                execution_personality_for_pid(holder.0),
-                Ok(ExecutionPersonality::LinuxX86_64)
-            )
-        },
+        |holder| execution_personality_for_pid(holder.0).is_ok(),
         |holder, result| match result {
             Ok(()) => crate::diagnostics::log::kernel_log_fmt(format_args!(
                 "[CONS] client reissued holder={} port={}:{}\n",
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn a_restarted_service_reissues_only_kernel_clients_on_earlier_ports() {
+    fn a_restarted_service_reissues_only_accepted_clients_on_earlier_ports() {
         let old = ResourceRef::console_port(0x5600, 1);
         let new = ResourceRef::console_port(0x5600, 2);
         let mut table = CapabilityTable::<16>::new();
@@ -259,8 +259,8 @@ mod tests {
                 )
                 .unwrap();
         };
-        // The shell and its fork, a native client, the new service, and a client already on
-        // the new port.
+        // The shell and its fork, a holder the filter refuses, the new service, a client
+        // already on the new port, and a front end.
         grant(6, old, CONSOLE_CLIENT_RIGHTS);
         grant(8, old, CONSOLE_CLIENT_RIGHTS);
         grant(5, old, CONSOLE_CLIENT_RIGHTS);
@@ -271,6 +271,7 @@ mod tests {
             CONSOLE_SERVICE_DEVICE_RIGHTS,
         );
         grant(10, new, CONSOLE_CLIENT_RIGHTS);
+        grant(11, old, CONSOLE_FRONT_END_RIGHTS);
         let mut seen = [0u64; 4];
         let mut count = 0;
         let reissued = reissue_clients_in(
@@ -289,8 +290,21 @@ mod tests {
             assert!(holds(&table, pid, new), "{pid}");
             assert!(!holds(&table, pid, old), "{pid}");
         }
-        assert!(holds(&table, 5, old), "a native client keeps its record");
+        assert!(holds(&table, 5, old), "a refused holder keeps its record");
         assert!(!holds(&table, 5, new));
+        let front_end_on = |table: &CapabilityTable<16>, port: ResourceRef| {
+            (0..16).any(|slot| {
+                let record = table.record_at(slot);
+                record.state == CapabilityState::Live
+                    && record.holder == HolderId(11)
+                    && record.resource == port
+            })
+        };
+        assert!(
+            front_end_on(&table, old),
+            "a front end comes back by restart"
+        );
+        assert!(!front_end_on(&table, new));
         // Nothing is left to reissue.
         assert_eq!(reissue_clients_in(&mut table, new, |_| true, |_, _| {}), 1);
         assert!(holds(&table, 5, new));

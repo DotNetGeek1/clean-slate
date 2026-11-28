@@ -57,8 +57,9 @@ pub(crate) trait InstanceGrantAuthority {
     fn grant_launcher_client(&mut self, pid: u64) -> Result<(), &'static str>;
     /// The network client entitlement and, when a network instance is live, a client
     /// capability bound to it; the instance is attributed to its row for the per-app network
-    /// policy (#353).
-    fn grant_native_network_client(&mut self, pid: u64) -> Result<(), &'static str>;
+    /// policy (#353). With `stats` (the row also holds `Grant::NetworkStats`, #378) both carry
+    /// `NET_STATS`.
+    fn grant_native_network_client(&mut self, pid: u64, stats: bool) -> Result<(), &'static str>;
 }
 
 /// Which console port client a row is (#310, #311).
@@ -131,7 +132,8 @@ pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
             | Grant::ConsoleSession
             | Grant::ConsoleFrontEnd
             | Grant::LauncherClient
-            | Grant::NativeNetworkClient => {}
+            | Grant::NativeNetworkClient
+            | Grant::NetworkStats => {}
             // Applied by the Linux launch path while it builds the process.
             Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {}
         }
@@ -163,7 +165,11 @@ pub(crate) fn apply_instance_grants<A: InstanceGrantAuthority>(
                 authority.grant_console_client(pid, ConsoleClientRole::FrontEnd)
             }
             Grant::LauncherClient => authority.grant_launcher_client(pid),
-            Grant::NativeNetworkClient => authority.grant_native_network_client(pid),
+            Grant::NativeNetworkClient => {
+                authority.grant_native_network_client(pid, grants.contains(&Grant::NetworkStats))
+            }
+            // Carried by the `NativeNetworkClient` grant, which manifest validation puts first.
+            Grant::NetworkStats => Ok(()),
             Grant::ObjectServiceRole
             | Grant::AuditReader
             | Grant::AuditStore
@@ -201,7 +207,7 @@ mod tests {
         ConsoleService(u64),
         ConsoleClient(u64, ConsoleClientRole),
         LauncherClient(u64),
-        NativeNetworkClient(u64),
+        NativeNetworkClient(u64, bool),
     }
 
     #[derive(Default)]
@@ -303,8 +309,12 @@ mod tests {
             self.outcome(Grant::LauncherClient)
         }
 
-        fn grant_native_network_client(&mut self, pid: u64) -> Result<(), &'static str> {
-            self.calls.push(Call::NativeNetworkClient(pid));
+        fn grant_native_network_client(
+            &mut self,
+            pid: u64,
+            stats: bool,
+        ) -> Result<(), &'static str> {
+            self.calls.push(Call::NativeNetworkClient(pid, stats));
             self.outcome(Grant::NativeNetworkClient)
         }
     }
@@ -550,9 +560,20 @@ mod tests {
         let handles = apply_both(&[Grant::Console, Grant::NativeNetworkClient], &mut recorder);
         assert_eq!(
             recorder.calls,
-            [Call::Console(7), Call::NativeNetworkClient(7)]
+            [Call::Console(7), Call::NativeNetworkClient(7, false)]
         );
         assert_eq!(handles.console, Some(0xc0e5));
+    }
+
+    /// #378: `NetworkStats` adds no call of its own; it rides on the client grant.
+    #[test]
+    fn network_stats_rides_on_the_native_client_grant() {
+        let mut recorder = Recorder::default();
+        apply_both(
+            &[Grant::NativeNetworkClient, Grant::NetworkStats],
+            &mut recorder,
+        );
+        assert_eq!(recorder.calls, [Call::NativeNetworkClient(7, true)]);
     }
 
     #[test]

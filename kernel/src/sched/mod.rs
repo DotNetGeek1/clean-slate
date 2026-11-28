@@ -1,6 +1,7 @@
 //! Round-robin thread scheduler: thread descriptors, the scheduler table and
 //! the kernel task stacks. Owns `SCHEDULER` and `TASK_STACKS`.
 
+pub(crate) mod cpu_time;
 pub(crate) mod demo_tasks;
 pub(crate) mod dispatch;
 pub(crate) mod fpu;
@@ -67,6 +68,14 @@ pub(crate) struct ThreadProcessResources {
     pub(crate) kernel_stacks: usize,
 }
 
+/// What [`Scheduler::reap_threads_for_process`] cleared.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReapedThreads {
+    pub(crate) threads: usize,
+    /// CPU ticks the reaped threads had been charged (#377).
+    pub(crate) cpu_ticks: u64,
+}
+
 impl Thread {
     pub(super) const EMPTY: Self = Self {
         id: 0,
@@ -88,6 +97,8 @@ impl Thread {
 pub(crate) struct Scheduler {
     pub(super) threads: [Thread; SCHEDULER_THREAD_SLOTS],
     pub(super) current_thread: Option<usize>,
+    /// Per-slot run time (#377); charged by every change of `current_thread`.
+    cpu: cpu_time::CpuClock,
     preemption_observed: bool,
     preemption_logged: bool,
     pass_emitted: bool,
@@ -99,6 +110,7 @@ impl Scheduler {
         Self {
             threads: [Thread::EMPTY; SCHEDULER_THREAD_SLOTS],
             current_thread: None,
+            cpu: cpu_time::CpuClock::new(),
             preemption_observed: false,
             preemption_logged: false,
             pass_emitted: false,
@@ -152,6 +164,8 @@ impl Scheduler {
             }
         }
         fpu::reset_slot(slot);
+        // A new thread starts at zero; anything left in the slot stays in the totals.
+        self.cpu.retire_slot(slot);
         self.threads[slot] = Thread {
             id,
             owner_process_id,
@@ -189,10 +203,51 @@ impl Scheduler {
     /// Every switch of the running thread goes through here so a user thread never
     /// resumes with another thread's FPU/SSE registers.
     pub(super) fn make_current(&mut self, next: usize) {
-        self.current_thread = Some(next);
+        self.set_current(Some(next));
         if self.threads[next].kind == ThreadKind::User {
             fpu::activate_user_slot(next);
         }
+    }
+
+    /// Charges the running time so far to the outgoing thread, then changes the current
+    /// thread. Every change of `current_thread` outside test fixtures goes through here.
+    pub(super) fn set_current(&mut self, next: Option<usize>) {
+        self.charge_current();
+        self.current_thread = next;
+    }
+
+    /// Charges the time since the last switch to whatever is current, so a reader sees
+    /// totals up to now.
+    pub(crate) fn charge_current(&mut self) {
+        let target = match self.current_thread {
+            Some(IDLE_THREAD_INDEX) => cpu_time::ChargeTarget::Idle,
+            Some(slot) => cpu_time::ChargeTarget::Slot(slot),
+            None => cpu_time::ChargeTarget::Nobody,
+        };
+        self.cpu.charge(cpu_time::now_ticks(), target);
+    }
+
+    /// TSC ticks charged to `process_id`'s threads still in a slot (Ready, Running,
+    /// Blocked or Exited but not yet reaped). Call [`Self::charge_current`] first for a
+    /// figure that includes the running thread's current slice.
+    pub(crate) fn cpu_ticks_for_process(&self, process_id: u64) -> u64 {
+        self.threads
+            .iter()
+            .enumerate()
+            .filter(|(index, thread)| {
+                *index != IDLE_THREAD_INDEX
+                    && thread.state != ThreadState::Empty
+                    && thread.owner_process_id == process_id
+            })
+            .fold(0u64, |sum, (index, _)| {
+                sum.saturating_add(self.cpu.slot_ticks(index))
+            })
+    }
+
+    /// System-wide CPU totals up to now.
+    pub(crate) fn cpu_totals(&mut self) -> cpu_time::CpuTotals {
+        self.charge_current();
+        self.cpu.totals()
     }
 
     pub(crate) fn current_slot(&self) -> Option<usize> {
@@ -344,7 +399,7 @@ impl Scheduler {
     pub(crate) fn reap_threads_for_process(
         &mut self,
         process_id: u64,
-    ) -> Result<usize, &'static str> {
+    ) -> Result<ReapedThreads, &'static str> {
         if let Some(generation) = crate::process::live_instance_generation(process_id) {
             wait::cancel_waiters_for_process(process_id, generation);
         }
@@ -363,7 +418,9 @@ impl Scheduler {
             }
         }
 
-        let mut reaped = 0usize;
+        // The exiting thread is usually current: close its last slice before its slot goes.
+        self.charge_current();
+        let mut reaped = ReapedThreads::default();
         for (index, thread) in self.threads.iter_mut().enumerate() {
             if index == IDLE_THREAD_INDEX {
                 continue;
@@ -372,10 +429,11 @@ impl Scheduler {
                 continue;
             }
             *thread = Thread::EMPTY;
+            reaped.cpu_ticks = reaped.cpu_ticks.saturating_add(self.cpu.retire_slot(index));
             if self.current_thread == Some(index) {
                 self.current_thread = None;
             }
-            reaped += 1;
+            reaped.threads += 1;
         }
         Ok(reaped)
     }
@@ -560,7 +618,7 @@ impl Scheduler {
             if self.has_blocked_threads() {
                 return idle::handoff_to_idle_thread().map(Some);
             }
-            self.current_thread = None;
+            self.set_current(None);
             return Ok(None);
         };
 
@@ -856,6 +914,114 @@ mod tests {
     }
 
     #[test]
+    fn switches_charge_run_time_to_the_outgoing_thread_and_idle() {
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .configure_thread(
+                0,
+                11,
+                7,
+                ThreadKind::User,
+                Scheduler::user_kernel_stack_top(0),
+                0x1000,
+                0x1000,
+            )
+            .expect("process 7 thread");
+        scheduler
+            .configure_thread(
+                1,
+                21,
+                8,
+                ThreadKind::User,
+                Scheduler::user_kernel_stack_top(1),
+                0x2000,
+                0x2000,
+            )
+            .expect("process 8 thread");
+        scheduler
+            .configure_kernel_thread(IDLE_THREAD_INDEX, 9_999, 0x3000, 0x3000)
+            .expect("idle");
+        scheduler.threads[IDLE_THREAD_INDEX].state = ThreadState::Empty;
+
+        cpu_time::set_test_ticks(1_000);
+        scheduler.start().expect("start");
+        // 7 runs 300 ticks, 8 runs 500, 7 runs 200 more.
+        cpu_time::set_test_ticks(1_300);
+        scheduler.on_timer_interrupt(0x1010).expect("tick to 8");
+        cpu_time::set_test_ticks(1_800);
+        scheduler.on_timer_interrupt(0x2010).expect("tick to 7");
+        cpu_time::set_test_ticks(2_000);
+        // Both block; 400 ticks of idle follow.
+        scheduler.threads[0].state = ThreadState::Blocked;
+        scheduler.threads[1].state = ThreadState::Blocked;
+        scheduler.set_current(Some(IDLE_THREAD_INDEX));
+        cpu_time::set_test_ticks(2_400);
+        scheduler.threads[1].state = ThreadState::Ready;
+        scheduler.wake_from_idle_loop().expect("wake 8");
+        cpu_time::set_test_ticks(2_450);
+
+        assert_eq!(scheduler.cpu_ticks_for_process(7), 500);
+        assert_eq!(scheduler.cpu_ticks_for_process(8), 500);
+        let totals = scheduler.cpu_totals();
+        assert_eq!(
+            scheduler.cpu_ticks_for_process(8),
+            550,
+            "read charges the running slice"
+        );
+        assert_eq!(totals.idle_ticks, 400);
+        assert_eq!(totals.elapsed_ticks, 1_450);
+        assert_eq!(
+            totals.busy_ticks() + totals.idle_ticks + totals.unattributed_ticks,
+            totals.elapsed_ticks
+        );
+    }
+
+    #[test]
+    fn reaping_hands_back_run_time_and_returns_the_totals_to_baseline() {
+        let mut scheduler = Scheduler::new();
+        cpu_time::set_test_ticks(0);
+        scheduler.set_current(None);
+        for cycle in 0..8u64 {
+            let pid = 100 + cycle;
+            scheduler
+                .configure_thread(
+                    0,
+                    1_000 + cycle,
+                    pid,
+                    ThreadKind::User,
+                    Scheduler::user_kernel_stack_top(0),
+                    0x1000,
+                    0x1000,
+                )
+                .expect("thread");
+            let start = cycle * 100;
+            cpu_time::set_test_ticks(start + 10);
+            scheduler.make_current(0);
+            scheduler.threads[0].state = ThreadState::Running;
+            cpu_time::set_test_ticks(start + 10 + 25 + cycle);
+            scheduler.threads[0].state = ThreadState::Exited;
+            let reaped = scheduler.reap_threads_for_process(pid).expect("reap");
+            assert_eq!(reaped.threads, 1);
+            assert_eq!(reaped.cpu_ticks, 25 + cycle, "cycle {cycle}");
+            assert_eq!(scheduler.cpu_ticks_for_process(pid), 0);
+            assert_eq!(scheduler.current_thread, None);
+            cpu_time::set_test_ticks(start + 100);
+            let totals = scheduler.cpu_totals();
+            assert_eq!(totals.live_thread_ticks, 0, "cycle {cycle}");
+            assert_eq!(
+                totals.busy_ticks() + totals.idle_ticks + totals.unattributed_ticks,
+                totals.elapsed_ticks,
+                "cycle {cycle}"
+            );
+        }
+        let totals = scheduler.cpu_totals();
+        assert_eq!(
+            totals.retired_ticks,
+            (0..8).map(|cycle| 25 + cycle).sum::<u64>()
+        );
+    }
+
+    #[test]
     fn process_resource_helpers_count_and_reap_owned_threads() {
         let mut scheduler = Scheduler::new();
         scheduler
@@ -894,7 +1060,10 @@ mod tests {
         );
 
         scheduler.threads[1].state = ThreadState::Exited;
-        assert_eq!(scheduler.reap_threads_for_process(7).expect("reap"), 2);
+        assert_eq!(
+            scheduler.reap_threads_for_process(7).expect("reap").threads,
+            2
+        );
         assert!(scheduler.current_thread.is_none());
         assert_eq!(
             scheduler.resources_for_process(7),

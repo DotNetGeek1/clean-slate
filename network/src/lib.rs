@@ -245,13 +245,16 @@ mod tests {
             NetworkRequest::Accept {
                 session: SessionId::new(SessionGeneration::new(9), 2),
             },
+            NetworkRequest::Stats { max_len: 4096 },
         ];
         for request in requests {
             assert_eq!(
                 request.session().is_some(),
                 !matches!(
                     request,
-                    NetworkRequest::Resolve { .. } | NetworkRequest::Open { .. }
+                    NetworkRequest::Resolve { .. }
+                        | NetworkRequest::Open { .. }
+                        | NetworkRequest::Stats { .. }
                 )
             );
             let encoded = request.encode();
@@ -280,6 +283,11 @@ mod tests {
                 session: SessionId::new(SessionGeneration::new(3), 8),
                 peer: SocketAddrV4::new(PEER_IPV4, 51_000),
             },
+            NetworkResponse::Stats {
+                rows: 3,
+                apps: 5,
+                untracked: 70_000,
+            },
             NetworkResponse::Error {
                 code: NetworkError::Protocol.code(),
             },
@@ -302,6 +310,12 @@ mod tests {
         let mut bad = encoded;
         bad[16..20].copy_from_slice(&(MAX_APPLICATION_PAYLOAD_BYTES as u32 + 1).to_le_bytes());
         assert!(NetworkRequest::decode(&bad).is_err());
+        let mut stats = NetworkRequest::Stats { max_len: 0 }.encode();
+        stats[8..12].copy_from_slice(&(MAX_APPLICATION_PAYLOAD_BYTES as u32 + 1).to_le_bytes());
+        assert_eq!(
+            NetworkRequest::decode(&stats),
+            Err(NetworkRequestDecodeError::OversizedField)
+        );
     }
 
     #[test]

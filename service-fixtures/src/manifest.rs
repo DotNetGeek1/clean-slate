@@ -128,6 +128,10 @@ pub enum Grant {
     /// instance to its row, so the row's per-app network policy applies. Native images other
     /// than the network service only.
     NativeNetworkClient,
+    /// `NET_STATS` on the row's native network client capability (#378): it may read the
+    /// network service's per-app counters (`clean_slate_native_abi::net`, `STATS`). Requires
+    /// `NativeNetworkClient` before it in the row, whose entitlement carries the right.
+    NetworkStats,
     /// Registers the row's graphics port, `graphics(row id, instance generation)`, for the
     /// instance being started, plus a root `GFX_SERVE` capability on it. Teardown unregisters
     /// the port (clients see `ServerGone`) and revokes the capability. Compositor rows only;
@@ -630,6 +634,10 @@ pub enum ManifestError {
     ConsoleInputWithoutConsole {
         row: usize,
     },
+    /// `Grant::NetworkStats` without `Grant::NativeNetworkClient` before it.
+    NetworkStatsWithoutClient {
+        row: usize,
+    },
     /// A second row holds `Grant::GraphicsPort`, `Grant::InputSeat`, `Grant::AuditReader`,
     /// `Grant::AuditStore` or `Grant::ConsoleService`.
     DuplicateExclusiveGrant {
@@ -757,6 +765,11 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
             {
                 return Err(ManifestError::ConsoleInputWithoutConsole { row });
             }
+            if matches!(spec.grants[grant], Grant::NetworkStats)
+                && !grants_before(spec.grants, grant, Grant::NativeNetworkClient)
+            {
+                return Err(ManifestError::NetworkStatsWithoutClient { row });
+            }
             if matches!(
                 spec.grants[grant],
                 Grant::GraphicsPort
@@ -850,7 +863,9 @@ const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
         Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
             matches!(image, ServiceImage::LinuxShell)
         }
-        Grant::NativeNetworkClient => !image.is_linux() && !matches!(image, ServiceImage::Network),
+        Grant::NativeNetworkClient | Grant::NetworkStats => {
+            !image.is_linux() && !matches!(image, ServiceImage::Network)
+        }
         Grant::GraphicsPort | Grant::DisplayPresenter | Grant::InputSeat => {
             matches!(image, ServiceImage::Compositor)
         }
@@ -1215,6 +1230,39 @@ mod tests {
             7,
             ServiceImage::LinuxShell,
             &[Grant::Console, Grant::ConsoleInput],
+        )];
+        assert_eq!(validate_manifest(&ordered), Ok(()));
+    }
+
+    #[test]
+    fn network_stats_needs_the_native_client_before_it() {
+        let alone = [row(7, ServiceImage::NetProbe, &[Grant::NetworkStats])];
+        assert_eq!(
+            validate_manifest(&alone),
+            Err(ManifestError::NetworkStatsWithoutClient { row: 0 })
+        );
+        let reversed = [row(
+            7,
+            ServiceImage::NetProbe,
+            &[Grant::NetworkStats, Grant::NativeNetworkClient],
+        )];
+        assert_eq!(
+            validate_manifest(&reversed),
+            Err(ManifestError::NetworkStatsWithoutClient { row: 0 })
+        );
+        let linux = [row(
+            7,
+            ServiceImage::LinuxShell,
+            &[Grant::NetworkClient, Grant::NetworkStats],
+        )];
+        assert_eq!(
+            validate_manifest(&linux),
+            Err(ManifestError::GrantNotSupportedByImage { row: 0 })
+        );
+        let ordered = [row(
+            7,
+            ServiceImage::NetProbe,
+            &[Grant::NativeNetworkClient, Grant::NetworkStats],
         )];
         assert_eq!(validate_manifest(&ordered), Ok(()));
     }

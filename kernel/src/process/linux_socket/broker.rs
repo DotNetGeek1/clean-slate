@@ -138,6 +138,8 @@ pub(crate) fn broker_sync(
             // Native only (#359); Linux `bind`/`listen` are not brokered yet (#222).
             NetworkRequest::Listen { .. } => NetworkOp::Connect,
             NetworkRequest::Accept { .. } => NetworkOp::Receive,
+            // Native only (#378); a Linux client capability never carries `NET_STATS`.
+            NetworkRequest::Stats { .. } => NetworkOp::Stats,
         };
         if let Err(reason) = authorize_network_op(holder, handle, op, effective_generation) {
             return Err(Err(denial_errno(reason)));

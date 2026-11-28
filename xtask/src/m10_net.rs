@@ -6,7 +6,8 @@
 //! `m10-net-client-self-test` kernel against the M7 fixture peer. A native app whose row's only
 //! grant is `NativeNetworkClient` resolves the fixture name, fetches the fixture's page over a
 //! TCP stream and over TLS, makes a UDP round trip, and is refused a destination its policy
-//! does not name; the kernel checks the refusal's audit record.
+//! does not name; the kernel checks the refusal's audit record. Last (#378) the probe reads the
+//! service's per-app counters and its own row must be exactly what it did ([`STATS_MARKER`]).
 
 use std::time::Duration;
 
@@ -21,7 +22,11 @@ const FEATURE: &str = "m10-net-client-self-test";
 const TIMEOUT: Duration = Duration::from_secs(120);
 const LANE: &str = "test-m10-net";
 
-pub(crate) const MARKERS: [&str; 10] = [
+/// The probe's counters after the client steps (`NET_PROBE_EXPECTED_STATS`, checked in a test).
+pub(crate) const STATS_MARKER: &str =
+    "[M10.net] stats sent=87 received=89 connections=3 listeners=0 refusals=1 dns=1";
+
+pub(crate) const MARKERS: [&str; 12] = [
     "[M10.net] network service pid=",
     "[M10.net] probe started pid=",
     "[M10.net] step resolve",
@@ -31,6 +36,8 @@ pub(crate) const MARKERS: [&str; 10] = [
     "[M10.net] step udp",
     "[M10.net] step denied",
     "[M10.net] refusal audited actor=",
+    "[M10.net] step stats",
+    STATS_MARKER,
     "[M10.net] PASS pid=",
 ];
 
@@ -40,6 +47,7 @@ pub(crate) fn run() -> Result<(), XtaskError> {
     run_cargo_package_tests("clean-slate-net-probe", &[])?;
     run_cargo_package_tests("clean-slate-service-fixtures", &["net_probe"])?;
     run_cargo_package_tests("clean-slate-service-fixtures", &["native_network_client"])?;
+    run_cargo_package_tests("clean-slate-service-fixtures", &["network_stats"])?;
     run_cargo_package_tests(
         "clean-slate-kernel",
         &["--lib", "--", "native_network_client"],
@@ -257,5 +265,28 @@ pub(crate) mod listen {
                 wrote_shutdown = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::STATS_MARKER;
+    use clean_slate_service_fixtures::net_probe::NET_PROBE_EXPECTED_STATS;
+
+    #[test]
+    fn the_stats_marker_is_the_expected_row() {
+        let stats = NET_PROBE_EXPECTED_STATS;
+        assert_eq!(
+            STATS_MARKER,
+            format!(
+                "[M10.net] stats sent={} received={} connections={} listeners={} refusals={} dns={}",
+                stats.bytes_sent,
+                stats.bytes_received,
+                stats.connections,
+                stats.listeners,
+                stats.refusals,
+                stats.dns_lookups
+            )
+        );
     }
 }
