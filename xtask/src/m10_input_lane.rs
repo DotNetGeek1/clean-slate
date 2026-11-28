@@ -213,6 +213,8 @@ mod tests {
             "l" => 0x0F,
             "o" => 0x12,
             "spc" => 0x2C,
+            "minus" => 0x2D,
+            "4" => 0x21,
             other => panic!("no usage for qcode `{other}`"),
         }
     }

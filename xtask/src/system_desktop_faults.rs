@@ -16,7 +16,9 @@ use crate::marker_spec::GuestFailureScan;
 use crate::qmp::image::Screenshot;
 use crate::qmp::{InputAction, QmpClient, QmpEndpoint, QmpError, QmpTimeouts};
 use crate::serial_input_lane::{accept_serial, find, spawn_serial_reader, tail, SerialEvent};
-use crate::system_boot::{desktop_qemu_args, start_shell_fixture_peer, system_vm_config};
+use crate::system_boot::{
+    desktop_qemu_args, desktop_qemu_args_with, start_shell_fixture_peer, system_vm_config,
+};
 use crate::system_desktop::{DesktopMachine, VIRTIO_GPU_Q1};
 use crate::system_shell::qemu_state;
 use crate::{
@@ -344,7 +346,20 @@ pub(crate) fn desktop_config(
     }
 }
 
-/// Boots the desktop, then types each step once the one before it is complete. Returns the
+/// [`desktop_config`] on the default desktop (`q1` or `q0`): the bare desktop's rows plus the
+/// terminal and its shell (#311).
+pub(crate) fn terminal_desktop_config(
+    disk: &Path,
+    fixture_port: u16,
+    machine: &DesktopMachine,
+) -> VmLaunchConfig {
+    VmLaunchConfig {
+        extra_args: desktop_qemu_args_with(machine.framebuffer, true),
+        ..desktop_config(disk, fixture_port, machine)
+    }
+}
+
+/// Boots the default desktop, then types each step once the one before it is complete. Returns the
 /// transcript and the state after the boot and each step.
 pub(crate) fn drive<S: Clone>(
     features: &[&str],
@@ -357,7 +372,7 @@ pub(crate) fn drive<S: Clone>(
     let result = (|| {
         let mut session = Session::start(
             features,
-            desktop_config(disk, peer.port(), &VIRTIO_GPU_Q1),
+            terminal_desktop_config(disk, peer.port(), &VIRTIO_GPU_Q1),
             false,
             forbidden,
             Duration::from_secs(300),

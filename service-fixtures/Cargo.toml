@@ -19,7 +19,9 @@ clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 
 [dev-dependencies]
 clean-slate-block = { path = "../block", features = ["alloc"] }
-clean-slate-network = { path = "../network", features = ["alloc"] }
+# `net_probe` tests check its constants against the fixture peer. Dev-only: no build of
+# the library, and so no production image, gets `network::fixture` from it.
+clean-slate-network = { path = "../network", features = ["alloc", "fixture"] }
 
 [lints]
 workspace = true

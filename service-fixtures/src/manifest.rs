@@ -54,6 +54,8 @@ pub enum ServiceImage {
     Console,
     /// `clean-slate-terminal-userspace`, the terminal window (#311).
     Terminal,
+    /// `clean-slate-net-probe-userspace`, the native network probe (#353).
+    NetProbe,
 }
 
 impl ServiceImage {
@@ -72,7 +74,8 @@ impl ServiceImage {
             | Self::Playground
             | Self::Audit
             | Self::Console
-            | Self::Terminal => false,
+            | Self::Terminal
+            | Self::NetProbe => false,
         }
     }
 
@@ -89,7 +92,7 @@ impl ServiceImage {
 ///
 /// `ConsoleInput`, `TmpObjects` and `NetworkClient` are Linux-personality grants: the kernel
 /// applies them while it builds the Linux process, so only a [`ServiceImage::LinuxShell`] row
-/// may hold them. `Console` is valid on that row, on the desktop images, whose console handle
+/// may hold them. `NativeNetworkClient` is their native counterpart for network access. `Console` is valid on that row, on the desktop images, whose console handle
 /// is written into their launch page, and on the audit image, which reads it from its
 /// bootstrap page.
 ///
@@ -119,6 +122,12 @@ pub enum Grant {
     /// network instance from it, at launch and each time a network instance registers. The
     /// row does not depend on the network: with no instance live, socket calls fail.
     NetworkClient,
+    /// [`Self::NetworkClient`] for a native image (#353): the same entitlement and
+    /// instance-bound client capability, which the instance uses through syscalls 14 and 15
+    /// (`clean_slate_native_abi::net`) rather than Linux sockets. The kernel attributes the
+    /// instance to its row, so the row's per-app network policy applies. Native images other
+    /// than the network service only.
+    NativeNetworkClient,
     /// Registers the row's graphics port, `graphics(row id, instance generation)`, for the
     /// instance being started, plus a root `GFX_SERVE` capability on it. Teardown unregisters
     /// the port (clients see `ServerGone`) and revokes the capability. Compositor rows only;
@@ -231,6 +240,12 @@ pub struct ServiceSpec {
 }
 
 impl ServiceSpec {
+    /// Whether instances of the row are network clients, Linux or native: the rows the per-app
+    /// network policy names.
+    pub const fn is_network_client(&self) -> bool {
+        self.grants(Grant::NetworkClient) || self.grants(Grant::NativeNetworkClient)
+    }
+
     pub const fn grants(&self, grant: Grant) -> bool {
         let mut index = 0;
         while index < self.grants.len() {
@@ -807,6 +822,7 @@ const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
         Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
             matches!(image, ServiceImage::LinuxShell)
         }
+        Grant::NativeNetworkClient => !image.is_linux() && !matches!(image, ServiceImage::Network),
         Grant::GraphicsPort | Grant::DisplayPresenter | Grant::InputSeat => {
             matches!(image, ServiceImage::Compositor)
         }
@@ -1770,6 +1786,32 @@ mod tests {
             validate_manifest(&rows),
             Err(ManifestError::DependsOnRequestRow { row: 9 }),
             "the terminal depends on the playground"
+        );
+    }
+
+    #[test]
+    fn the_native_network_client_grant_is_for_native_apps_only() {
+        let mut app = PLAYGROUND_SERVICE_SPEC;
+        app.grants = &[
+            Grant::Console,
+            Grant::GraphicsAppRole,
+            Grant::NativeNetworkClient,
+        ];
+        let mut rows = SYSTEM_DESKTOP_MANIFEST.to_vec();
+        rows[7] = app;
+        assert_eq!(validate_manifest(&rows), Ok(()));
+        assert!(app.is_network_client());
+        let mut shell = SYSTEM_SHELL_SPEC;
+        shell.grants = &[Grant::Console, Grant::NativeNetworkClient];
+        assert_eq!(
+            validate_manifest(&[STORAGE_SERVICE_SPEC, CONSOLE_SERVICE_SPEC, shell]),
+            Err(ManifestError::GrantNotSupportedByImage { row: 2 })
+        );
+        let mut network = NETWORK_SERVICE_SPEC;
+        network.grants = &[Grant::NetworkService, Grant::NativeNetworkClient];
+        assert_eq!(
+            validate_manifest(&[STORAGE_SERVICE_SPEC, network]),
+            Err(ManifestError::GrantNotSupportedByImage { row: 1 })
         );
     }
 

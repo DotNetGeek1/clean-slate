@@ -81,7 +81,8 @@ impl LinuxGrants {
                 | Grant::GraphicsAppRole
                 | Grant::ConsoleService
                 | Grant::ConsoleFrontEnd
-                | Grant::LauncherClient => {
+                | Grant::LauncherClient
+                | Grant::NativeNetworkClient => {
                     return Err("system shell: native grant on a Linux row");
                 }
             }
@@ -219,6 +220,8 @@ pub(crate) fn launch(
 pub(crate) fn on_console_input_wait(pid: u64) {
     let controller = unsafe { service_lifecycle_controller_mut() };
     if let Ok(instance) = controller.report_ready_from_pid(pid) {
+        #[cfg(feature = "system-test-hooks")]
+        crate::service::system_test_hooks::on_service_ready(instance.service, instance.pid.0);
         kernel_log_fmt(format_args!(
             "[SVC ] ready service={} pid={} gen={} source=live-instance kernel-observed first-console-input-wait\n",
             instance.service.0, instance.pid.0, instance.generation.0

@@ -33,6 +33,23 @@ const _: () = assert!(
         && STORAGE_PROBE_USERSPACE_MAPPED_CODE_PAGES + (STORAGE_PROBE_STACK_PAGES as usize)
             < crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
 );
+#[cfg(clean_slate_userspace_selftest = "m10-net")]
+include!(concat!(env!("OUT_DIR"), "/net_probe_userspace_entry.rs"));
+#[cfg(clean_slate_userspace_selftest = "m10-net")]
+const NET_PROBE_USERSPACE_IMAGE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/net_probe_userspace.bin"));
+/// The probe's stack holds a 4 KiB receive buffer and the request frames.
+#[cfg(clean_slate_userspace_selftest = "m10-net")]
+const NET_PROBE_STACK_PAGES: u64 = 8;
+#[cfg(clean_slate_userspace_selftest = "m10-net")]
+const _: () = assert!(NET_PROBE_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDRESS);
+#[cfg(clean_slate_userspace_selftest = "m10-net")]
+const _: () = assert!(
+    // The bootstrap page sits 1 MiB above the code address.
+    NET_PROBE_USERSPACE_MAPPED_CODE_PAGES < 256
+        && NET_PROBE_USERSPACE_MAPPED_CODE_PAGES + (NET_PROBE_STACK_PAGES as usize)
+            < crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
+);
 #[cfg(clean_slate_system_init)]
 include!(concat!(env!("OUT_DIR"), "/console_userspace_entry.rs"));
 #[cfg(clean_slate_system_init)]
@@ -461,6 +478,9 @@ pub(crate) enum BuiltinServiceImage {
     /// #310 console service.
     #[cfg(clean_slate_system_init)]
     ConsoleUserspacePayload,
+    /// #353 native network probe, the `m10-net` lane's app.
+    #[cfg(clean_slate_userspace_selftest = "m10-net")]
+    NetProbePayload,
     /// #118 desktop images: the system build's desktop rows.
     #[cfg(clean_slate_desktop)]
     Desktop(super::desktop_image::DesktopRole),
@@ -531,6 +551,10 @@ impl BuiltinServiceImage {
             #[cfg(clean_slate_system_init)]
             id if id == clean_slate_service_fixtures::CONSOLE_SERVICE_ID.0 => {
                 Self::ConsoleUserspacePayload
+            }
+            #[cfg(clean_slate_userspace_selftest = "m10-net")]
+            id if id == clean_slate_service_fixtures::net_probe::NET_PROBE_SERVICE_ID.0 => {
+                Self::NetProbePayload
             }
             _ => Self::ImmediateExit,
         }
@@ -677,6 +701,10 @@ pub(crate) fn launch_builtin_service(
         #[cfg(clean_slate_system_init)]
         BuiltinServiceImage::ConsoleUserspacePayload => {
             launch_console_userspace_service(allocator, kernel_stack_top, scheduler_slot, context)
+        }
+        #[cfg(clean_slate_userspace_selftest = "m10-net")]
+        BuiltinServiceImage::NetProbePayload => {
+            launch_net_probe(allocator, kernel_stack_top, scheduler_slot)
         }
         #[cfg(clean_slate_desktop)]
         BuiltinServiceImage::Desktop(role) => {
@@ -1020,6 +1048,10 @@ fn launch_single_page_service(
             BuiltinServiceImage::ConsoleUserspacePayload => {
                 return Err("console userspace image must use the console launch path");
             }
+            #[cfg(clean_slate_userspace_selftest = "m10-net")]
+            BuiltinServiceImage::NetProbePayload => {
+                return Err("net probe image must use the net probe launch path");
+            }
             #[cfg(any(
                 feature = "m6-object-self-test",
                 feature = "m6-process-control-self-test",
@@ -1306,7 +1338,8 @@ fn launch_console_userspace_service(
 /// above that page.
 #[cfg(any(
     clean_slate_system_init,
-    clean_slate_userspace_selftest = "m10-storage"
+    clean_slate_userspace_selftest = "m10-storage",
+    clean_slate_userspace_selftest = "m10-net"
 ))]
 struct BootstrapPageImage {
     bytes: &'static [u8],
@@ -1321,7 +1354,8 @@ struct BootstrapPageImage {
 /// every handle it grants is in the page before the first instruction.
 #[cfg(any(
     clean_slate_system_init,
-    clean_slate_userspace_selftest = "m10-storage"
+    clean_slate_userspace_selftest = "m10-storage",
+    clean_slate_userspace_selftest = "m10-net"
 ))]
 fn launch_bootstrap_page_image<B: Copy>(
     allocator: &mut PageAllocator,
@@ -1440,6 +1474,33 @@ pub(crate) fn launch_storage_probe(
                 directory_id,
             })
         },
+    )
+}
+
+/// #353: launches the native network probe (`clean-slate-net-probe-userspace`) for its manifest
+/// row. Its network client capability comes from the row's `NativeNetworkClient` instance
+/// grant, applied after the spawn; the bootstrap page carries only its pid.
+#[cfg(clean_slate_userspace_selftest = "m10-net")]
+#[inline(never)]
+fn launch_net_probe(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    use clean_slate_service_fixtures::net_probe::NET_PROBE_BOOTSTRAP_ADDRESS;
+
+    launch_bootstrap_page_image(
+        allocator,
+        kernel_stack_top,
+        scheduler_slot,
+        &BootstrapPageImage {
+            bytes: NET_PROBE_USERSPACE_IMAGE,
+            segments: &NET_PROBE_USERSPACE_SEGMENTS,
+            entry_offset: NET_PROBE_USERSPACE_ENTRY_OFFSET,
+            stack_pages: NET_PROBE_STACK_PAGES,
+            bootstrap_address: NET_PROBE_BOOTSTRAP_ADDRESS,
+        },
+        Ok::<u64, &'static str>,
     )
 }
 

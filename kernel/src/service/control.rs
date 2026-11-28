@@ -574,6 +574,12 @@ impl ServiceLifecycleController {
         ))
     }
 
+    /// Whether init declared `service` in this boot's manifest.
+    #[cfg(feature = "system-test-hooks")]
+    pub(crate) fn is_declared(&self, service: ServiceId) -> bool {
+        self.find_service(service).is_some()
+    }
+
     fn find_service(&self, service: ServiceId) -> Option<&ServiceRecord> {
         self.services
             .iter()
@@ -1407,6 +1413,19 @@ impl InstanceGrantAuthority for KernelInstanceGrants {
         Err(self.grant_failed(pid, "launcher client", DESKTOP_NOT_COMPILED))
     }
 
+    /// #353: the row's instance is its app for the network policy, as a Linux network client's
+    /// is (`system_shell::apply_linux_grants`), then it gets the client entitlement and, with a
+    /// network instance live, the capability derived from it.
+    fn grant_native_network_client(&mut self, pid: u64) -> Result<(), &'static str> {
+        use clean_slate_capability::HolderId;
+
+        crate::service::net_app::attribute(pid, u64::from(self.service_id.0))
+            .map_err(|message| self.grant_failed(pid, "network client", message))?;
+        crate::capability::network::grant_network_client_entitlement(HolderId(pid))
+            .map_err(|_| self.grant_failed(pid, "network client", "entitlement refused"))?;
+        Ok(())
+    }
+
     #[cfg(not(clean_slate_desktop))]
     fn grant_console_service(&mut self, pid: u64) -> Result<(), &'static str> {
         Err(self.grant_failed(pid, "console port", DESKTOP_NOT_COMPILED))
@@ -1465,6 +1484,7 @@ const fn rollback_failure_message(grant: Grant) -> &'static str {
         | Grant::ConsoleSession
         | Grant::ConsoleFrontEnd => "console grant rollback teardown failed",
         Grant::LauncherClient => "launcher grant rollback teardown failed",
+        Grant::NativeNetworkClient => "network client grant rollback teardown failed",
     }
 }
 

@@ -5,9 +5,11 @@ use clean_slate_network::protocol::{
 };
 
 pub const NETWORK_UNAUTHORIZED_PROBE_SERVICE_ID_VALUE: u32 = 0x0000_5201;
-pub const NETWORK_DEVICE_ID: u64 = 1;
-/// Application network access (submit/poll); distinct from raw NIC authority.
-pub const NETWORK_CLIENT_DEVICE_ID: u64 = 2;
+/// The client-facing half of the transport is the native network ABI (#353).
+pub use clean_slate_native_abi::net::{
+    NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID, NET_SUBOP_DISCARD,
+    NET_SUBOP_POLL, NET_SUBOP_SUBMIT, NET_SUBOP_WAIT,
+};
 
 pub const NETWORK_STATUS_PENDING: u64 = 0xFFFF_FFFF_FFFF_FFF0;
 
@@ -22,8 +24,6 @@ pub const NETWORK_SERVICE_LAUNCH_ADDRESS: u64 =
 /// bootstrap page and the stack above it.
 pub const NETWORK_SERVICE_TRUST_ADDRESS: u64 = 0x0000_4000_0030_0000;
 pub const NETWORK_SERVICE_TRUST_PAGES: usize = clean_slate_network::config::TRUST_STORE_PAGES;
-
-pub const NETWORK_CAPABILITY_VERSION: u16 = 1;
 
 pub const NETWORK_SERVICE_MODE_ACCEPTANCE: u64 = 1;
 pub const NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE: u64 = 2;
@@ -45,8 +45,6 @@ pub const NETWORK_SERVICE_AUX_NO_ENTROPY_REASON_MASK: u64 = 0xff;
 /// configuration or trust anchors) did not check out; it stopped before it was ready.
 pub const NETWORK_SERVICE_AUX_BAD_LAUNCH: u64 = 0x4e4c_0000;
 
-pub const NET_SUBOP_SUBMIT: u64 = 1;
-pub const NET_SUBOP_POLL: u64 = 2;
 pub const NET_SUBOP_SERVICE_NEXT: u64 = 3;
 pub const NET_SUBOP_SERVICE_COMPLETE: u64 = 4;
 pub const NET_SUBOP_RAW_GEOMETRY: u64 = 5;
@@ -387,5 +385,216 @@ mod lease_report_tests {
         assert_eq!(NetLeaseReport::decode(4 << 40), None);
         assert_eq!(NetLeaseReport::decode(1 << 40 | 33 << 32), None);
         assert_eq!(NetLeaseReport::decode(1 << 48 | 1 << 40), None);
+    }
+}
+
+/// The native network ABI (#353) restates the service's frames for clients that do not link
+/// `clean-slate-network`; this crate sees both, so they are proven equal here.
+#[cfg(test)]
+mod native_abi_mirrors_the_service_protocol {
+    use clean_slate_native_abi::net::{
+        net_error_status, NetAddr, NetRequest, NetResponse, NET_ERROR_CLOSED,
+        NET_ERROR_DESTINATION_DENIED, NET_ERROR_INVALID_REQUEST, NET_ERROR_NOT_FOUND,
+        NET_ERROR_PROTOCOL, NET_ERROR_QUEUE_FULL, NET_ERROR_RESET, NET_ERROR_SESSION_EXHAUSTED,
+        NET_ERROR_TIMEOUT, NET_ERROR_UNREACHABLE, NET_FRAME_BYTES, NET_FRAME_MAGIC,
+        NET_FRAME_VERSION, NET_MAX_HOSTNAME_BYTES, NET_MAX_PAYLOAD_BYTES, NET_SOCKET_DATAGRAM,
+        NET_SOCKET_STREAM, NET_SOCKET_TLS_EXCHANGE,
+    };
+    use clean_slate_native_abi::status::{STATUS_EACCES, STATUS_ESTALE};
+    use clean_slate_network::addr::{BoundedHostname, Ipv4Addr, SocketAddrV4};
+
+    #[test]
+    fn every_network_subop_has_its_own_number() {
+        let subops = [
+            super::NET_SUBOP_SUBMIT,
+            super::NET_SUBOP_POLL,
+            super::NET_SUBOP_SERVICE_NEXT,
+            super::NET_SUBOP_SERVICE_COMPLETE,
+            super::NET_SUBOP_RAW_GEOMETRY,
+            super::NET_SUBOP_RAW_TRANSMIT,
+            super::NET_SUBOP_RAW_RECEIVE,
+            super::NET_SUBOP_POP_HOLDER_EXIT,
+            super::NET_SUBOP_ACK_HOLDER_EXIT,
+            super::NET_SUBOP_MONOTONIC_TICKS,
+            super::NET_SUBOP_TICK_PERIOD_NS,
+            super::NET_SUBOP_WAIT_WORK,
+            super::NET_SUBOP_AUDIT_REFUSAL,
+            super::NET_SUBOP_PUBLISH_RESOLVER,
+            super::NET_SUBOP_WAIT,
+            super::NET_SUBOP_DISCARD,
+        ];
+        for (index, subop) in subops.iter().enumerate() {
+            assert!(
+                !subops[index + 1..].contains(subop),
+                "sub-operation {subop} is used twice"
+            );
+        }
+    }
+    use clean_slate_network::error::{DenialReason, NetworkError};
+    use clean_slate_network::limits::{MAX_APPLICATION_PAYLOAD_BYTES, MAX_REQUEST_HOSTNAME_LEN};
+    use clean_slate_network::protocol::{
+        NetworkRequest, NetworkResponse, NETWORK_PROTOCOL_MAGIC, NETWORK_PROTOCOL_VERSION,
+        NETWORK_REQUEST_BYTES, NETWORK_RESPONSE_BYTES,
+    };
+    use clean_slate_network::session::{SessionId, SocketKind};
+
+    #[test]
+    fn sizes_and_kinds_match() {
+        assert_eq!(NET_FRAME_BYTES, NETWORK_REQUEST_BYTES);
+        assert_eq!(NET_FRAME_BYTES, NETWORK_RESPONSE_BYTES);
+        assert_eq!(NET_FRAME_MAGIC, NETWORK_PROTOCOL_MAGIC);
+        assert_eq!(NET_FRAME_VERSION, NETWORK_PROTOCOL_VERSION);
+        assert_eq!(NET_MAX_PAYLOAD_BYTES, MAX_APPLICATION_PAYLOAD_BYTES);
+        assert_eq!(NET_MAX_HOSTNAME_BYTES, MAX_REQUEST_HOSTNAME_LEN);
+        assert_eq!(NET_SOCKET_STREAM, SocketKind::LinuxTcp as u8);
+        assert_eq!(NET_SOCKET_DATAGRAM, SocketKind::LinuxUdp as u8);
+        assert_eq!(NET_SOCKET_TLS_EXCHANGE, SocketKind::Tcp as u8);
+        assert_eq!(
+            super::NETWORK_STATUS_PENDING,
+            clean_slate_native_abi::NETWORK_STATUS_PENDING
+        );
+    }
+
+    #[test]
+    fn native_requests_decode_as_the_service_reads_them() {
+        let session = SessionId::from_raw(0x0003_0000_0009);
+        let peer = SocketAddrV4::new(Ipv4Addr::new([10, 77, 0, 1]), 4443);
+        let cases = [
+            (
+                NetRequest::Resolve {
+                    name: b"m7.fixture.test",
+                },
+                NetworkRequest::Resolve {
+                    name: BoundedHostname::try_from_str("m7.fixture.test").unwrap(),
+                },
+            ),
+            (
+                NetRequest::Open {
+                    kind: NET_SOCKET_STREAM,
+                },
+                NetworkRequest::Open {
+                    kind: SocketKind::LinuxTcp,
+                },
+            ),
+            (
+                NetRequest::Connect {
+                    session: session.raw(),
+                    peer: NetAddr::new([10, 77, 0, 1], 4443),
+                },
+                NetworkRequest::Connect {
+                    session,
+                    dest: peer,
+                },
+            ),
+            (
+                NetRequest::Send {
+                    session: session.raw(),
+                    len: 30,
+                },
+                NetworkRequest::Send {
+                    session,
+                    payload_len: 30,
+                },
+            ),
+            (
+                NetRequest::Receive {
+                    session: session.raw(),
+                    max_len: 4096,
+                },
+                NetworkRequest::Receive {
+                    session,
+                    max_len: 4096,
+                },
+            ),
+            (
+                NetRequest::Close {
+                    session: session.raw(),
+                },
+                NetworkRequest::Close { session },
+            ),
+        ];
+        for (native, service) in cases {
+            let frame = native.encode().unwrap();
+            assert_eq!(NetworkRequest::decode(&frame), Ok(service));
+            assert_eq!(frame, service.encode());
+        }
+    }
+
+    #[test]
+    fn service_responses_decode_natively() {
+        let session = SessionId::from_raw(0x0003_0000_0009);
+        let cases = [
+            (
+                NetworkResponse::Resolve {
+                    addr: Ipv4Addr::new([10, 77, 0, 1]),
+                    ttl: 300,
+                },
+                NetResponse::Resolve {
+                    ip: [10, 77, 0, 1],
+                    ttl: 300,
+                },
+            ),
+            (
+                NetworkResponse::Open { session },
+                NetResponse::Open {
+                    session: session.raw(),
+                },
+            ),
+            (NetworkResponse::Connect, NetResponse::Connect),
+            (
+                NetworkResponse::Send { bytes_sent: 12 },
+                NetResponse::Send { accepted: 12 },
+            ),
+            (
+                NetworkResponse::Receive { payload_len: 31 },
+                NetResponse::Receive { len: 31 },
+            ),
+            (NetworkResponse::Close, NetResponse::Close),
+            (
+                NetworkResponse::Error { code: 8 },
+                NetResponse::Error { code: 8 },
+            ),
+        ];
+        for (service, native) in cases {
+            assert_eq!(NetResponse::decode(&service.encode()), Ok(native));
+            assert_eq!(native.encode(), service.encode());
+        }
+    }
+
+    #[test]
+    fn error_codes_match() {
+        assert_eq!(
+            NET_ERROR_DESTINATION_DENIED,
+            NetworkError::Denied(DenialReason::Destination).code()
+        );
+        assert_eq!(
+            net_error_status(NetworkError::Denied(DenialReason::StaleGeneration).code()),
+            STATUS_ESTALE
+        );
+        for reason in [
+            DenialReason::NoCapability,
+            DenialReason::MissingRight,
+            DenialReason::Revoked,
+            DenialReason::Destination,
+        ] {
+            assert_eq!(
+                net_error_status(NetworkError::Denied(reason).code()),
+                STATUS_EACCES
+            );
+        }
+        let named = [
+            (NET_ERROR_INVALID_REQUEST, NetworkError::InvalidRequest),
+            (NET_ERROR_UNREACHABLE, NetworkError::Unreachable),
+            (NET_ERROR_TIMEOUT, NetworkError::Timeout),
+            (NET_ERROR_RESET, NetworkError::Reset),
+            (NET_ERROR_PROTOCOL, NetworkError::Protocol),
+            (NET_ERROR_QUEUE_FULL, NetworkError::QueueFull),
+            (NET_ERROR_SESSION_EXHAUSTED, NetworkError::SessionExhausted),
+            (NET_ERROR_NOT_FOUND, NetworkError::NotFound),
+            (NET_ERROR_CLOSED, NetworkError::Closed),
+        ];
+        for (code, error) in named {
+            assert_eq!(code, error.code(), "{error:?}");
+        }
     }
 }

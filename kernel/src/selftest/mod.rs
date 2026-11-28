@@ -31,6 +31,8 @@ pub(crate) mod m10_framebuffer;
 pub(crate) mod m10_input;
 #[cfg(feature = "m10-native-memory-self-test")]
 pub(crate) mod m10_native_memory;
+#[cfg(clean_slate_userspace_selftest = "m10-net")]
+pub(crate) mod m10_net;
 #[cfg(feature = "m10-nxe-self-test")]
 pub(crate) mod m10_nxe;
 #[cfg(feature = "m10-port-self-test")]

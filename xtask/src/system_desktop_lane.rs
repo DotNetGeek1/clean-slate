@@ -861,7 +861,10 @@ fn run_on(run: &LaneRun, disk: &std::path::Path, fixture_port: u16) -> Result<()
         "[STD ] {} captures matched; desktop ended with {} pids {:?}",
         planned.len(),
         ROW_NAMES.join("/"),
-        desktop.rows.map(|row| row.pid)
+        desktop.rows[..3]
+            .iter()
+            .map(|row| row.pid)
+            .collect::<Vec<_>>()
     );
     Ok(())
 }

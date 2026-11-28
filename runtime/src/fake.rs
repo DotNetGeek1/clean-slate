@@ -11,6 +11,9 @@ use std::vec::Vec;
 use clean_slate_capability::{HolderId, Rights};
 use clean_slate_native_abi::desktop::SYSCALL_NR_IPC_SEND;
 use clean_slate_native_abi::directory::is_entry_of;
+use clean_slate_native_abi::net::{
+    NetAddr, SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
+};
 use clean_slate_native_abi::object::{
     ObjectSubmitAt, OBJECT_OP_COMMIT, OBJECT_OP_READ_AT, OBJECT_OP_TRUNCATE, OBJECT_OP_WRITE_AT,
     OBJECT_SUBMIT_AT_BYTES, OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT_AT, SYSCALL_NR_CAP_OBJECT,
@@ -77,6 +80,7 @@ pub struct FakeKernel {
     calls: Vec<(u64, [u64; 6])>,
     console: Vec<Vec<u8>>,
     objects: FakeObjects,
+    net: crate::fake_net::FakeNet,
 }
 
 impl FakeKernel {
@@ -104,7 +108,78 @@ impl FakeKernel {
             calls: Vec::new(),
             console: Vec::new(),
             objects: FakeObjects::default(),
+            net: crate::fake_net::FakeNet::default(),
         }
+    }
+
+    /// Gives the client the network client capability `handle` (#353); without it every
+    /// network call is refused with `EACCES`. The fake's service may resolve names until
+    /// [`Self::net_forbid_resolve`].
+    pub fn net_grant(&mut self, handle: u64) {
+        self.net.grant(handle);
+    }
+
+    /// The service's resolver answers `name` with `ip`.
+    pub fn net_name(&mut self, name: &str, ip: [u8; 4]) {
+        self.net.name(name, ip);
+    }
+
+    /// The client's policy may not resolve names.
+    pub fn net_forbid_resolve(&mut self) {
+        self.net.forbid_resolve();
+    }
+
+    /// The client's policy refuses `addr` (`NET_ERROR_DESTINATION_DENIED`).
+    pub fn net_deny(&mut self, addr: NetAddr) {
+        self.net.deny(addr);
+    }
+
+    /// A TCP peer at `addr` that sends `answer` once it has received `after` bytes, then closes
+    /// its side when `close`. Streams to any other address fail to connect (`ETIMEDOUT`).
+    pub fn net_tcp_peer(&mut self, addr: NetAddr, after: usize, answer: &[u8], close: bool) {
+        self.net.tcp_peer(addr, after, answer, close);
+    }
+
+    /// A TLS peer at `addr` that answers any request with `answer`. An exchange with any other
+    /// address fails (`ETIMEDOUT`).
+    pub fn net_tls_peer(&mut self, addr: NetAddr, answer: &[u8]) {
+        self.net.tls_peer(addr, answer);
+    }
+
+    /// A UDP peer at `addr` that echoes every datagram.
+    pub fn net_udp_echo(&mut self, addr: NetAddr) {
+        self.net.udp_echo(addr);
+    }
+
+    /// `addr` sends `bytes` on every stream connected to it.
+    pub fn net_push(&mut self, addr: NetAddr, bytes: &[u8]) {
+        self.net.push(addr, bytes);
+    }
+
+    /// The network service restarts: its sessions go stale and the client capability becomes
+    /// `new_handle`.
+    pub fn net_restart(&mut self, new_handle: u64) {
+        self.net.restart(new_handle);
+    }
+
+    /// Every byte the client sent to `addr`.
+    pub fn net_sent_to(&self, addr: NetAddr) -> Vec<u8> {
+        self.net.sent_to(addr)
+    }
+
+    /// Sessions the client has open with the service.
+    pub fn net_open_sessions(&self) -> usize {
+        self.net.open_sessions()
+    }
+
+    /// Requests the client submitted and has neither polled nor discarded.
+    pub fn net_outstanding_requests(&self) -> usize {
+        self.net.outstanding_requests()
+    }
+
+    /// What the policy refused, in order: a destination, or `None` for a name resolution.
+    pub fn net_refusals(&self) -> &[Option<NetAddr>] {
+        self.net.refusals()
     }
 
     /// Gives the client `handle`, authorising object `id` (`READ`, and `WRITE` when `write`).
@@ -516,6 +591,8 @@ impl Syscalls for FakeKernel {
             SYSCALL_NR_SERVICE_PORT => self.port_call(args),
             SYSCALL_NR_SHARED_BUFFER => self.buffer_call(args),
             SYSCALL_NR_CAP_OBJECT => self.object_call(args),
+            SYSCALL_NR_NETWORK_CAPABILITY => self.net.capability_call(args),
+            SYSCALL_NR_NETWORK_REQUEST => self.net.request_call(args),
             SYSCALL_NR_WORK_SET => 1,
             SYSCALL_NR_IPC_SEND => {
                 // SAFETY: the client passes a live slice.

@@ -203,7 +203,7 @@ fn check_boot(segment: &str, run: &Run) -> Result<(), String> {
             "no {VIRTIO_SEAT:?}: the virtio keyboard and tablet were not both brought up"
         ));
     }
-    check_baseline_boot_at(segment, &run.machine, run.started).map(|_| ())
+    check_baseline_boot_at(segment, &run.machine, run.started, false).map(|_| ())
 }
 
 fn config(disk: &Path, fixture_port: u16, run: &Run) -> VmLaunchConfig {

@@ -673,6 +673,27 @@ impl NetBridge {
         }
     }
 
+    /// Whether the caller's `request_id` has completed, without consuming it (#353
+    /// `NET_SUBOP_WAIT`).
+    pub fn request_done(
+        &self,
+        pid: u64,
+        domain: u64,
+        instance_generation: u64,
+        request_id: u64,
+    ) -> Result<bool, NetBridgeError> {
+        let caller = self.trusted_caller(pid, domain, instance_generation);
+        let slot = self
+            .slots
+            .iter()
+            .find(|slot| slot.state != ClientSlotState::Free && slot.request_id == request_id)
+            .ok_or(NetBridgeError::InvalidRequest)?;
+        if slot.client != caller {
+            return Err(NetBridgeError::Unauthorized);
+        }
+        Ok(slot.state == ClientSlotState::Done)
+    }
+
     pub(crate) fn net_service_has_work(&self) -> bool {
         self.slots
             .iter()

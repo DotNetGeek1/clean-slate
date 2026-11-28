@@ -14,6 +14,7 @@ pub mod directory;
 pub mod launcher;
 pub mod lifecycle;
 pub mod memory;
+pub mod net;
 pub mod object;
 pub mod shared_buffer;
 

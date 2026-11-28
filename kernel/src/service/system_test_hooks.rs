@@ -1,10 +1,11 @@
 //! `system-test-hooks` (#218 S7b, S6d): the test-only differences between the kernel that
 //! `cargo xtask test-system` boots and the default image. Nothing else enables the feature.
 //!
-//! **Fault bytes.** Each of six control bytes on COM1 asks for the live instance of one service
+//! **Fault bytes.** Each of eight control bytes on COM1 asks for the live instance of one service
 //! to fault: Ctrl-\ (`0x1C`) the network service, Ctrl-] (`0x1D`) the compositor, Ctrl-^ (`0x1E`)
-//! the desktop shell, Ctrl-_ (`0x1F`) the app, Ctrl-X (`0x18`) the console service (#310) and
-//! Ctrl-Y (`0x19`) the audit service (#219). The default line discipline drops all six as
+//! the desktop shell, Ctrl-_ (`0x1F`) the app, Ctrl-X (`0x18`) the console service (#310),
+//! Ctrl-Y (`0x19`) the audit service (#219), Ctrl-T (`0x14`) the terminal and Ctrl-W (`0x17`)
+//! the terminal's shell (#358). The default line discipline drops all eight as
 //! unhandled control bytes in every build, so the hooks build changes nothing about how the
 //! shell's input is processed; it only also notices them.
 //!
@@ -35,14 +36,15 @@
 //! **Desktop evidence.** Three checks need a kernel-chosen moment and are lane evidence rather
 //! than system behaviour:
 //! - the desktop resource snapshot, taken at the first quiescence (no runnable thread, no
-//!   present in flight) once the compositor, desktop shell and app instances that are live have
-//!   all reported ready: the first is `[RSRC] baseline`, each later one is compared with it;
+//!   present in flight) once the compositor, desktop shell and app instances, and on the default
+//!   desktop the terminal's and its shell's, are live and have all reported ready: the first is
+//!   `[RSRC] baseline`, each later one is compared with it;
 //! - after the baseline, `[IDLE ] quiet ... presents=N` once per stretch of at least half a
 //!   second in which nothing ran, so a lane can require that an untouched desktop does not
 //!   present;
 //! - the stale-generation probe: a desktop client launched after a compositor restart is given a
 //!   probe record naming the previous compositor generation's port, which must be refused as
-//!   stale by the live port and is then revoked.
+//!   stale by the live port and is then revoked. The terminal is probed like the app.
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -50,7 +52,7 @@ use clean_slate_capability::{AuditEvent, AuditKind, HolderId, ResourceClass, Res
 use clean_slate_port::PortError;
 use clean_slate_service_fixtures::{
     AUDIT_SERVICE_ID, COMPOSITOR_SERVICE_ID, CONSOLE_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID,
-    PLAYGROUND_SERVICE_ID, SYSTEM_SHELL_SERVICE_ID,
+    PLAYGROUND_SERVICE_ID, SYSTEM_SHELL_SERVICE_ID, TERMINAL_SERVICE_ID, TERMINAL_SHELL_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::ServiceId;
 
@@ -73,7 +75,7 @@ struct FaultTarget {
 
 /// None of these bytes is printable or one the line discipline acts on (CR, LF, BS, DEL,
 /// Ctrl-U, Ctrl-D), so each reaches the discipline as an ordinary dropped control byte.
-const FAULT_TARGETS: [FaultTarget; 6] = [
+const FAULT_TARGETS: [FaultTarget; 8] = [
     FaultTarget {
         byte: 0x1c,
         service: NETWORK_SERVICE_ID,
@@ -104,6 +106,16 @@ const FAULT_TARGETS: [FaultTarget; 6] = [
         service: AUDIT_SERVICE_ID,
         name: "audit",
     },
+    FaultTarget {
+        byte: 0x14,
+        service: TERMINAL_SERVICE_ID,
+        name: "terminal",
+    },
+    FaultTarget {
+        byte: 0x17,
+        service: TERMINAL_SHELL_SERVICE_ID,
+        name: "terminal-shell",
+    },
 ];
 
 /// Set by the receive path, cleared once the fault is armed or there is nothing to fault.
@@ -123,7 +135,7 @@ static AUDIT_FLOOD_COMMIT: AtomicBool = AtomicBool::new(false);
 /// Printed once COM1 receive is on, so every transcript says which build produced it.
 pub(crate) fn announce() {
     kernel_log_fmt(format_args!(
-        "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service, Ctrl-] the compositor, Ctrl-^ the desktop shell, Ctrl-_ the app, Ctrl-X the console service, Ctrl-Y the audit service; Ctrl-A queues an audit denial, Ctrl-B commits them; Ctrl-V sets the smallest other display mode\n"
+        "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service, Ctrl-] the compositor, Ctrl-^ the desktop shell, Ctrl-_ the app, Ctrl-X the console service, Ctrl-Y the audit service, Ctrl-T the terminal, Ctrl-W the terminal's shell; Ctrl-A queues an audit denial, Ctrl-B commits them; Ctrl-V sets the smallest other display mode\n"
     ));
 }
 
@@ -281,17 +293,22 @@ fn uptime_ms() -> u64 {
     crate::time::monotonic_ns() / 1_000_000
 }
 
-const DESKTOP_ROWS: [ServiceId; 3] = [
+/// The rows the desktop evidence follows. The last two are declared only on the default
+/// desktop; on the bare one they are left out of the snapshot and its line.
+const DESKTOP_ROWS: [ServiceId; 5] = [
     COMPOSITOR_SERVICE_ID,
     DESKTOP_SHELL_SERVICE_ID,
     PLAYGROUND_SERVICE_ID,
+    TERMINAL_SERVICE_ID,
+    TERMINAL_SHELL_SERVICE_ID,
 ];
+const TERMINAL_ROW: usize = 3;
 
 struct DesktopEvidence {
     /// Each desktop row's pid that last reported ready.
-    ready: [Option<u64>; 3],
-    /// The desktop row pids the last snapshot was taken with.
-    snapshot_pids: Option<[u64; 3]>,
+    ready: [Option<u64>; 5],
+    /// The desktop row pids the last snapshot was taken with; 0 for a row not declared.
+    snapshot_pids: Option<[u64; 5]>,
     baseline: Option<DesktopResourceSnapshot>,
     /// The live compositor's port generation, and the one before it once it has restarted.
     port_generation: Option<u32>,
@@ -302,7 +319,7 @@ struct DesktopEvidence {
 }
 
 static EVIDENCE: GlobalCell<DesktopEvidence> = GlobalCell::new(DesktopEvidence {
-    ready: [None; 3],
+    ready: [None; 5],
     snapshot_pids: None,
     baseline: None,
     port_generation: None,
@@ -352,7 +369,10 @@ pub(crate) fn on_service_launched(service: ServiceId, pid: u64) {
         state.port_generation = Some(generation.0);
         return;
     }
-    if service != DESKTOP_SHELL_SERVICE_ID && service != PLAYGROUND_SERVICE_ID {
+    if service != DESKTOP_SHELL_SERVICE_ID
+        && service != PLAYGROUND_SERVICE_ID
+        && service != TERMINAL_SERVICE_ID
+    {
         return;
     }
     if let (Some(retired), Some(live)) = (state.retired_port_generation, state.port_generation) {
@@ -469,8 +489,11 @@ fn observe_quiet() {
 fn snapshot_at_quiescence() {
     let controller = unsafe { service_lifecycle_controller_mut() };
     let state = evidence();
-    let mut pids = [0u64; 3];
+    let mut pids = [0u64; 5];
     for (index, row) in DESKTOP_ROWS.iter().enumerate() {
+        if index >= TERMINAL_ROW && !controller.is_declared(*row) {
+            continue;
+        }
         let Some(pid) = controller.live_pid(*row) else {
             return;
         };
@@ -496,16 +519,23 @@ fn snapshot_at_quiescence() {
         .map(|before| restarted_row(before, pids));
     state.snapshot_pids = Some(pids);
     let snapshot = desktop_resource_snapshot();
-    let [compositor, shell, app] = pids;
+    let [compositor, shell, app, terminal, terminal_shell] = pids;
     let label = if after.is_some() {
         "snapshot"
     } else {
         "baseline"
     };
-    kernel_log_fmt(format_args!(
-        "[RSRC] {label} compositor={compositor} desktop-shell={shell} app={app} {}\n",
-        SnapshotFields(&snapshot)
-    ));
+    if terminal == 0 {
+        kernel_log_fmt(format_args!(
+            "[RSRC] {label} compositor={compositor} desktop-shell={shell} app={app} {}\n",
+            SnapshotFields(&snapshot)
+        ));
+    } else {
+        kernel_log_fmt(format_args!(
+            "[RSRC] {label} compositor={compositor} desktop-shell={shell} app={app} terminal={terminal} terminal-shell={terminal_shell} {}\n",
+            SnapshotFields(&snapshot)
+        ));
+    }
     match (after, state.baseline) {
         (None, _) | (_, None) => state.baseline = Some(snapshot),
         (Some(after), Some(baseline)) => kernel_log_fmt(format_args!(
@@ -520,17 +550,16 @@ fn snapshot_at_quiescence() {
 }
 
 /// Which restart changed the desktop pids from `before` to `now`: a new compositor means its
-/// clients were restarted with it.
-fn restarted_row(before: [u64; 3], now: [u64; 3]) -> &'static str {
-    match (
-        before[0] != now[0],
-        before[1] != now[1],
-        before[2] != now[2],
-    ) {
-        (true, _, _) => "compositor-restart",
-        (false, true, true) => "desktop-shell-and-app-restart",
-        (false, true, false) => "desktop-shell-restart",
-        _ => "app-restart",
+/// clients were restarted with it, and a new terminal a new shell for it.
+fn restarted_row(before: [u64; 5], now: [u64; 5]) -> &'static str {
+    let changed = |index: usize| before[index] != now[index];
+    match (changed(0), changed(1), changed(2), changed(3), changed(4)) {
+        (true, ..) => "compositor-restart",
+        (false, true, true, ..) => "desktop-shell-and-app-restart",
+        (false, true, ..) => "desktop-shell-restart",
+        (false, false, true, ..) => "app-restart",
+        (false, false, false, true, _) => "terminal-restart",
+        _ => "terminal-shell-restart",
     }
 }
 
@@ -585,7 +614,10 @@ mod tests {
             .iter()
             .map(|target| target.service.0)
             .collect();
-        assert_eq!(services, [0x5200, 0x5300, 0x5301, 0x5302, 0x5600, 0x5500]);
+        assert_eq!(
+            services,
+            [0x5200, 0x5300, 0x5301, 0x5302, 0x5600, 0x5500, 0x5303, 0x5401]
+        );
         for byte in [AUDIT_FLOOD_QUEUE_BYTE, AUDIT_FLOOD_COMMIT_BYTE] {
             assert!(byte < b' ');
             assert!(!handled.contains(&byte));
@@ -596,12 +628,28 @@ mod tests {
 
     #[test]
     fn a_restart_is_named_by_the_rows_whose_pid_changed() {
-        assert_eq!(restarted_row([5, 6, 7], [5, 6, 9]), "app-restart");
-        assert_eq!(restarted_row([5, 6, 7], [5, 9, 7]), "desktop-shell-restart");
-        assert_eq!(restarted_row([5, 6, 7], [9, 10, 11]), "compositor-restart");
+        let bare = [5, 6, 7, 0, 0];
+        assert_eq!(restarted_row(bare, [5, 6, 9, 0, 0]), "app-restart");
         assert_eq!(
-            restarted_row([5, 6, 7], [5, 9, 10]),
+            restarted_row(bare, [5, 9, 7, 0, 0]),
+            "desktop-shell-restart"
+        );
+        assert_eq!(restarted_row(bare, [9, 10, 11, 0, 0]), "compositor-restart");
+        assert_eq!(
+            restarted_row(bare, [5, 9, 10, 0, 0]),
             "desktop-shell-and-app-restart"
+        );
+        let full = [5, 6, 7, 8, 9];
+        assert_eq!(
+            restarted_row(full, [11, 12, 13, 14, 15]),
+            "compositor-restart"
+        );
+        assert_eq!(restarted_row(full, [5, 6, 13, 8, 9]), "app-restart");
+        assert_eq!(restarted_row(full, [5, 6, 7, 14, 15]), "terminal-restart");
+        assert_eq!(restarted_row(full, [5, 6, 7, 14, 9]), "terminal-restart");
+        assert_eq!(
+            restarted_row(full, [5, 6, 7, 8, 15]),
+            "terminal-shell-restart"
         );
     }
 }

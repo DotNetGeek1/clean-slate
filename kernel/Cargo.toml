@@ -32,6 +32,9 @@ m10-clock-self-test = ["m3-entry-self-test"]
 # #312: a native app writes, reads back and truncates a 1 MiB directory entry across reboots,
 # through the storage service the object lane launches.
 m10-storage-self-test = ["m3-entry-self-test", "m6-object-self-test", "dep:clean-slate-store"]
+# #353: a native app with only the network client grant resolves a name, fetches over TCP and
+# TLS, and is refused a destination its policy does not name, through the network service.
+m10-net-client-self-test = ["m3-entry-self-test", "clean-slate-network/fixture"]
 m4-crash-service-self-test = []
 m4-service-lifecycle-self-test = ["m3-entry-self-test"]
 m4-supervisor-self-test = ["m3-entry-self-test"]
