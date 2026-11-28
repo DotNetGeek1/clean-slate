@@ -206,6 +206,9 @@ impl NetworkAuthorizer for AppPolicyAuthorizer {
                 .ok_or(DenialReason::Destination),
             NetworkOp::RawDevice => Err(DenialReason::NoCapability),
             NetworkOp::Send | NetworkOp::Receive | NetworkOp::Close | NetworkOp::Accept => Ok(()),
+            // Reading the counters reaches nothing off the machine; the kernel has already
+            // checked the caller holds `NET_STATS` (#378).
+            NetworkOp::Stats => Ok(()),
         }
     }
 

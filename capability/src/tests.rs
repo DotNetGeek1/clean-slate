@@ -64,8 +64,9 @@ fn rights_subset_and_names() {
     assert!(Rights::READ.is_subset_of(full));
     assert_eq!(full.attenuate(Rights::READ), Rights::READ);
     assert!(!Rights::WRITE.is_subset_of(Rights::READ));
-    assert_eq!(Rights::from_bits(1 << 27), None);
+    assert_eq!(Rights::from_bits(1 << 28), None);
     assert_eq!(Rights::from_bits(1 << 26), Some(Rights::DIRECTORY));
+    assert_eq!(Rights::from_bits(1 << 27), Some(Rights::NET_STATS));
     let mut buf = alloc::string::String::new();
     full.write_names(&mut buf).unwrap();
     assert_eq!(buf, "read|write|delegate");
@@ -93,6 +94,7 @@ fn valid_for_masks() {
             .union(Rights::NET_SEND)
             .union(Rights::NET_RECEIVE)
             .union(Rights::NET_RAW_DEVICE)
+            .union(Rights::NET_STATS)
             .union(Rights::DELEGATE)
             .union(Rights::REVOKE)
     );
@@ -338,7 +340,7 @@ fn network_rights_mask_and_authorization() {
     let handle = CapabilityHandle::new(0, 1);
     let valid = Rights::valid_for(ResourceClass::Network);
     assert!(valid.contains(Rights::NET_SEND));
-    assert_eq!(Rights::from_bits(valid.bits() | (1 << 27)), None);
+    assert_eq!(Rights::from_bits(valid.bits() | (1 << 28)), None);
     assert!(!Rights::NET_SEND.is_subset_of(Rights::valid_for(ResourceClass::BlockDevice)));
 
     let parent = live_record(holder, resource, valid, 1);

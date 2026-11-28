@@ -175,6 +175,12 @@ impl FakeKernel {
         self.net.restart(new_handle);
     }
 
+    /// #378: the client capability carries `NET_STATS`, and `STATS` answers `rows` with
+    /// `untracked` requests from apps the table had no room for.
+    pub fn net_stats(&mut self, rows: &[clean_slate_native_abi::net::NetAppStats], untracked: u32) {
+        self.net.stats(rows, untracked);
+    }
+
     /// Every byte the client sent to `addr`.
     pub fn net_sent_to(&self, addr: NetAddr) -> Vec<u8> {
         self.net.sent_to(addr)

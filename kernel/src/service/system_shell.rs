@@ -82,7 +82,8 @@ impl LinuxGrants {
                 | Grant::ConsoleService
                 | Grant::ConsoleFrontEnd
                 | Grant::LauncherClient
-                | Grant::NativeNetworkClient => {
+                | Grant::NativeNetworkClient
+                | Grant::NetworkStats => {
                     return Err("system shell: native grant on a Linux row");
                 }
             }
@@ -133,9 +134,10 @@ fn apply_linux_grants(
 
 #[cfg(clean_slate_linux_socket)]
 fn grant_network_client(pid: u64) -> Result<(), &'static str> {
-    crate::capability::network::grant_network_client_entitlement(clean_slate_capability::HolderId(
-        pid,
-    ))
+    crate::capability::network::grant_network_client_entitlement(
+        clean_slate_capability::HolderId(pid),
+        false,
+    )
     .map_err(|_| "system shell: network client entitlement grant failed")
 }
 
