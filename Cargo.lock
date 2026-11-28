@@ -251,6 +251,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clean-slate-nsh"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-native-abi",
+ "clean-slate-runtime",
+]
+
+[[package]]
 name = "clean-slate-playground"
 version = "0.0.1"
 dependencies = [

@@ -486,14 +486,15 @@ impl InstalledDisplay {
 #[cfg(clean_slate_system_init)]
 fn effective_desktop_mode(requested: u64, display: InstalledDisplay) -> u64 {
     use clean_slate_service_fixtures::init_bootstrap::{
-        desktop_tier, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_TERMINAL,
-        DESKTOP_MODE_VIRTIO_GPU,
+        desktop_tier, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_NATIVE_SHELL, DESKTOP_MODE_OFF,
+        DESKTOP_MODE_TERMINAL, DESKTOP_MODE_VIRTIO_GPU,
     };
 
     if desktop_tier(requested) == DESKTOP_MODE_OFF {
         return DESKTOP_MODE_OFF;
     }
-    let terminal = requested & DESKTOP_MODE_TERMINAL;
+    // The terminal rows, and which shell they run (#388), survive the tier fallback.
+    let terminal = requested & (DESKTOP_MODE_TERMINAL | DESKTOP_MODE_NATIVE_SHELL);
     match display {
         InstalledDisplay::None => {
             kernel_log_fmt(format_args!("{NO_DISPLAY_LINE}\n"));
@@ -1137,6 +1138,16 @@ mod tests {
         );
         assert_eq!(
             effective_desktop_mode(DESKTOP_MODE_TERMINAL, InstalledDisplay::VirtioGpu),
+            DESKTOP_MODE_OFF
+        );
+        use clean_slate_service_fixtures::init_bootstrap::DESKTOP_MODE_NATIVE_SHELL;
+        let native = q1 | DESKTOP_MODE_NATIVE_SHELL;
+        assert_eq!(
+            effective_desktop_mode(native, InstalledDisplay::Framebuffer),
+            DESKTOP_MODE_FRAMEBUFFER | DESKTOP_MODE_TERMINAL | DESKTOP_MODE_NATIVE_SHELL
+        );
+        assert_eq!(
+            effective_desktop_mode(native, InstalledDisplay::None),
             DESKTOP_MODE_OFF
         );
     }

@@ -487,6 +487,20 @@ pub(crate) enum BuiltinServiceImage {
 }
 
 impl BuiltinServiceImage {
+    /// The image for one launch: the row decides where its image is not fixed by its id (the
+    /// terminal's shell row runs the native shell when the row says so, #388); otherwise the id.
+    pub(crate) fn for_launch(service: ServiceId, context: LaunchContext) -> Self {
+        #[cfg(clean_slate_desktop)]
+        if let Some(role) = context
+            .spec
+            .and_then(super::desktop_image::DesktopRole::for_spec)
+        {
+            return Self::Desktop(role);
+        }
+        let _ = context;
+        Self::for_service(service)
+    }
+
     pub(crate) const fn for_service(service: ServiceId) -> Self {
         #[cfg(clean_slate_desktop)]
         if let Some(role) = super::desktop_image::DesktopRole::for_service(service) {
@@ -632,7 +646,7 @@ pub(crate) fn launch_builtin_service(
     service: ServiceId,
     context: LaunchContext,
 ) -> Result<SpawnedServiceInstance, &'static str> {
-    let image = BuiltinServiceImage::for_service(service);
+    let image = BuiltinServiceImage::for_launch(service, context);
     match image {
         #[cfg(not(any(
             feature = "m1-self-test",
@@ -1982,6 +1996,7 @@ mod desktop_images {
     ));
     include!(concat!(env!("OUT_DIR"), "/playground_userspace_entry.rs"));
     include!(concat!(env!("OUT_DIR"), "/terminal_userspace_entry.rs"));
+    include!(concat!(env!("OUT_DIR"), "/nsh_userspace_entry.rs"));
 
     pub(super) const COMPOSITOR_USERSPACE_IMAGE: &[u8] =
         include_bytes!(concat!(env!("OUT_DIR"), "/compositor_userspace.bin"));
@@ -1991,6 +2006,8 @@ mod desktop_images {
         include_bytes!(concat!(env!("OUT_DIR"), "/playground_userspace.bin"));
     pub(super) const TERMINAL_USERSPACE_IMAGE: &[u8] =
         include_bytes!(concat!(env!("OUT_DIR"), "/terminal_userspace.bin"));
+    pub(super) const NSH_USERSPACE_IMAGE: &[u8] =
+        include_bytes!(concat!(env!("OUT_DIR"), "/nsh_userspace.bin"));
 }
 
 /// One embedded #118 desktop image and its fixed user layout.
@@ -2047,6 +2064,15 @@ impl DesktopImage {
                 mapped_code_pages: TERMINAL_USERSPACE_MAPPED_CODE_PAGES,
                 stack_pages: role.stack_pages(),
             },
+            DesktopRole::NativeShell => Self {
+                bytes: NSH_USERSPACE_IMAGE,
+                segments: &NSH_USERSPACE_SEGMENTS,
+                image_base: NSH_USERSPACE_IMAGE_BASE,
+                relocated_base: NSH_USERSPACE_RELOCATED_BASE,
+                entry_offset: NSH_USERSPACE_ENTRY_OFFSET,
+                mapped_code_pages: NSH_USERSPACE_MAPPED_CODE_PAGES,
+                stack_pages: role.stack_pages(),
+            },
         }
     }
 
@@ -2067,6 +2093,7 @@ const _: () = {
         DesktopRole::Shell,
         DesktopRole::App,
         DesktopRole::Terminal,
+        DesktopRole::NativeShell,
     ];
     let mut index = 0;
     while index < roles.len() {

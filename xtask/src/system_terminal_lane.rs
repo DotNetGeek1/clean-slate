@@ -40,8 +40,8 @@ use crate::m10_desktop_visual::{
 use crate::qmp::image::Screenshot;
 use crate::qmp::{InputAction, MouseButton, QCode};
 use crate::system_boot::{
-    desktop_qemu_args_with, ensure_data_disk, field, number, start_shell_fixture_peer,
-    system_vm_config,
+    desktop_qemu_args_for, desktop_qemu_args_with, ensure_data_disk, field, number,
+    start_shell_fixture_peer, system_vm_config, DesktopProfile,
 };
 use crate::system_desktop::{whole_line, GIVE_UP_LINES, SETTLED_TERMINAL_DESKTOP};
 use crate::system_desktop_faults::Session;
@@ -769,6 +769,17 @@ impl Lane {
         shell_pid: u64,
         name: &str,
     ) -> Result<(), XtaskError> {
+        self.type_in_terminal_into(origin, shell_pid, name, ARTIFACTS)
+    }
+
+    /// [`Self::type_in_terminal`] with its screendumps under `artifacts`.
+    fn type_in_terminal_into(
+        &mut self,
+        origin: Point,
+        shell_pid: u64,
+        name: &str,
+        artifacts: &str,
+    ) -> Result<(), XtaskError> {
         let content = terminal_content(origin);
         // A window that maps while another has focus opens behind it (no focus stealing), so
         // the click goes to the terminal's right-hand part, clear of the playground's window.
@@ -776,7 +787,7 @@ impl Lane {
         self.button(true, "content")?;
         self.button(false, "content")?;
         self.pace(Duration::from_millis(500))?;
-        let before = self.screendump(&format!("before-{name}"))?;
+        let before = self.screendump_into(artifacts, &format!("before-{name}"))?;
         self.session.mark();
         let mark = self.session.offset();
         for (key, shifted) in TYPED {
@@ -789,7 +800,7 @@ impl Lane {
                 answered(segment, shell_pid)
             })?;
         self.pace(Duration::from_millis(500))?;
-        let after = self.screendump(&format!("after-{name}"))?;
+        let after = self.screendump_into(artifacts, &format!("after-{name}"))?;
         if !region_changed(&before, &after, content, &[cursor(self.pointer)]) {
             return self.session.fail(format!(
                 "{name}: the terminal's window did not change after the shell answered"
@@ -810,8 +821,8 @@ impl Lane {
         Ok(())
     }
 
-    fn screendump(&mut self, name: &str) -> Result<Screenshot, XtaskError> {
-        let dir = xtask_artifact_root().join(ARTIFACTS);
+    fn screendump_into(&mut self, artifacts: &str, name: &str) -> Result<Screenshot, XtaskError> {
+        let dir = xtask_artifact_root().join(artifacts);
         std::fs::create_dir_all(&dir)?;
         self.session
             .screendump(name, &dir.join(format!("{name}.ppm")))
@@ -990,6 +1001,231 @@ pub(crate) fn run() -> Result<(), XtaskError> {
     peer.shutdown();
     result?;
     println!("[STT ] test-system-terminal PASS");
+    Ok(())
+}
+
+// `cargo xtask test-system-native-shell` (#388): the same terminal on the same desktop, with the
+// native shell in the terminal's shell row (`opt/clean-slate/desktop=q1-native-shell`).
+//
+// 1. **Boot**: init says the profile, settles with its ten rows, the native shell holds a console
+//    session record and passed its launch audit, reports ready, and the terminal attaches.
+// 2. **Type**: `echo hello-$$` comes back from the native shell, which expanded `$$` to its pid.
+// 3. **Ctrl-D** on an empty line ends the shell's input: it logs `end-of-input`, the kernel
+//    reaps it, and init starts a new one under its restart policy while the terminal keeps its
+//    pid and window.
+// 4. **Type again**: the new shell answers `echo hello-$$` with its own pid.
+
+const NATIVE_ARTIFACTS: &str = "system-native-shell";
+const NATIVE_SERIAL_LOG: &str = "system-native-shell/serial.log";
+const NATIVE_PROFILE: &str = "[INIT] boot profile=desktop tier=Q1 terminal=on shell=native";
+const NATIVE_READY: &str = "[NSH ] ready";
+/// Ctrl-D: on an empty line the terminal ends the session's input.
+const CTRL_D: [InputAction; 4] = [
+    InputAction::Key {
+        qcode: QCode::CTRL,
+        down: true,
+    },
+    InputAction::Key {
+        qcode: QCode::D,
+        down: true,
+    },
+    InputAction::Key {
+        qcode: QCode::D,
+        down: false,
+    },
+    InputAction::Key {
+        qcode: QCode::CTRL,
+        down: false,
+    },
+];
+/// `[SVC ] launch` lines per row over the run: the shell twice, every other row once.
+const NATIVE_LAUNCHES: [(u32, usize); 7] = [
+    (COMPOSITOR, 1),
+    (DESKTOP_SHELL, 1),
+    (APP, 1),
+    (SERIAL_SHELL, 1),
+    (CONSOLE, 1),
+    (TERMINAL, 1),
+    (TERMINAL_SHELL, 2),
+];
+
+/// `pid` wrote `line` on its console line.
+fn logged(segment: &str, pid: u64, line: &str) -> Result<(), String> {
+    let want = format!("[IPC ] console pid={pid}: {line}");
+    if lines(segment).any(|l| l.starts_with(&want)) {
+        Ok(())
+    } else {
+        Err(format!("no {want:?}"))
+    }
+}
+
+/// The native shell's boot: the profile, ten rows settled, the shell's session record and
+/// clean launch audit, its ready line, and the terminal attached.
+fn check_native_boot(segment: &str) -> Result<Terminal, String> {
+    if !segment.contains(NATIVE_PROFILE) {
+        return Err(format!("no {NATIVE_PROFILE:?}"));
+    }
+    if !segment.contains("[KERN] boot option shell=native") {
+        return Err("the kernel did not read shell=native from the boot option".to_owned());
+    }
+    if !segment.contains(SETTLED_TERMINAL_DESKTOP) {
+        return Err(format!(
+            "init has not settled: no {SETTLED_TERMINAL_DESKTOP:?}"
+        ));
+    }
+    let terminal_pid = launched_pid(segment, TERMINAL)?;
+    let shell_pid = launched_pid(segment, TERMINAL_SHELL)?;
+    let console_pid = launched_pid(segment, CONSOLE)?;
+    check_session_grants(segment, shell_pid, terminal_pid, None)?;
+    check_attached(segment, terminal_pid)?;
+    for (service, pid) in [(TERMINAL, terminal_pid), (TERMINAL_SHELL, shell_pid)] {
+        check_audit(segment, service, pid)?;
+    }
+    logged(segment, shell_pid, &format!("[NSH ] start pid={shell_pid}"))?;
+    logged(segment, shell_pid, NATIVE_READY)?;
+    Ok(Terminal {
+        terminal_pid,
+        shell_pid,
+        console_pid,
+    })
+}
+
+/// Ctrl-D: the shell logged the end of its input and was reaped clean; a new shell with a
+/// session record of its own is ready; the terminal and every other row kept running.
+fn check_end_of_input(segment: &str, before: Terminal) -> Result<Terminal, String> {
+    logged(
+        segment,
+        before.shell_pid,
+        "[NSH ] exit reason=end-of-input status=0",
+    )?;
+    let reaped = format!(
+        "[SVC ] reaped service={TERMINAL_SHELL} pid={} residue=0",
+        before.shell_pid
+    );
+    if !segment.contains(&reaped) {
+        return Err(format!("no {reaped:?}"));
+    }
+    let shell_pid = check_relaunched(segment, TERMINAL_SHELL, before.shell_pid)?;
+    let prefix = format!("[CONS] authority granted pid={shell_pid} port={CONSOLE}:");
+    let (_, rest) = whole_line(segment, &prefix).ok_or_else(|| format!("no {prefix:?}"))?;
+    if field(&format!(" {rest}"), "rights") != Some("connect|session") {
+        return Err(format!("the new shell's console grant {rest:?}"));
+    }
+    logged(segment, shell_pid, NATIVE_READY)?;
+    if let Some(line) = lines(segment).find(|line| line.contains(TERMINAL_EXIT)) {
+        return Err(format!("the terminal exited with its shell: {line:?}"));
+    }
+    check_kept(
+        segment,
+        &[
+            COMPOSITOR,
+            DESKTOP_SHELL,
+            APP,
+            CONSOLE,
+            SERIAL_SHELL,
+            TERMINAL,
+        ],
+    )?;
+    Ok(Terminal {
+        shell_pid,
+        ..before
+    })
+}
+
+fn check_native_whole(transcript: &str) -> Result<(), String> {
+    for (service, want) in NATIVE_LAUNCHES {
+        let prefix = format!("[SVC ] launch service={service} ");
+        let count = lines(transcript)
+            .filter(|line| line.contains(&prefix))
+            .count();
+        if count != want {
+            return Err(format!(
+                "service {service} launched {count} times, expected {want}"
+            ));
+        }
+    }
+    if let Some(line) = lines(transcript).find(|line| line.contains(TERMINAL_EXIT)) {
+        return Err(format!("the terminal exited: {line:?}"));
+    }
+    Ok(())
+}
+
+fn native_config(disk: &std::path::Path, fixture_port: u16) -> VmLaunchConfig {
+    VmLaunchConfig {
+        machine_extra: Some("vmport=off"),
+        extra_args: desktop_qemu_args_for(false, DesktopProfile::NativeShell),
+        ..system_vm_config(disk.to_path_buf(), Some(fixture_port))
+    }
+}
+
+fn run_native_on(disk: &std::path::Path, fixture_port: u16) -> Result<(), XtaskError> {
+    let session = Session::start(
+        &[HOOKS_FEATURE],
+        native_config(disk, fixture_port),
+        true,
+        &FORBIDDEN,
+        LANE_TIMEOUT,
+        NATIVE_SERIAL_LOG,
+    )?;
+    let mut lane = Lane {
+        session,
+        pointer: START,
+    };
+    println!("[STT ] step: boot with the native shell");
+    let rows = lane
+        .session
+        .wait("boot", STEP_TIMEOUT * 3, &mut check_native_boot)?;
+    println!(
+        "\n[STT ] terminal pid={} attached; its native shell pid={}",
+        rows.terminal_pid, rows.shell_pid
+    );
+
+    println!("\n[STT ] step: focus and type `echo hello-$$`");
+    let origin = sized_window_origin(
+        QualityTier::Q1,
+        clean_slate_terminal::render::WINDOW_SIZE,
+        1,
+    );
+    lane.type_in_terminal_into(origin, rows.shell_pid, "typing", NATIVE_ARTIFACTS)?;
+
+    println!("\n[STT ] step: Ctrl-D on an empty line");
+    let before = rows;
+    lane.session.mark();
+    lane.session.input("ctrl-d", &CTRL_D)?;
+    let rows = lane
+        .session
+        .wait("end of input", STEP_TIMEOUT, &mut |segment| {
+            check_end_of_input(segment, before)
+        })?;
+    println!(
+        "\n[STT ] native shell pid={} ended at Ctrl-D; init started pid={}; terminal pid={} kept",
+        before.shell_pid, rows.shell_pid, rows.terminal_pid
+    );
+    lane.type_in_terminal_into(origin, rows.shell_pid, "after-ctrl-d", NATIVE_ARTIFACTS)?;
+
+    let transcript = lane.session.transcript();
+    if let Err(reason) = check_native_whole(&transcript) {
+        return lane.session.fail(format!("whole transcript: {reason}"));
+    }
+    lane.session.finish()?;
+    Ok(())
+}
+
+/// `cargo xtask test-system-native-shell`, on a fresh lane-owned disk.
+pub(crate) fn run_native_shell() -> Result<(), XtaskError> {
+    let disk = workspace_root()
+        .join("target")
+        .join(NATIVE_ARTIFACTS)
+        .join("data.img");
+    if disk.is_file() {
+        std::fs::remove_file(&disk)?;
+    }
+    ensure_data_disk(&disk)?;
+    let peer = start_shell_fixture_peer()?;
+    let result = run_native_on(&disk, peer.port());
+    peer.shutdown();
+    result?;
+    println!("[STT ] test-system-native-shell PASS");
     Ok(())
 }
 
@@ -1174,5 +1410,86 @@ mod tests {
             ),
             Point { x: 153, y: 97 }
         );
+    }
+
+    fn native_boot() -> String {
+        boot()
+            .replace(
+                "terminal=on\n",
+                "terminal=on shell=native\n[KERN] boot option shell=native: the terminal's shell is the native shell\n",
+            )
+            .replace(
+                "[SVC ] launch service=21505 pid=9 gen=1\n",
+                "[SVC ] launch service=21505 pid=9 gen=1\n\
+                 [IPC ] console pid=9: [NSH ] start pid=9\n\
+                 [IPC ] console pid=9: [NSH ] ready\n",
+            )
+    }
+
+    #[test]
+    fn a_native_shell_boot_needs_its_profile_and_ready_line() {
+        assert_eq!(
+            check_native_boot(&native_boot()),
+            Ok(Terminal {
+                terminal_pid: 10,
+                shell_pid: 9,
+                console_pid: 3,
+            })
+        );
+        assert!(check_native_boot(&boot())
+            .unwrap_err()
+            .contains("shell=native"));
+        let text = native_boot().replace("[NSH ] ready", "[NSH ] waiting");
+        assert!(check_native_boot(&text)
+            .unwrap_err()
+            .contains("[NSH ] ready"));
+        let text = native_boot().replace("rights=connect|session", "rights=connect");
+        assert!(check_native_boot(&text).unwrap_err().contains("pid=9"));
+    }
+
+    #[test]
+    fn ctrl_d_must_end_the_shell_and_start_a_new_one_beside_the_same_terminal() {
+        let before = Terminal {
+            terminal_pid: 10,
+            shell_pid: 9,
+            console_pid: 3,
+        };
+        let good = "[IPC ] console pid=9: [NSH ] exit reason=end-of-input status=0\n\
+                    [SVC ] reaped service=21505 pid=9 residue=0\n\
+                    [CONS] authority granted pid=14 port=22016:3 rights=connect|session\n\
+                    [SVC ] authority service=21505 pid=14 counts matches-manifest=1\n\
+                    [SVC ] launch service=21505 pid=14 gen=2\n\
+                    [IPC ] console pid=14: [NSH ] ready\n";
+        assert_eq!(
+            check_end_of_input(good, before),
+            Ok(Terminal {
+                shell_pid: 14,
+                ..before
+            })
+        );
+        let exit = good.replace("end-of-input", "console-gone");
+        assert!(check_end_of_input(&exit, before).is_err());
+        let terminal_went = format!("{good}[IPC ] console pid=10: [TERM] exit reason=closed\n");
+        assert!(check_end_of_input(&terminal_went, before)
+            .unwrap_err()
+            .contains("terminal exited"));
+        let relaunched = format!("{good}[SVC ] launch service=21251 pid=15 gen=2\n");
+        assert!(check_end_of_input(&relaunched, before).is_err());
+        assert!(
+            check_end_of_input(&good.replace("pid=14: [NSH ] ready", "pid=14: x"), before).is_err()
+        );
+    }
+
+    #[test]
+    fn ctrl_d_is_one_ctrl_chord() {
+        assert_eq!(CTRL_D.len(), 4);
+        assert_eq!(
+            CTRL_D[0],
+            InputAction::Key {
+                qcode: QCode::CTRL,
+                down: true
+            }
+        );
+        assert!(NATIVE_LAUNCHES.contains(&(TERMINAL_SHELL, 2)));
     }
 }

@@ -6,7 +6,8 @@
 //! own scenario manifest in place of [`SYSTEM_MANIFEST`]; it never adds launch code of its own.
 
 use crate::init_bootstrap::{
-    desktop_terminal, desktop_tier, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_VIRTIO_GPU,
+    desktop_native_shell, desktop_terminal, desktop_tier, DESKTOP_MODE_FRAMEBUFFER,
+    DESKTOP_MODE_VIRTIO_GPU,
 };
 use crate::{
     AUDIT_SERVICE_ID, COMPOSITOR_SERVICE_ID, CONSOLE_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID,
@@ -56,6 +57,9 @@ pub enum ServiceImage {
     Terminal,
     /// `clean-slate-net-probe-userspace`, the native network probe (#353).
     NetProbe,
+    /// `clean-slate-nsh-userspace`, the native shell (#388). It reads a `DesktopLaunchPage`
+    /// for its pid and console line, like the desktop images, but draws nothing.
+    NativeShell,
 }
 
 impl ServiceImage {
@@ -75,7 +79,8 @@ impl ServiceImage {
             | Self::Audit
             | Self::Console
             | Self::Terminal
-            | Self::NetProbe => false,
+            | Self::NetProbe
+            | Self::NativeShell => false,
         }
     }
 
@@ -275,6 +280,10 @@ impl ServiceSpec {
             ServiceImage::Console => "console",
             ServiceImage::Terminal => "terminal",
             ServiceImage::NetProbe => "net-probe",
+            ServiceImage::NativeShell if self.id.0 == TERMINAL_SHELL_SERVICE_ID.0 => {
+                "terminal-shell"
+            }
+            ServiceImage::NativeShell => "nsh",
         }
     }
 
@@ -452,6 +461,9 @@ pub const PLAYGROUND_MEMORY_PAGES: u64 = 32;
 /// The terminal's rows: 1025 rows of 960 bytes at full scrollback (~1 MiB), plus the old
 /// allocation while the last growth copies (~0.75 MiB), plus a chunk, with room to spare.
 pub const TERMINAL_MEMORY_PAGES: u64 = 768;
+/// The native shell (#388): its variables, history (100 lines) and one line's words fit in a
+/// chunk; two leave room for a second.
+pub const NATIVE_SHELL_MEMORY_PAGES: u64 = 32;
 
 /// The panel and background. Ready is both surfaces committed. It lists and starts the
 /// launchable rows through init's launcher port (#237).
@@ -515,6 +527,23 @@ pub const TERMINAL_SHELL_SPEC: ServiceSpec = ServiceSpec {
     start: Start::AtBoot,
 };
 
+/// The terminal's shell as the native shell (#388), for `q0-native-shell` and
+/// `q1-native-shell`: the same row id, restart policy and console session as
+/// [`TERMINAL_SHELL_SPEC`], on the native runtime with a heap. It holds no Linux grants: no
+/// `/tmp`, no sockets, no serial input; its commands so far are builtins.
+pub const NATIVE_TERMINAL_SHELL_SPEC: ServiceSpec = ServiceSpec {
+    id: TERMINAL_SHELL_SERVICE_ID,
+    image: ServiceImage::NativeShell,
+    mode: 0,
+    grants: &[Grant::Console, Grant::ConsoleSession],
+    restart: SHELL_RESTART,
+    depends_on: &[STORAGE_SERVICE_ID, CONSOLE_SERVICE_ID],
+    slot_allowance: None,
+    memory_pages: NATIVE_SHELL_MEMORY_PAGES,
+    launch_name: None,
+    start: Start::AtBoot,
+};
+
 /// The terminal window (#311), the console session's front end. It starts after the
 /// playground's window is mapped, so the cascade puts it second and the playground keeps the
 /// first window's focus. Closing it exits it, and the restart opens a new one on a new shell.
@@ -572,14 +601,35 @@ pub const SYSTEM_TERMINAL_DESKTOP_MANIFEST: &[ServiceSpec] = &[
 
 const _: () = assert!(validate_manifest(SYSTEM_TERMINAL_DESKTOP_MANIFEST).is_ok());
 
+/// The native-shell desktop profile (`q0-native-shell`, `q1-native-shell`, #388): the default
+/// desktop's rows with the native shell in the terminal's shell row. BusyBox stays the default
+/// until #392.
+pub const SYSTEM_NATIVE_SHELL_DESKTOP_MANIFEST: &[ServiceSpec] = &[
+    SYSTEM_MANIFEST[0],
+    SYSTEM_MANIFEST[1],
+    SYSTEM_MANIFEST[2],
+    SYSTEM_MANIFEST[3],
+    SYSTEM_MANIFEST[4],
+    COMPOSITOR_SERVICE_SPEC,
+    DESKTOP_SHELL_SERVICE_SPEC,
+    PLAYGROUND_SERVICE_SPEC,
+    NATIVE_TERMINAL_SHELL_SPEC,
+    TERMINAL_SERVICE_SPEC,
+];
+
+const _: () = assert!(validate_manifest(SYSTEM_NATIVE_SHELL_DESKTOP_MANIFEST).is_ok());
+
 /// The manifest for an `InitBootstrap.desktop_mode` word: [`SYSTEM_DESKTOP_MANIFEST`] for
-/// `q0-bare` or `q1-bare`, [`SYSTEM_TERMINAL_DESKTOP_MANIFEST`] for the default desktop, else
+/// `q0-bare` or `q1-bare`, [`SYSTEM_NATIVE_SHELL_DESKTOP_MANIFEST`] for `q0-native-shell` or
+/// `q1-native-shell`, [`SYSTEM_TERMINAL_DESKTOP_MANIFEST`] for the default desktop, else
 /// [`SYSTEM_MANIFEST`] (off, or a word init does not understand). The kernel and init both
 /// select with this, so they cannot disagree about the rows.
 pub const fn manifest_for(desktop_mode: u64) -> &'static [ServiceSpec] {
     let tier = desktop_tier(desktop_mode);
     if tier != DESKTOP_MODE_FRAMEBUFFER && tier != DESKTOP_MODE_VIRTIO_GPU {
         SYSTEM_MANIFEST
+    } else if desktop_native_shell(desktop_mode) {
+        SYSTEM_NATIVE_SHELL_DESKTOP_MANIFEST
     } else if desktop_terminal(desktop_mode) {
         SYSTEM_TERMINAL_DESKTOP_MANIFEST
     } else {
@@ -852,12 +902,17 @@ const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
         Grant::Console => {
             matches!(
                 image,
-                ServiceImage::LinuxShell | ServiceImage::Audit | ServiceImage::Console
+                ServiceImage::LinuxShell
+                    | ServiceImage::Audit
+                    | ServiceImage::Console
+                    | ServiceImage::NativeShell
             ) || image.is_desktop()
         }
         Grant::ConsoleService => matches!(image, ServiceImage::Console),
         Grant::ConsoleClient => image.is_desktop() || matches!(image, ServiceImage::LinuxShell),
-        Grant::ConsoleSession => matches!(image, ServiceImage::LinuxShell),
+        Grant::ConsoleSession => {
+            matches!(image, ServiceImage::LinuxShell | ServiceImage::NativeShell)
+        }
         Grant::ConsoleFrontEnd => matches!(image, ServiceImage::Terminal),
         Grant::AuditReader | Grant::AuditStore => matches!(image, ServiceImage::Audit),
         Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
@@ -1446,6 +1501,60 @@ mod tests {
         assert_eq!(
             manifest_for(DESKTOP_MODE_OFF | DESKTOP_MODE_TERMINAL),
             SYSTEM_MANIFEST
+        );
+    }
+
+    #[test]
+    fn the_native_shell_profile_swaps_only_the_terminal_shell_row() {
+        use crate::init_bootstrap::{DESKTOP_MODE_NATIVE_SHELL, DESKTOP_MODE_TERMINAL};
+        for tier in [DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_VIRTIO_GPU] {
+            assert_eq!(
+                manifest_for(tier | DESKTOP_MODE_TERMINAL | DESKTOP_MODE_NATIVE_SHELL),
+                SYSTEM_NATIVE_SHELL_DESKTOP_MANIFEST
+            );
+            // The native-shell bit means nothing without the terminal rows.
+            assert_eq!(
+                manifest_for(tier | DESKTOP_MODE_NATIVE_SHELL),
+                SYSTEM_DESKTOP_MANIFEST
+            );
+            assert_eq!(
+                manifest_for(tier | DESKTOP_MODE_TERMINAL),
+                SYSTEM_TERMINAL_DESKTOP_MANIFEST
+            );
+        }
+        assert_eq!(
+            SYSTEM_NATIVE_SHELL_DESKTOP_MANIFEST.len(),
+            SYSTEM_TERMINAL_DESKTOP_MANIFEST.len()
+        );
+        for (native, busybox) in SYSTEM_NATIVE_SHELL_DESKTOP_MANIFEST
+            .iter()
+            .zip(SYSTEM_TERMINAL_DESKTOP_MANIFEST)
+        {
+            if native.id == TERMINAL_SHELL_SERVICE_ID {
+                assert_eq!(native, &NATIVE_TERMINAL_SHELL_SPEC);
+            } else {
+                assert_eq!(native, busybox);
+            }
+        }
+        let shell = NATIVE_TERMINAL_SHELL_SPEC;
+        assert_eq!(shell.image, ServiceImage::NativeShell);
+        assert!(!shell.image.is_linux());
+        assert!(!shell.image.is_desktop());
+        assert_eq!(shell.grants, [Grant::Console, Grant::ConsoleSession]);
+        assert_eq!(shell.restart, TERMINAL_SHELL_SPEC.restart);
+        assert_eq!(shell.name(), "terminal-shell");
+        assert!(shell.memory_pages >= 16);
+        // The Linux grants stay on Linux rows.
+        for grant in [Grant::ConsoleInput, Grant::TmpObjects, Grant::NetworkClient] {
+            assert!(!grant_supported_by_image(grant, ServiceImage::NativeShell));
+        }
+        assert!(!grant_supported_by_image(
+            Grant::ConsoleFrontEnd,
+            ServiceImage::NativeShell
+        ));
+        assert_eq!(
+            validate_manifest(SYSTEM_NATIVE_SHELL_DESKTOP_MANIFEST),
+            Ok(())
         );
     }
 

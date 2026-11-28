@@ -1,0 +1,30 @@
+[package]
+name = "clean-slate-nsh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Native command shell (#388): reads command lines from its console session and runs builtins"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "clean-slate-nsh-userspace"
+path = "src/bin/nsh.rs"
+required-features = ["userspace"]
+
+[features]
+default = []
+userspace = []
+
+[dependencies]
+clean-slate-native-abi = { path = "../native-abi" }
+clean-slate-runtime = { path = "../runtime" }
+
+[dev-dependencies]
+clean-slate-runtime = { path = "../runtime", features = ["fake"] }
+
+[lints]
+workspace = true

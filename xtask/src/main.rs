@@ -1466,6 +1466,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestSystem => system_lane::run(),
         ParsedCommand::TestSystemDesktop => system_desktop_lane::run(),
         ParsedCommand::TestSystemTerminal => system_terminal_lane::run(),
+        ParsedCommand::TestSystemNativeShell => system_terminal_lane::run_native_shell(),
         ParsedCommand::TestSystemTablet => system_tablet_lane::run(),
         ParsedCommand::TestSystemDisplay => system_display_lane::run(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
@@ -3021,9 +3022,10 @@ fn run_m10_compositor_acceptance() -> Result<(), XtaskError> {
 /// (#356), as `kernel/build.rs` `userspace_embed_recipe` and the workflow build them.
 fn native_build_std(package: &str) -> &'static str {
     match package {
-        "clean-slate-desktop-shell" | "clean-slate-playground" | "clean-slate-terminal" => {
-            "build-std=core,alloc,compiler_builtins"
-        }
+        "clean-slate-desktop-shell"
+        | "clean-slate-playground"
+        | "clean-slate-terminal"
+        | "clean-slate-nsh" => "build-std=core,alloc,compiler_builtins",
         _ => "build-std=core,compiler_builtins",
     }
 }
@@ -3049,7 +3051,7 @@ fn build_native_userspace_bin(package: &str, bin: &str) -> Result<(), XtaskError
 }
 
 /// The desktop images the system image embeds for its desktop rows.
-const DESKTOP_USERSPACE_BINS: [(&str, &str); 4] = [
+const DESKTOP_USERSPACE_BINS: [(&str, &str); 5] = [
     ("clean-slate-compositor", "clean-slate-compositor-userspace"),
     (
         "clean-slate-desktop-shell",
@@ -3057,6 +3059,7 @@ const DESKTOP_USERSPACE_BINS: [(&str, &str); 4] = [
     ),
     ("clean-slate-playground", "clean-slate-playground-userspace"),
     ("clean-slate-terminal", "clean-slate-terminal-userspace"),
+    ("clean-slate-nsh", "clean-slate-nsh-userspace"),
 ];
 
 fn build_desktop_userspace() -> Result<(), XtaskError> {
@@ -5725,7 +5728,7 @@ fn drain_output_events(receiver: &mpsc::Receiver<OutputEvent>, output: &mut Stri
 
 fn print_help() {
     println!("Usage: cargo xtask <command>");
-    println!("  run [--net] [--desktop] [--framebuffer] [--bare]  Build the default image (init starts storage, then network) and boot it in QEMU with the persistent data disk target/system-data.img (created if missing); --net also starts the network fixture peer; --desktop passes fw_cfg opt/clean-slate/desktop=q1 (the desktop with the terminal window and its shell), a VirtIO-GPU, a virtio keyboard and tablet (#313) and a window (QEMU_DISPLAY, default gtk), --desktop --framebuffer passes q0 with -vga std, and --bare leaves the terminal out (q1-bare or q0-bare)");
+    println!("  run [--net] [--desktop] [--framebuffer] [--bare | --native-shell]  Build the default image (init starts storage, then network) and boot it in QEMU with the persistent data disk target/system-data.img (created if missing); --net also starts the network fixture peer; --desktop passes fw_cfg opt/clean-slate/desktop=q1 (the desktop with the terminal window and its shell), a VirtIO-GPU, a virtio keyboard and tablet (#313) and a window (QEMU_DISPLAY, default gtk), --desktop --framebuffer passes q0 with -vga std, --bare leaves the terminal out (q1-bare or q0-bare), and --native-shell runs the native shell in the terminal instead of BusyBox (q1-native-shell or q0-native-shell, #388)");
     println!("  test-m1      Build the M1 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m2      Build the M2 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m3      M3 milestone gate: run every M3 acceptance boot in order (test-m3-address-space and test-m3-lifecycle as one merged boot), print [M3  ] PASS only if all pass");
@@ -5958,6 +5961,7 @@ enum ParsedCommand {
     TestSystem,
     TestSystemDesktop,
     TestSystemTerminal,
+    TestSystemNativeShell,
     TestSystemTablet,
     TestSystemDisplay,
     TestM10Desktop,
@@ -6167,6 +6171,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-system-terminal" || cmd == "system-terminal" => {
             ParsedCommand::TestSystemTerminal
+        }
+        Some(cmd) if cmd == "test-system-native-shell" || cmd == "system-native-shell" => {
+            ParsedCommand::TestSystemNativeShell
         }
         Some(cmd) if cmd == "test-system-tablet" || cmd == "system-tablet" => {
             ParsedCommand::TestSystemTablet
@@ -6922,6 +6929,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestSystemTerminal
+            );
+        }
+        for alias in ["test-system-native-shell", "system-native-shell"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestSystemNativeShell
             );
         }
         for alias in ["test-system-tablet", "system-tablet"] {
