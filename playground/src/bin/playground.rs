@@ -16,7 +16,7 @@ extern crate alloc;
 
 use core::alloc::Layout;
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use clean_slate_graphics::abi::display::{DISPLAY_ABI_VERSION, DISPLAY_SUBOP_FIND_HANDLE};
 use clean_slate_graphics::abi::input::{INPUT_ABI_VERSION, INPUT_SUBOP_FIND_HANDLE};
@@ -25,7 +25,7 @@ use clean_slate_native_abi::is_status;
 use clean_slate_playground::host::{allocate_buffers, Client};
 use clean_slate_playground::launch::{PlaygroundBootstrap, BOOTSTRAP_ADDRESS};
 use clean_slate_playground::{diag, ExitReason, Outcome, Session};
-use clean_slate_runtime::console::{Console, ConsoleStream};
+use clean_slate_runtime::console::{Console, LiveConsoleStream, Tended};
 use clean_slate_runtime::heap::{exit_out_of_memory, RuntimeHeap};
 use clean_slate_runtime::port::{Deadline, Wait};
 use clean_slate_runtime::{process, Error, Kernel, Syscalls};
@@ -60,18 +60,33 @@ fn console(boot: &PlaygroundBootstrap, line: &ConsoleLine) {
     }
 }
 
-/// Says hello through the console service (#310), the first native client of its streams. The
-/// service prints it as `[CON ] pid=N: playground: console stream open`. The app runs on
-/// whether or not the service answers.
+/// The playground's console stream (#310), the first native client of the service's streams.
+/// The service prints its lines as `[CON ] pid=N: playground: ...`.
+static mut CONSOLE_STREAM: LiveConsoleStream = LiveConsoleStream::new();
+
+/// Opens the stream and says hello. The app runs on whether or not the service answers.
 fn greet_console() {
-    if let Ok(stream) = ConsoleStream::connect(&mut Kernel) {
-        let _ = stream.write_str(
-            &mut Kernel,
-            "playground: console stream open\n",
-            Deadline::NEVER,
-        );
+    tend_console();
+}
+
+/// After a console service restart the stream is gone; this connects again once the kernel
+/// has moved the playground's record to the new port, and says so (#368). It runs after each
+/// burst of events, so it never wakes the app on its own.
+fn tend_console() {
+    // SAFETY: single-threaded process; this is the only reference to `CONSOLE_STREAM`.
+    let live = unsafe { &mut *addr_of_mut!(CONSOLE_STREAM) };
+    if live.tend(&mut Kernel) == Tended::Connected {
+        let line = if OPENED.swap(true, Ordering::Relaxed) {
+            "playground: console stream reopened\n"
+        } else {
+            "playground: console stream open\n"
+        };
+        live.write_str(&mut Kernel, line, Deadline::NEVER);
     }
 }
+
+/// Set at the first connect: every later one is on a restarted service.
+static OPENED: AtomicBool = AtomicBool::new(false);
 
 /// Asks for the scanout and raw-input handles a compositor would use; an app must get neither.
 fn probe_authority() -> ConsoleLine {
@@ -126,6 +141,7 @@ fn run(boot: &PlaygroundBootstrap, session: &mut Session, tier: QualityTier) {
                     break;
                 }
             }
+            tend_console();
             if !announced {
                 announced = true;
                 console(boot, &diag::ready_line(tier));
